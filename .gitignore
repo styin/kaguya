@@ -1,0 +1,31 @@
+# Environment Variables
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gateway (Rust)
+/gateway/target/
+**/*.rs.bk
+
+# Talker (Python)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+/talker/.venv/
+
+# Reasoner & Tools (TypeScript)
+node_modules/
+dist/
+/reasoner/node_modules/
+/tools/node_modules/
+
+# Models
+/models/*
+!/models/.gitkeep
+
+# Local data
+/config/MEMORY.md
