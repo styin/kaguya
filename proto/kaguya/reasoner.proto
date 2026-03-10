@@ -1,0 +1,29 @@
+syntax = "proto3";
+package kaguya.reasoner;
+
+service ReasonerService {
+  rpc ExecuteTask(TaskRequest)  returns (stream ReasonerEvent);
+  rpc CancelTask(CancelRequest) returns (CancelAck);
+}
+
+message TaskRequest {
+  string task_id      = 1;
+  string description  = 2;
+  string context_json = 3;
+}
+
+message ReasonerEvent {
+  string task_id = 1;
+  oneof event {
+    StepUpdate   step     = 2;
+    TaskComplete complete = 3;
+    TaskError    error    = 4;
+  }
+}
+
+message StepUpdate   { string description = 1; float progress = 2; }
+message TaskComplete { string result = 1; }
+message TaskError    { string message = 1; bool retriable = 2; }
+
+message CancelRequest { string task_id = 1; }
+message CancelAck    { bool ok = 1; }

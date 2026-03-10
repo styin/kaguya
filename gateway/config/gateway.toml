@@ -1,0 +1,21 @@
+[server]
+ws_addr = "127.0.0.1:8080"
+
+[services]
+listener_addr = "http://127.0.0.1:50052"
+talker_addr   = "http://127.0.0.1:50053"
+reasoner_addr = "http://127.0.0.1:50054"
+
+[files]
+soul_path      = "config/SOUL.md"
+identity_path  = "config/IDENTITY.md"
+memory_path    = "config/MEMORY.md"
+workspace_root = "."
+
+[history]
+max_recent_turns = 50
+
+[silence]
+soft_prompt_secs   = 3
+follow_up_secs     = 8
+context_shift_secs = 30
