@@ -6,11 +6,22 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 
 ---
 
+## REF-000 — The Dual Path Architecture of Project Kaguya
+
+- **Mind-Paced Speaking (MPS):** Dual-brain architecture for concurrent reasoning and speech generation. arXiv, October 2025.
+- **Interactive ReAct (Bojie Li):** Continuous thinking mechanism — think while listening, speak while thinking, filler speech for latency reduction. December 2025.
+- **LTS-VoiceAgent:** Listen-Think-Speak framework with Dynamic Semantic Trigger and Dual-Role Stream Orchestrator. arXiv, January 2026.
+- **PredGen:** Predictive Generation — speculative decoding at input time for voice pipelines. arXiv, June 2025.
+- **StreamingThinker:** Streaming thinking paradigm — LLMs that reason while receiving input. arXiv, October 2025.
+- **Qwen2.5-Omni:** Thinker-Talker architecture for multimodal perception and streaming speech generation. Alibaba, 2025.
+- **Neuro-sama (Vedal987):** Event-driven AI VTuber architecture with multi-channel input aggregation, module-based prompt injection, silence detection, and always-listening behavior. Production reference for persistent AI presence.
+- **Project Airi (moeru-ai/airi):** Open-source Neuro-sama recreation (17.5K stars). Reference for soul container post-processing pattern (deterministic persona enforcement between LLM and TTS), unspeech provider abstraction (unified TTS/STT API across vendors), and Web-first multiplatform deployment. TypeScript monorepo with Rust native acceleration. Does not implement delegation, event-driven conductors, or proactive speech.
+
 ## REF-001 — Silence Timer Thresholds (Gateway, M1.6)
 
 **Decision:** Three semantic post-response silence tiers with defaults `SILENCE_SHORT=3s`, `SILENCE_MEDIUM=8s`, `SILENCE_LONG=30s`.
 
-**Scope clarification:** These timers fire *after* the Talker finishes speaking, governing when Kaguya proactively re-engages. They are distinct from the Listener's end-of-turn detection thresholds (see REF-004), which operate during speech at ~300–800ms. Post-response timers operate on a longer human-engagement timescale.
+**Scope clarification:** These timers fire _after_ the Talker finishes speaking, governing when Kaguya proactively re-engages. They are distinct from the Listener's end-of-turn detection thresholds (see REF-004), which operate during speech at ~300–800ms. Post-response timers operate on a longer human-engagement timescale.
 
 **Rationale:**
 
@@ -22,11 +33,13 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 - **30s (SILENCE_LONG / "user likely AFK"):** User has clearly disengaged. Context-shift acknowledgement or go quiet. Grounded in smart speaker disengagement timing.
 
 **Key academic sources:**
-- Jefferson, G. (1989). "Preliminary Notes on a Possible Metric Which Provides for a 'Standard Maximum' Silence of Approximately One Second in Conversation." In *Conversation: An Interdisciplinary Perspective*, pp. 166–196. [3-second marked silence threshold]
-- Stivers, T. et al. (2009). "Universals and cultural variation in turn-taking in conversation." *PNAS* 106(26): 10587–10592. [Median inter-turn gap ~200ms; 700ms+ signals floor transfer]
-- Levinson, S.C. & Torreira, F. (2015). "Timing in turn-taking and its implications for processing models of language." *Frontiers in Psychology* 6:731. [700ms floor-transfer threshold]
+
+- Jefferson, G. (1989). "Preliminary Notes on a Possible Metric Which Provides for a 'Standard Maximum' Silence of Approximately One Second in Conversation." In _Conversation: An Interdisciplinary Perspective_, pp. 166–196. [3-second marked silence threshold]
+- Stivers, T. et al. (2009). "Universals and cultural variation in turn-taking in conversation." _PNAS_ 106(26): 10587–10592. [Median inter-turn gap ~200ms; 700ms+ signals floor transfer]
+- Levinson, S.C. & Torreira, F. (2015). "Timing in turn-taking and its implications for processing models of language." _Frontiers in Psychology_ 6:731. [700ms floor-transfer threshold]
 
 **Industry sources:**
+
 - Stanford HAI: "Is It My Turn Yet? Teaching a Voice Assistant When to Speak" — https://hai.stanford.edu/news/it-my-turn-yet-teaching-voice-assistant-when-speak
 - AssemblyAI: "How intelligent turn detection (endpointing) solves the biggest challenge in voice agent development" — https://www.assemblyai.com/blog/turn-detection-endpointing-voice-agent
 - Twilio: "Guide to Core Latency in AI Voice Agents" — https://www.twilio.com/en-us/blog/developers/best-practices/guide-core-latency-ai-voice-agents
@@ -55,6 +68,7 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 **Implementation note:** Use `opuslib.Decoder(fs=16000, channels=1)` to decode directly to 16kHz mono PCM (libopus handles internal resampling). `frame_size` for `decode()` is 320 samples for a 20ms frame at 16kHz output (16000 × 0.02 = 320). `pyogg` is an alternative with the same libopus backend.
 
 **Sources:**
+
 - `spec-agent-v0.1.0.md §2.2` (Listener Responsibilities — Opus decode listed explicitly)
 - `spec-gateway-v0.1.0.md §1` (Gateway does not decode audio)
 - KoljaB/RealtimeSTT `feed_audio` PCM format: https://github.com/KoljaB/RealtimeSTT/issues/22
@@ -72,7 +86,7 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 
 2. **Google's canonical pattern:** Every gRPC Python example in `grpc/grpc/examples/python/` uses separate `*_server.py` and `*_client.py` files — `helloworld`, `route_guide`, `multiplex`, `auth`, `compression`. The grpc.io basics tutorial explicitly names these `route_guide_server.py` and `route_guide_client.py`. This is a hard convention, not a preference.
 
-3. **Independent testability:** `server.py` (TalkerServiceServicer) can be tested with mock `brain/` and `voice/speaker.py` without instantiating any gRPC client. `voice/listener.py` can be tested with a mock Gateway stub. A combined file requires both roles to be active for either to be tested.
+3. **Independent testability:** `server.py` (TalkerServiceServicer) can be tested with mock `inference/` and `voice/speaker.py` without instantiating any gRPC client. `voice/listener.py` can be tested with a mock Gateway stub. A combined file requires both roles to be active for either to be tested.
 
 4. **Domain-first naming is superior to role-first naming:** `voice/listener.py` is named for what it does (listen, stream audio events to Gateway) rather than `grpc_client.py`. A developer reading `voice/` understands the module's purpose without knowing its gRPC role. This is the pattern used by **LiveKit Agents Python SDK**: `_agent.py` (server-side servicer equivalent) and `_worker.py` (outbound client to LiveKit server) are separate modules named by domain role, not by "server" vs. "client". The gRPC stub is an implementation detail internal to `_worker.py`, not surfaced as a top-level `client.py`.
 
@@ -80,13 +94,14 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 
 **File boundary table:**
 
-| File | Domain role | gRPC role |
-|---|---|---|
-| `talker/src/server.py` | Wires brain ↔ voice ↔ Gateway per-turn | SERVER — receives `ProcessPrompt`, `Prepare`, `PrefillCache`, `UpdatePersona` from Gateway |
-| `talker/src/voice/listener.py` | Captures speech, detects turns | CLIENT — dials Gateway, streams `ListenerEvent` messages |
-| `talker/src/main.py` | Process entrypoint | Orchestrates both as `asyncio` tasks |
+| File                           | Domain role                            | gRPC role                                                                                  |
+| ------------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `talker/server.py`         | Wires inference ↔ voice ↔ Gateway per-turn | SERVER — receives `ProcessPrompt`, `Prepare`, `PrefillCache`, `UpdatePersona` from Gateway |
+| `talker/voice/listener.py` | Captures speech, detects turns         | CLIENT — dials Gateway, streams `ListenerEvent` messages                                   |
+| `talker/main.py`           | Process entrypoint                     | Orchestrates both as `asyncio` tasks                                                       |
 
 **Sources:**
+
 - grpc.io Python basics tutorial: https://grpc.io/docs/languages/python/basics/
 - Real Python gRPC guide: https://realpython.com/python-microservices-grpc/
 - LiveKit Agents Python SDK — `_agent.py` / `_worker.py` split: https://github.com/livekit/agents
@@ -98,7 +113,7 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 
 **Decision:** `SILENCE_THRESHOLD_MS=800ms` (emit `final_transcript` regardless of syntax), `SYNTAX_SILENCE_THRESHOLD_MS=300ms` (begin syntax check at 300ms; emit early if syntactically complete before 800ms is reached).
 
-**Scope clarification:** These govern the Listener's end-of-turn detection *during* speech, determining when to emit `final_transcript`. Distinct from REF-001 (Gateway post-response timers, which operate at 3–30s).
+**Scope clarification:** These govern the Listener's end-of-turn detection _during_ speech, determining when to emit `final_transcript`. Distinct from REF-001 (Gateway post-response timers, which operate at 3–30s).
 
 ### What each threshold actually does
 
@@ -117,11 +132,12 @@ silence ≥ 800ms          → emit unconditionally regardless of syntax
 ### Known failure mode: fragmented transcripts at >800ms
 
 If a slow speaker or thinker pauses >800ms mid-sentence, the unconditional rule emits a `final_transcript` for the partial utterance. The turn lifecycle then proceeds:
+
 1. Partial `final_transcript` → Gateway assembles context → Talker begins generating a response.
 2. User resumes speaking → `vad_speech_start` → PREPARE → Talker is interrupted (only spoken portion appended to history).
 3. Second fragment → new `final_transcript` → fresh `ProcessPrompt` with broken context.
 
-The PREPARE mechanism prevents history corruption (only spoken text is appended) but cannot prevent the response to the partial utterance from being wrong or confusing. The worst case is if the Talker *finishes* responding before the user resumes: history then contains a full response to an incomplete thought, and the continuation arrives as a new, context-broken turn.
+The PREPARE mechanism prevents history corruption (only spoken text is appended) but cannot prevent the response to the partial utterance from being wrong or confusing. The worst case is if the Talker _finishes_ responding before the user resumes: history then contains a full response to an incomplete thought, and the continuation arrives as a new, context-broken turn.
 
 This is a known limitation of Phase 1's rule-based approach. It is the primary motivation for the Phase 2 learned turn detection model.
 
@@ -136,12 +152,14 @@ Production systems do not primarily use silence duration as the turn-end signal 
 In short: Alexa and Dialogflow CX both achieve low fragmentation rates because their primary signal is acoustic/model-based, not temporal. Phase 1's 800ms unconditional rule will produce occasional fragmentation for slow or deliberate speakers. This is accepted as a Phase 1 limitation.
 
 **Academic sources:**
-- Stivers, T. et al. (2009). *PNAS* 106(26): 10587–10592. [~700ms as floor-transfer threshold]
-- Levinson, S.C. & Torreira, F. (2015). *Frontiers in Psychology* 6:731. [Sub-200ms responses; silence semantics]
-- Goldman-Eisler, F. (1968). *Psycholinguistics: Experiments in Spontaneous Speech*. Academic Press. [Within-utterance pause duration 150–400ms]
-- Grosjean, F. & Deschamps, A. (1975). "Analyse contrastive des variables temporelles de l'anglais et du français." *Phonetica* 31: 144–184. [Clause-boundary pause duration corroboration]
+
+- Stivers, T. et al. (2009). _PNAS_ 106(26): 10587–10592. [~700ms as floor-transfer threshold]
+- Levinson, S.C. & Torreira, F. (2015). _Frontiers in Psychology_ 6:731. [Sub-200ms responses; silence semantics]
+- Goldman-Eisler, F. (1968). _Psycholinguistics: Experiments in Spontaneous Speech_. Academic Press. [Within-utterance pause duration 150–400ms]
+- Grosjean, F. & Deschamps, A. (1975). "Analyse contrastive des variables temporelles de l'anglais et du français." _Phonetica_ 31: 144–184. [Clause-boundary pause duration corroboration]
 
 **Industry sources:**
+
 - Amazon Alexa developer documentation — multi-signal endpointing, prosodic boundary detection
 - Google Dialogflow CX documentation — smart endpointing, ASR confidence suppression
 - AssemblyAI endpointing article: https://www.assemblyai.com/blog/turn-detection-endpointing-voice-agent
@@ -149,4 +167,88 @@ In short: Alexa and Dialogflow CX both achieve low fragmentation rates because t
 
 ---
 
-*Add new entries below this line. Format: `## REF-NNN — Short Title (component, milestone)`*
+## REF-005 — Proto Stub Generation Asymmetry (M0, polyglot build system)
+
+**Decision:** Python proto stubs are **committed** to git. Rust proto stubs are **generated** via `build.rs` during `cargo build`. TypeScript uses **runtime loading** via `@grpc/proto-loader` with no code generation.
+
+**Rationale:**
+
+This asymmetry respects each language ecosystem's conventions while optimizing for end-user experience:
+
+### Python: Committed stubs (talker/proto/)
+
+1. **Small size:** `kaguya_pb2.py` + `kaguya_pb2_grpc.py` + `__init__.py` = ~33KB total. Negligible repository bloat.
+
+2. **Zero setup for end users:** With stubs committed, end users can clone, `uv sync`, and run tests immediately. No protoc installation, no grpcio-tools invocation, no Windows/Linux/macOS proto generation compatibility issues.
+
+3. **Stable output:** grpcio-tools generates deterministic Python code. Committed stubs never cause "generated code mismatch" errors across Python versions or platforms. (Contrast with C++ protobuf where codegen varies by protoc version.)
+
+4. **Ecosystem standard for libraries:** Python gRPC libraries (google-cloud-*, grpc-gateway-*, Confluent Kafka Python) all commit generated stubs. The pattern is: "proto schema in version control → stubs in version control → import and use." This is because Python packaging does not have a first-class "build step" like Rust's `build.rs` — `setup.py` custom commands are fragile and discouraged (PEP 517/518 shift to declarative builds).
+
+5. **Patch requirement:** grpcio-tools generates bare imports (`import kaguya_pb2`), which break when proto/ is a package. We patch to relative imports (`from . import kaguya_pb2`). Committing the patched output ensures this works for all users without requiring them to run `gen_proto.py`.
+
+**Size reference:** At 33KB for kaguya.proto (~500 lines), even a 10× schema expansion would only be 330KB — still negligible in a repository with bundled native libraries.
+
+### Rust: Generated stubs (gateway/src/proto/, gitignored)
+
+1. **Large size:** tonic-build generates 150–300KB of Rust code for a medium-sized proto schema. This bloats diffs and creates merge conflicts when the schema changes.
+
+2. **Ecosystem standard for services:** Every major Rust gRPC project uses `build.rs` with tonic-build: TiKV (PingCAP's distributed database), Vector (Datadog's observability pipeline), and all official Tonic examples. The pattern is: "proto schema in version control → build.rs generates code → `.gitignore src/proto/`."
+
+3. **Build system integration:** Rust's `build.rs` is a first-class feature designed exactly for codegen. Cargo automatically re-runs `build.rs` when `proto/kaguya/v1/kaguya.proto` changes (via `println!("cargo:rerun-if-changed=...")` directives). This is seamless and requires no manual steps.
+
+4. **No patch requirement:** tonic-build generates idiomatic Rust with correct module paths. No post-processing needed.
+
+**Size reference:** TiKV's proto/ generates ~2MB of Rust code (gitignored). Vector's proto/ generates ~500KB (gitignored). Our 150–300KB estimate is conservative.
+
+### TypeScript: Runtime loading (reasoner/, no generation)
+
+1. **No codegen in Node.js norm:** The Node.js gRPC ecosystem strongly prefers runtime loading via `@grpc/proto-loader`. Official Google examples, grpc.io tutorials, and production systems (e.g., Uber's service meshes) load `.proto` files at runtime. Static codegen (`grpc-tools`, `ts-proto`) exists but is niche.
+
+2. **Zero build step:** `@grpc/proto-loader` reads `proto/kaguya/v1/kaguya.proto` directly at runtime and generates TypeScript types on-the-fly via Protobuf.js reflection. No compilation, no stubs, no gitignore rules.
+
+3. **Instant schema iteration:** Changing `kaguya.proto` requires only restarting the Node.js process. No regeneration command, no build cache invalidation.
+
+4. **Trade-off accepted:** Runtime loading sacrifices compile-time type safety (types are inferred at runtime, not statically checked). This is acceptable for the Reasoner (a single-purpose service with a small API surface) but would not scale to a large microservice mesh.
+
+### Cross-language consistency via buf (CI only)
+
+**buf is used exclusively for CI validation** (`buf lint`, `buf breaking`) in `.github/workflows/proto-lint.yml`. It does **not** generate code. This ensures schema consistency across all three languages without forcing a single codegen tool.
+
+**File organization:**
+
+```
+proto/
+  buf.yaml               # CI-only linting and breaking change detection
+  kaguya/v1/kaguya.proto # Single source of truth
+talker/
+  proto/                 # COMMITTED Python stubs (33KB)
+  scripts/gen_proto.py   # Dev-only regeneration via grpcio-tools
+gateway/
+  build.rs               # Invokes tonic-build automatically on cargo build
+  src/proto/             # GITIGNORED Rust stubs (150-300KB)
+reasoner/
+  # No proto/ directory — runtime loads ../proto/kaguya/v1/kaguya.proto
+```
+
+**Developer workflow:**
+
+```sh
+# After editing proto/kaguya/v1/kaguya.proto:
+make proto                # Regenerates Python stubs (talker/proto/)
+cargo build               # Automatically regenerates Rust stubs (gateway/src/proto/)
+# Reasoner: no action needed (runtime loading)
+git add proto/ talker/proto/  # Commit schema + Python stubs
+git commit -m "proto: add new RPC method"
+```
+
+**Sources:**
+
+- Python gRPC packaging survey: google-cloud-python, grpc-gateway, confluent-kafka-python all commit stubs
+- Rust build.rs + tonic-build canonical examples: TiKV (https://github.com/tikv/tikv), Vector (https://github.com/vectordotdev/vector), Tonic examples (https://github.com/hyperium/tonic/tree/master/examples)
+- Node.js gRPC runtime loading: grpc.io Node.js tutorial (https://grpc.io/docs/languages/node/basics/), `@grpc/proto-loader` README (https://github.com/grpc/grpc-node/tree/master/packages/proto-loader)
+- PEP 517/518 (declarative Python builds, discouraging setup.py custom commands): https://peps.python.org/pep-0517/, https://peps.python.org/pep-0518/
+
+---
+
+_Add new entries below this line. Format: `## REF-NNN — Short Title (component, milestone)`_

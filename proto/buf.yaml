@@ -1,0 +1,14 @@
+# buf.yaml — CI-only proto linting and breaking-change detection.
+#
+# Used exclusively in .github/workflows/proto-lint.yml for validation.
+# NOT used for code generation — we use language-specific tools:
+#   - Python: grpcio-tools (talker/scripts/gen_proto.py)
+#   - Rust: tonic-build (gateway/build.rs, automatic on cargo build)
+#   - TypeScript: @grpc/proto-loader (runtime loading, no generation)
+
+version: v1
+name: buf.build/kaguya/kaguya
+lint:
+  use: [DEFAULT]
+breaking:
+  use: [FILE]
