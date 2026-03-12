@@ -13,8 +13,11 @@ Thumbs.db
 # Talker (Python)
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 .pytest_cache/
+.coverage
+htmlcov/
 /talker/.venv/
 
 # Reasoner & Tools (TypeScript)
@@ -26,6 +29,14 @@ dist/
 # Models
 /models/*
 !/models/.gitkeep
+
+# Proto generated stubs (rebuilt by `make proto` — see M0.6)
+/talker/proto/
+/reasoner/proto/
+/gateway/src/proto/
+
+# Claude Code local settings (per-developer, not shared)
+.claude/
 
 # Local data
 /config/MEMORY.md
