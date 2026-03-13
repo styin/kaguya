@@ -268,7 +268,7 @@ message CancelAck {}
 // GATEWAY CONTROL  (Endpoint → Gateway)
 // ─────────────────────────────────────────────
 
-service RouterControl {
+service RouterControlService {
   rpc SendControl(ControlSignal) returns (ControlAck);
 }
 

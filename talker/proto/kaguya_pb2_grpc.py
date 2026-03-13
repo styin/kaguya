@@ -449,7 +449,7 @@ class ReasonerService(object):
             _registered_method=True)
 
 
-class RouterControlStub(object):
+class RouterControlServiceStub(object):
     """─────────────────────────────────────────────
     GATEWAY CONTROL  (Endpoint → Gateway)
     ─────────────────────────────────────────────
@@ -463,13 +463,13 @@ class RouterControlStub(object):
             channel: A grpc.Channel.
         """
         self.SendControl = channel.unary_unary(
-                '/kaguya.v1.RouterControl/SendControl',
+                '/kaguya.v1.RouterControlService/SendControl',
                 request_serializer=kaguya__pb2.ControlSignal.SerializeToString,
                 response_deserializer=kaguya__pb2.ControlAck.FromString,
                 _registered_method=True)
 
 
-class RouterControlServicer(object):
+class RouterControlServiceServicer(object):
     """─────────────────────────────────────────────
     GATEWAY CONTROL  (Endpoint → Gateway)
     ─────────────────────────────────────────────
@@ -483,7 +483,7 @@ class RouterControlServicer(object):
         raise NotImplementedError('Method not implemented!')
 
 
-def add_RouterControlServicer_to_server(servicer, server):
+def add_RouterControlServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'SendControl': grpc.unary_unary_rpc_method_handler(
                     servicer.SendControl,
@@ -492,13 +492,13 @@ def add_RouterControlServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'kaguya.v1.RouterControl', rpc_method_handlers)
+            'kaguya.v1.RouterControlService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('kaguya.v1.RouterControl', rpc_method_handlers)
+    server.add_registered_method_handlers('kaguya.v1.RouterControlService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class RouterControl(object):
+class RouterControlService(object):
     """─────────────────────────────────────────────
     GATEWAY CONTROL  (Endpoint → Gateway)
     ─────────────────────────────────────────────
@@ -519,7 +519,7 @@ class RouterControl(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/kaguya.v1.RouterControl/SendControl',
+            '/kaguya.v1.RouterControlService/SendControl',
             kaguya__pb2.ControlSignal.SerializeToString,
             kaguya__pb2.ControlAck.FromString,
             options,
