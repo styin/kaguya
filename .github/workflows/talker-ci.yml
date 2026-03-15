@@ -37,7 +37,7 @@ jobs:
       - run: |
           uv venv
           uv pip install pydantic-settings opuslib grpcio httpx pytest pytest-asyncio
-      - run: uv run pytest tests/ -v
+      - run: uv run --no-project pytest tests/ -v
 
   typecheck:
     runs-on: ubuntu-latest
@@ -53,4 +53,4 @@ jobs:
           uv pip install pydantic-settings opuslib grpcio httpx mypy
       # --ignore-missing-imports: RealtimeSTT/TTS not installed in CI.
       # Scope to authored code only (not proto stubs).
-      - run: uv run mypy config.py voice/ inference/ --ignore-missing-imports
+      - run: uv run --no-project mypy config.py voice/ inference/ --ignore-missing-imports
