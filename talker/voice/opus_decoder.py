@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -15,6 +16,8 @@ if sys.platform == "win32":
             os.add_dll_directory(str(_dll_dir))
 
 import opuslib
+
+logger = logging.getLogger(__name__)
 
 
 class OpusDecoder:
@@ -37,4 +40,8 @@ class OpusDecoder:
             Raw 16-bit signed PCM bytes at 16kHz mono, ready for
             RealtimeSTT.feed_audio(). frame_size=320 = 16000 × 0.02s.
         """
-        return self._decoder.decode(opus_frame, frame_size=320)
+        try:
+            return self._decoder.decode(opus_frame, frame_size=320)
+        except opuslib.OpusError:
+            logger.debug("Corrupted Opus frame (%d bytes), dropping", len(opus_frame))
+            return b""

@@ -3,16 +3,18 @@
 Process 2 of the Kaguya system. The Talker Agent handles all audio I/O and LLM
 inference for a single conversation turn:
 
-- **voice/listener.py** — Opus decode → RealtimeSTT (faster-whisper + Silero VAD)
-  → rule-based turn detection → streams `ListenerEvent` gRPC to Gateway
-- **voice/speaker.py** — Receives sentences from `server.py` → Kokoro TTS → audio out
-- **voice/opus_decoder.py** — Opus → PCM decoder (opuslib wrapper)
-- **voice/turn_detection.py** — Rule-based end-of-turn detection (Phase 1)
-- **inference/** — Prompt formatting, LLM streaming (llama.cpp HTTP), sentence boundary
-  detection, soul container (tag extraction, vocabulary rules)
-- **server.py** — `TalkerServiceServicer`: receives `ProcessPrompt`/`Prepare`/
-  `PrefillCache`/`UpdatePersona` from Gateway; wires inference ↔ voice per turn
 - **main.py** — asyncio entrypoint: starts gRPC server + Listener task
+- **config.py** — `TalkerConfig` (pydantic-settings, `KAGUYA_*` env vars)
+- **server.py** — `TalkerServiceServicer`: orchestrates inference ↔ voice per turn
+- **prepare.py** — PREPARE signal handler (cancel inference + stop TTS)
+- **voice/opus_decoder.py** — Opus → 16kHz mono PCM (opuslib wrapper)
+- **voice/listener.py** — RealtimeSTT (Whisper + Silero VAD) → turn detection → `ListenerEvent` gRPC stream to Gateway
+- **voice/turn_detector.py** — Rule-based end-of-turn detection (Phase 1; Phase 2 replaces with LiveKit learned model, see REF-004)
+- **voice/speaker.py** — Spoken text → Kokoro TTS → audio out
+- **inference/prompt_formatter.py** — `TalkerContext` + `PersonaConfig` → Qwen3 chat-template prompt
+- **inference/llm_client.py** — Async HTTP streaming to OpenAI-compatible LLM server
+- **inference/sentence_detector.py** — Token buffer → sentence boundary detection
+- **inference/soul_container.py** — Tag extraction, emotion normalization, vocabulary rules
 
 Specs: `../docs/spec-agent-v0.1.0.md`. Implementation plan: `../docs/implementation-plan-v0.1.0.md`.
 
@@ -128,5 +130,55 @@ pytest -v
 - **Shared process:** Listener and Speaker run as separate asyncio tasks (not threads)
 - **Proto imports:** Use relative imports (`from . import kaguya_pb2`) — package-safe
 - **opus.dll:** Bundled in `native/win32/`; prepended to PATH and registered via `os.add_dll_directory()` at import time so opuslib's `find_library` resolves it without system installation
+
+### Data Flow
+
+```mermaid
+sequenceDiagram
+    participant G as Gateway
+    participant T as Talker
+
+    note over G,T: ── Listening (continuous) ──
+    G->>T: Opus audio frames (Unix socket)
+    note over T: opus_decoder.py: Opus → 16kHz mono PCM
+    note over T: listener.py: PCM → RealtimeSTT (Whisper + Silero VAD)
+    note over T: turn_detector.py: VAD silence + syntax check → emit decision
+    T->>G: ListenerEvent stream (gRPC client)
+    note right of T: VadSpeechStart
+    note right of T: PartialTranscript (repeated)
+    note right of T: VadSpeechEnd
+    note right of T: FinalTranscript
+
+    note over G,T: ── Turn processing ──
+    G->>T: ProcessPrompt(TalkerContext)
+    note over T: server.py: orchestrates pipeline
+    note over T: prompt_formatter.py: TalkerContext + PersonaConfig → Qwen3 prompt
+    T->>T: llm_client.py: POST /v1/completions → SSE token stream
+    note over T: sentence_detector.py: token buffer → sentence boundary
+    note over T: soul_container.py: extract tags, normalize emotions, apply vocab
+    note over T: speaker.py: spoken text → Kokoro TTS → audio out
+    T-->>G: SentenceEvent (spoken text)
+    T-->>G: EmotionEvent (normalized emotion)
+    T-->>G: ToolRequest / DelegateRequest (if tagged)
+    note over T: ↑ repeat per sentence until done or interrupted
+    T-->>G: ResponseComplete(was_interrupted)
+
+    note over G,T: ── Interruption (at any point during turn) ──
+    G->>T: Prepare(PrepareSignal)
+    note over T: prepare.py: set cancel_event → server.py breaks loop
+    note over T: prepare.py: speaker.stop() → split spoken/unspoken
+    T-->>G: PrepareAck(spoken_text, unspoken_text)
+
+    note over G,T: ── Between turns ──
+    G->>T: PrefillCache(PrefillRequest)
+    note over T: prompt_formatter.py: build prompt from context
+    note over T: llm_client.py: POST /v1/completions (n_predict=0, cache_prompt=true)
+    T-->>G: PrefillAck
+
+    G->>T: UpdatePersona(PersonaConfig)
+    note over T: server.py: cache persona config
+    note over T: soul_container.py: parse_identity_config → vocab rules
+    T-->>G: PersonaAck
+```
 
 See `REFERENCES.md` for design decision rationale.

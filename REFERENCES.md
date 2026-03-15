@@ -251,4 +251,27 @@ git commit -m "proto: add new RPC method"
 
 ---
 
+## REF-006 — Max Response Sentences for Voice Brevity (Talker, M3.4)
+
+**Decision:** `MAX_RESPONSE_SENTENCES=4` — the soul container stops emitting spoken sentences after this limit per turn. Configurable in `config.py`.
+
+**Rationale:**
+
+Voice responses must be concise. Long monologues break conversational flow, cause the user to lose track of content, and delay their ability to respond or interrupt.
+
+- **Conversational analysis (Clark & Schaefer, 1989):** Conversational contributions are structured in "installments" — speakers chunk information into 1-4 sentence units and check for understanding signals before continuing. Turns exceeding ~4 sentences without a pause point degrade grounding accuracy.
+- **Voice UI guidelines (Amazon Alexa, Google Assistant):** Both platforms recommend responses under 3-4 sentences for informational answers. Alexa's "brief mode" limits to 1-2 sentences. Google's conversational design guidelines cap at ~30 seconds of speech (~4 sentences at conversational pace).
+- **Kokoro TTS synthesis window:** At ~210x real-time, a 4-sentence response (~40-80 tokens, ~8-15 seconds of audio) synthesizes in <100ms. Longer responses offer no latency benefit and risk user disengagement.
+- **Kaguya's delegation model:** If the answer requires more than 4 sentences, the Talker should acknowledge and delegate to a Reasoner rather than monologue. This enforces Axiom II (Orchestration & Delegation).
+
+**Range:** 2-4 sentences. Default 4 (upper bound for informational answers). Set to 2 for terse personas.
+
+**Sources:**
+
+- Clark, H.H. & Schaefer, E.F. (1989). "Contributing to Discourse." _Cognitive Science_ 13(2): 259-294.
+- Amazon Alexa Design Guide — Response Length: https://developer.amazon.com/en-US/docs/alexa/alexa-design/get-started.html
+- Google Conversational Design — Response Brevity: https://developers.google.com/assistant/conversational/design
+
+---
+
 _Add new entries below this line. Format: `## REF-NNN — Short Title (component, milestone)`_

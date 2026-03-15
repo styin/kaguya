@@ -1,4 +1,4 @@
-"""voice/turn_detection.py — Rule-based end-of-turn detection.
+"""voice/turn_detector.py — Rule-based end-of-turn detection.
 
 Phase 1 logic (~50-100 lines). Two thresholds (both configurable):
   - SYNTAX_SILENCE_THRESHOLD_MS (default 300ms): entry point to the ambiguous zone.
@@ -19,6 +19,7 @@ Phase 2 replaces this with the LiveKit learned turn detection model (see REF-004
 """
 
 import re
+import threading
 import time
 
 from config import TalkerConfig
@@ -28,6 +29,9 @@ _TERMINAL_PUNCT = re.compile(r"[.?!]\s*$")
 
 # Patterns that signal the utterance is syntactically incomplete:
 # dangling conjunctions, prepositions, articles at end of buffer.
+# NOTE: English-only. These regexes are meaningless for non-English languages.
+# If whisper_language is changed, these patterns should be replaced or disabled.
+# Phase 2's learned turn detection model removes this limitation entirely.
 _INCOMPLETE_ENDINGS = re.compile(
     r"\b(and|but|or|so|yet|the|a|an|of|in|on|at|to|for|with|by|from|that|which|who|"
     r"because|although|if|when|while|as|than|though|unless|until|since|after|before|"
@@ -52,17 +56,29 @@ class TurnDetector:
         self._buffer: str = ""
         self._vad_stop_ts: float | None = None  # set by on_vad_stop
         self._emitted: bool = False
+        self._emit_lock = threading.Lock()  # guards _emitted + _buffer read in _emit()
+        self._turn_id: int = 0  # incremented on each speech start; used to cancel stale tick loops
 
     @property
     def has_emitted(self) -> bool:
         """Returns True if a final_transcript has already been emitted this turn."""
         return self._emitted
 
+    @property
+    def turn_id(self) -> int:
+        """Current turn ID. Incremented on each speech start.
+
+        Used by the listener's silence tick loop to detect stale loops
+        that survived from a previous utterance.
+        """
+        return self._turn_id
+
     def on_speech_start(self) -> None:
         """Called on vad_speech_start. Resets state for a new utterance."""
         self._buffer = ""
         self._vad_stop_ts = None
         self._emitted = False
+        self._turn_id += 1
 
     def on_vad_stop(self) -> None:
         """Called on vad_speech_end. Marks when silence began."""
@@ -88,8 +104,9 @@ class TurnDetector:
         return self._evaluate(self._silence_duration_ms())
 
     def on_silence_tick(self) -> str | None:
-        """Called periodically (~100ms) while VAD is silent.
+        """Called periodically while VAD is silent.
 
+        Tick interval is configured via silence_tick_interval_ms (default 50ms).
         Triggers the unconditional 800ms emit when partial updates have stopped
         but VAD silence has exceeded the threshold.
 
@@ -119,10 +136,14 @@ class TurnDetector:
         return self._emit()
 
     def _emit(self) -> str | None:
-        if self._emitted or not self._buffer:
-            return None
-        self._emitted = True
-        return self._buffer
+        # Lock guards against concurrent calls from the recorder thread
+        # (via on_partial → _evaluate) and the event loop thread
+        # (via on_silence_tick → _evaluate). See REF-007.
+        with self._emit_lock:
+            if self._emitted or not self._buffer:
+                return None
+            self._emitted = True
+            return self._buffer
 
     def _silence_duration_ms(self) -> float:
         if self._vad_stop_ts is None:
@@ -131,7 +152,11 @@ class TurnDetector:
 
     @staticmethod
     def _is_syntactically_complete(text: str) -> bool:
-        """Return True if text appears to be a complete utterance."""
+        """Return True if text appears to be a complete utterance.
+        
+        Note: 
+            Incomplete endings win over terminal punctuation.
+        """
         if not text:
             return False
         if _INCOMPLETE_ENDINGS.search(text):
