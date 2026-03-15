@@ -63,9 +63,11 @@ _VALID_EMOTIONS = {"joy", "concern", "thinking", "surprise", "neutral", "determi
 # Vocabulary rules (parsed from IDENTITY.md)
 # ──────────────────────────────────────────
 
+
 @dataclass
 class VocabRule:
     """A single (regex pattern, replacement) pair from IDENTITY.md ## Vocabulary."""
+
     pattern: re.Pattern[str]
     replacement: str
 
@@ -73,6 +75,7 @@ class VocabRule:
 @dataclass
 class IdentityConfig:
     """Parsed identity configuration. Built from PersonaConfig.identity_md."""
+
     vocab_rules: list[VocabRule] = field(default_factory=list)
 
 
@@ -101,12 +104,16 @@ def parse_identity_config(identity_md: str) -> IdentityConfig:
         match = re.match(r"^- /(.+?)/\s*→\s*(.+)$", stripped)
         if match:
             try:
-                config.vocab_rules.append(VocabRule(
-                    pattern=re.compile(match.group(1)),
-                    replacement=match.group(2),
-                ))
+                config.vocab_rules.append(
+                    VocabRule(
+                        pattern=re.compile(match.group(1)),
+                        replacement=match.group(2),
+                    )
+                )
             except re.error as exc:
-                logger.warning("Malformed vocab regex in IDENTITY.md, skipping: %s", exc)
+                logger.warning(
+                    "Malformed vocab regex in IDENTITY.md, skipping: %s", exc
+                )
 
     return config
 
@@ -115,9 +122,11 @@ def parse_identity_config(identity_md: str) -> IdentityConfig:
 # Soul container result
 # ──────────────────────────────────────────
 
+
 @dataclass
 class SoulContainerResult:
     """Output of processing one sentence through the soul container."""
+
     spoken_text: str  # tags stripped, vocab applied — goes to TTS
     emotions: list[str]  # normalized emotion values
     tool_requests: list[kaguya_pb2.ToolRequest]
@@ -127,6 +136,7 @@ class SoulContainerResult:
 # ──────────────────────────────────────────
 # Core processing function
 # ──────────────────────────────────────────
+
 
 def process(sentence: str, identity: IdentityConfig) -> SoulContainerResult:
     """Process one complete sentence through the soul container.
@@ -161,19 +171,23 @@ def process(sentence: str, identity: IdentityConfig) -> SoulContainerResult:
 
     # 2. Extract tool requests.
     for match in _TOOL_RE.finditer(text):
-        result.tool_requests.append(kaguya_pb2.ToolRequest(
-            request_id=str(uuid.uuid4()),
-            tool_name=match.group(1),
-            args_json=match.group(2).strip(),
-        ))
+        result.tool_requests.append(
+            kaguya_pb2.ToolRequest(
+                request_id=str(uuid.uuid4()),
+                tool_name=match.group(1),
+                args_json=match.group(2).strip(),
+            )
+        )
     text = _TOOL_RE.sub("", text)
 
     # 3. Extract delegate requests.
     for match in _DELEGATE_RE.finditer(text):
-        result.delegate_requests.append(kaguya_pb2.DelegateRequest(
-            task_id=str(uuid.uuid4()),
-            description=match.group(1).strip(),
-        ))
+        result.delegate_requests.append(
+            kaguya_pb2.DelegateRequest(
+                task_id=str(uuid.uuid4()),
+                description=match.group(1).strip(),
+            )
+        )
     text = _DELEGATE_RE.sub("", text)
 
     # 4. Strip any remaining hallucinated tags.

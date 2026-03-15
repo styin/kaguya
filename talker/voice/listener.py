@@ -117,19 +117,23 @@ class Listener:
 
     def _on_vad_start(self) -> None:
         self._turn_detector.on_speech_start()
-        self._enqueue(kaguya_pb2.ListenerEvent(
-            timestamp_ms=_now_ms(),
-            vad_speech_start=kaguya_pb2.VadSpeechStart(),
-        ))
+        self._enqueue(
+            kaguya_pb2.ListenerEvent(
+                timestamp_ms=_now_ms(),
+                vad_speech_start=kaguya_pb2.VadSpeechStart(),
+            )
+        )
 
     def _on_vad_stop(self, silence_duration_ms: float) -> None:
         self._turn_detector.on_vad_stop()
-        self._enqueue(kaguya_pb2.ListenerEvent(
-            timestamp_ms=_now_ms(),
-            vad_speech_end=kaguya_pb2.VadSpeechEnd(
-                silence_duration_ms=silence_duration_ms
-            ),
-        ))
+        self._enqueue(
+            kaguya_pb2.ListenerEvent(
+                timestamp_ms=_now_ms(),
+                vad_speech_end=kaguya_pb2.VadSpeechEnd(
+                    silence_duration_ms=silence_duration_ms
+                ),
+            )
+        )
         # Kick off the silence tick loop to handle the unconditional 800ms emit.
         # Pass turn_id so the loop can detect if a new utterance has started
         # (which would make this tick loop stale — it should exit).
@@ -140,10 +144,12 @@ class Listener:
             )
 
     def _on_partial(self, text: str) -> None:
-        self._enqueue(kaguya_pb2.ListenerEvent(
-            timestamp_ms=_now_ms(),
-            partial_transcript=kaguya_pb2.PartialTranscript(text=text),
-        ))
+        self._enqueue(
+            kaguya_pb2.ListenerEvent(
+                timestamp_ms=_now_ms(),
+                partial_transcript=kaguya_pb2.PartialTranscript(text=text),
+            )
+        )
         # Also hand to turn detector so it can evaluate syntactic completeness.
         final = self._turn_detector.on_partial(text)
         if final is not None:
@@ -178,10 +184,12 @@ class Listener:
         # confidence=0.0: RealtimeSTT does not expose per-transcript confidence
         # scores in its callback API. 0.0 signals "unknown" to downstream consumers.
         # TODO: Propagate Whisper's per-segment log-probabilities when available.
-        self._enqueue(kaguya_pb2.ListenerEvent(
-            timestamp_ms=_now_ms(),
-            final_transcript=kaguya_pb2.FinalTranscript(text=text, confidence=0.0),
-        ))
+        self._enqueue(
+            kaguya_pb2.ListenerEvent(
+                timestamp_ms=_now_ms(),
+                final_transcript=kaguya_pb2.FinalTranscript(text=text, confidence=0.0),
+            )
+        )
 
     # ──────────────────────────────────────────
     # gRPC client — ListenerService → Gateway

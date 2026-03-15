@@ -41,12 +41,14 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
     """
 
     def __init__(self, config: TalkerConfig, speaker: Speaker) -> None:
-        self._config = config                       # config.py
-        self._llm = LLMClient(config)               #
-        self._speaker = speaker                     # voice.speaker.Speaker
-        self._persona = kaguya_pb2.PersonaConfig()  # str: SOUL.md, str: IDENTITY.md, str: MEMORY.md
-        self._identity = IdentityConfig()           # inference.soul_container.IdentityConfig
-        self._cancel_event = asyncio.Event()        # 
+        self._config = config  # config.py
+        self._llm = LLMClient(config)  #
+        self._speaker = speaker  # voice.speaker.Speaker
+        self._persona = (
+            kaguya_pb2.PersonaConfig()
+        )  # str: SOUL.md, str: IDENTITY.md, str: MEMORY.md
+        self._identity = IdentityConfig()  # inference.soul_container.IdentityConfig
+        self._cancel_event = asyncio.Event()  #
 
     @property
     def cancel_event(self) -> asyncio.Event:
@@ -64,24 +66,24 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
     ):
         """
         Format prompt → stream tokens → sentences → soul container → yield TalkerOutput.
-        
+
         Args:
             request: kaguya_pb2.TalkerContext (full turn context)
             context: grpc.aio.ServicerContext (gRPC context)
-        
+
         Yields:
             kaguya_pb2.TalkerOutput (one per sentence)
-        
+
         Raises:
             ConnectionError: if LLM connection fails
             Exception: if unexpected error occurs
         """
-        self._cancel_event.clear()        # clears from previous PREPARE event
-        self._speaker.reset()           
+        self._cancel_event.clear()  # clears from previous PREPARE event
+        self._speaker.reset()
 
-        seq: int = 0                      # increments with each yield, used for ...
-        sentence_count: int = 0           # increments with each sentence, used for ...
-        turn_id = request.turn_id         # unique per ProcessPrompt call
+        seq: int = 0  # increments with each yield, used for ...
+        sentence_count: int = 0  # increments with each sentence, used for ...
+        turn_id = request.turn_id  # unique per ProcessPrompt call
 
         # Yield `ResponseStarted`
         seq += 1
@@ -107,7 +109,9 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                     was_interrupted = True
                     break
 
-                sentence = detector.feed(token) # Returns `None` until a sentence is detected
+                sentence = detector.feed(
+                    token
+                )  # Returns `None` until a sentence is detected
                 if sentence is not None:
                     sentence_count += 1
 
@@ -126,7 +130,7 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                         was_interrupted = True
                         break
 
-            # Flush remaining buffer on clean completion. 
+            # Flush remaining buffer on clean completion.
             # Note: sentence detection boundaries only detect up to the penultimate sentence.
             if not was_interrupted:
                 remainder = detector.flush()
@@ -193,8 +197,12 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         """Update cached persona and re-parse identity config."""
         self._persona = request
         self._identity = parse_identity_config(request.identity_md or "")
-        logger.info("Persona updated (soul=%d, identity=%d, memory=%d bytes)",
-                     len(request.soul_md), len(request.identity_md), len(request.memory_md))
+        logger.info(
+            "Persona updated (soul=%d, identity=%d, memory=%d bytes)",
+            len(request.soul_md),
+            len(request.identity_md),
+            len(request.memory_md),
+        )
         return kaguya_pb2.PersonaAck()
 
     async def close(self) -> None:

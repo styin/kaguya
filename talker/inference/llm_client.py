@@ -41,9 +41,7 @@ class LLMClient:
         self._retry_delay = config.llm_retry_delay
         self._max_tokens = config.llm_max_tokens
         self._timeout = config.llm_timeout
-        self._client = httpx.AsyncClient(
-            base_url=self._base_url, timeout=self._timeout
-        )
+        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -79,9 +77,7 @@ class LLMClient:
                     "POST", "/v1/completions", json=payload
                 ) as response:
                     response.raise_for_status()
-                    async for token in _parse_sse_cancellable(
-                        response, cancel_event
-                    ):
+                    async for token in _parse_sse_cancellable(response, cancel_event):
                         has_yielded = True
                         yield token
                     return  # stream completed successfully
@@ -93,9 +89,7 @@ class LLMClient:
                 # Don't retry if we've already yielded tokens — retrying
                 # would re-send the same prompt and produce duplicate output.
                 if has_yielded:
-                    logger.error(
-                        "LLM stream failed after yielding tokens: %s", exc
-                    )
+                    logger.error("LLM stream failed after yielding tokens: %s", exc)
                     return
                 last_exc = exc
                 logger.warning(

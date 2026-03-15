@@ -128,7 +128,9 @@ def assemble_prompt(
 
     # ── Reasoner result injection (section 9) ──
     if ctx.reasoner_result_content:
-        label = f"[REASONER_RESULT:{ctx.reasoner_task_id}] " if ctx.reasoner_task_id else ""
+        label = (
+            f"[REASONER_RESULT:{ctx.reasoner_task_id}] " if ctx.reasoner_task_id else ""
+        )
         parts.append(_msg("tool", f"{label}{ctx.reasoner_result_content}"))
 
     # ── User input (section 10) ──

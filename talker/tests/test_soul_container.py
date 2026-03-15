@@ -17,6 +17,7 @@ from inference.soul_container import (
 
 # ── Category 1: Plain text (no tags) ────────────────────────
 
+
 class TestPlainText:
     """Sentences with no tags — spoken text passes through, default emotion added."""
 
@@ -47,6 +48,7 @@ class TestPlainText:
 
 
 # ── Category 2: Emotion extraction and normalization ─────────
+
 
 class TestEmotions:
     """[EMOTION:value] tag extraction, alias resolution, and validation."""
@@ -146,7 +148,9 @@ class TestEmotions:
         assert "neutral" not in result.emotions
 
     def test_multiple_emotions(self):
-        result = process("[EMOTION:joy] Yay! [EMOTION:surprise] Wait!", IdentityConfig())
+        result = process(
+            "[EMOTION:joy] Yay! [EMOTION:surprise] Wait!", IdentityConfig()
+        )
         assert result.emotions == ["joy", "surprise"]
 
     def test_emotion_at_start(self):
@@ -163,6 +167,7 @@ class TestEmotions:
 
 
 # ── Category 3: Tool request extraction ─────────────────────
+
 
 class TestToolRequests:
     """[TOOL:name({...})] tag extraction."""
@@ -196,11 +201,7 @@ class TestToolRequests:
         assert "Please wait." in result.spoken_text
 
     def test_multiple_tools(self):
-        sentence = (
-            '[TOOL:foo({"a": 1})] '
-            'Doing two things. '
-            '[TOOL:bar({"b": 2})]'
-        )
+        sentence = '[TOOL:foo({"a": 1})] Doing two things. [TOOL:bar({"b": 2})]'
         result = process(sentence, IdentityConfig())
         assert len(result.tool_requests) == 2
         assert result.tool_requests[0].tool_name == "foo"
@@ -225,6 +226,7 @@ class TestToolRequests:
 
 
 # ── Category 4: Delegate request extraction ──────────────────
+
 
 class TestDelegateRequests:
     """[DELEGATE:description] tag extraction."""
@@ -262,6 +264,7 @@ class TestDelegateRequests:
 
 # ── Category 5: Hallucinated tag stripping ───────────────────
 
+
 class TestHallucinatedTags:
     """Unknown [TAG:...] patterns stripped by _UNKNOWN_TAG_RE."""
 
@@ -290,6 +293,7 @@ class TestHallucinatedTags:
 
 
 # ── Category 6: Multiple tags in one sentence ───────────────
+
 
 class TestMultipleTags:
     """Sentences with combinations of emotion, tool, delegate, and unknown tags."""
@@ -330,6 +334,7 @@ class TestMultipleTags:
 
 # ── Category 7: Whitespace cleanup ──────────────────────────
 
+
 class TestWhitespace:
     """Tags leave gaps — double spaces should collapse, edges should trim."""
 
@@ -355,36 +360,45 @@ class TestWhitespace:
 
 # ── Category 8: Vocabulary rules ────────────────────────────
 
+
 class TestVocabRules:
     """Vocabulary substitution from IDENTITY.md rules."""
 
     def test_simple_replacement(self):
-        identity = IdentityConfig(vocab_rules=[
-            VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
-        ])
+        identity = IdentityConfig(
+            vocab_rules=[
+                VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
+            ]
+        )
         result = process("AI is fascinating.", identity)
         assert result.spoken_text == "A.I. is fascinating."
 
     def test_multiple_rules(self):
-        identity = IdentityConfig(vocab_rules=[
-            VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
-            VocabRule(pattern=re.compile(r"\bgonna\b"), replacement="going to"),
-        ])
+        identity = IdentityConfig(
+            vocab_rules=[
+                VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
+                VocabRule(pattern=re.compile(r"\bgonna\b"), replacement="going to"),
+            ]
+        )
         result = process("AI is gonna change everything.", identity)
         assert result.spoken_text == "A.I. is going to change everything."
 
     def test_rule_applies_globally(self):
-        identity = IdentityConfig(vocab_rules=[
-            VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
-        ])
+        identity = IdentityConfig(
+            vocab_rules=[
+                VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
+            ]
+        )
         result = process("AI helps AI researchers.", identity)
         assert result.spoken_text == "A.I. helps A.I. researchers."
 
     def test_vocab_applied_after_tag_stripping(self):
         """Vocab rules see clean text, not raw tags."""
-        identity = IdentityConfig(vocab_rules=[
-            VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
-        ])
+        identity = IdentityConfig(
+            vocab_rules=[
+                VocabRule(pattern=re.compile(r"\bAI\b"), replacement="A.I."),
+            ]
+        )
         result = process("[EMOTION:joy] AI is great!", identity)
         assert result.spoken_text == "A.I. is great!"
 
@@ -393,14 +407,17 @@ class TestVocabRules:
         assert result.spoken_text == "AI is here."
 
     def test_regex_pattern_in_rule(self):
-        identity = IdentityConfig(vocab_rules=[
-            VocabRule(pattern=re.compile(r"\d+"), replacement="NUMBER"),
-        ])
+        identity = IdentityConfig(
+            vocab_rules=[
+                VocabRule(pattern=re.compile(r"\d+"), replacement="NUMBER"),
+            ]
+        )
         result = process("I have 42 items.", identity)
         assert result.spoken_text == "I have NUMBER items."
 
 
 # ── Category 9: parse_identity_config ────────────────────────
+
 
 class TestParseIdentityConfig:
     """Parsing IDENTITY.md markdown into IdentityConfig."""
@@ -502,24 +519,29 @@ Natural.
 
 # ── Category 10: Processing order ───────────────────────────
 
+
 class TestProcessingOrder:
     """Verify extraction happens in the documented order:
     emotions → tools → delegates → hallucination strip → whitespace → vocab."""
 
     def test_tags_extracted_before_vocab(self):
         """Vocab rules should NOT see raw tag text."""
-        identity = IdentityConfig(vocab_rules=[
-            VocabRule(pattern=re.compile(r"EMOTION"), replacement="OOPS"),
-        ])
+        identity = IdentityConfig(
+            vocab_rules=[
+                VocabRule(pattern=re.compile(r"EMOTION"), replacement="OOPS"),
+            ]
+        )
         result = process("[EMOTION:joy] Hello.", identity)
         assert result.emotions == ["joy"]
         assert "OOPS" not in result.spoken_text
 
     def test_whitespace_cleanup_before_vocab(self):
         """Vocab sees single-spaced text, not double-spaced gaps from tag removal."""
-        identity = IdentityConfig(vocab_rules=[
-            VocabRule(pattern=re.compile(r"Hello world"), replacement="Hi earth"),
-        ])
+        identity = IdentityConfig(
+            vocab_rules=[
+                VocabRule(pattern=re.compile(r"Hello world"), replacement="Hi earth"),
+            ]
+        )
         result = process("Hello [FAKE:x] world.", identity)
         assert result.spoken_text == "Hi earth."
 
@@ -535,8 +557,8 @@ class TestProcessingOrder:
 
 # ── Category 11: Edge cases ─────────────────────────────────
 
-class TestEdgeCases:
 
+class TestEdgeCases:
     def test_tag_only_sentence(self):
         """Sentence is nothing but a tag — spoken text is empty."""
         result = process("[EMOTION:joy]", IdentityConfig())

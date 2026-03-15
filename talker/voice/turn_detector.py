@@ -57,7 +57,9 @@ class TurnDetector:
         self._vad_stop_ts: float | None = None  # set by on_vad_stop
         self._emitted: bool = False
         self._emit_lock = threading.Lock()  # guards _emitted + _buffer read in _emit()
-        self._turn_id: int = 0  # incremented on each speech start; used to cancel stale tick loops
+        self._turn_id: int = (
+            0  # incremented on each speech start; used to cancel stale tick loops
+        )
 
     @property
     def has_emitted(self) -> bool:
@@ -153,8 +155,8 @@ class TurnDetector:
     @staticmethod
     def _is_syntactically_complete(text: str) -> bool:
         """Return True if text appears to be a complete utterance.
-        
-        Note: 
+
+        Note:
             Incomplete endings win over terminal punctuation.
         """
         if not text:

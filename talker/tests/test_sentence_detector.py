@@ -9,6 +9,7 @@ from inference.sentence_detector import SentenceDetector
 
 # ── Helpers ──────────────────────────────────────────────────
 
+
 def _feed_all(text: str) -> list[str]:
     """Feed an entire string char-by-char and return all emitted sentences
     (including flush)."""
@@ -40,6 +41,7 @@ def _feed_tokens(tokens: list[str]) -> list[str]:
 
 
 # ── Category 1: Basic boundary detection ─────────────────────
+
 
 class TestBasicBoundaries:
     """Core sentence splitting on `.` `?` `!` followed by whitespace + uppercase."""
@@ -73,6 +75,7 @@ class TestBasicBoundaries:
 
 
 # ── Category 2: flush() behavior ────────────────────────────
+
 
 class TestFlush:
     """flush() emits whatever remains when the LLM generation ends."""
@@ -111,6 +114,7 @@ class TestFlush:
 
 
 # ── Category 3: Abbreviations (false-positive suppression) ──
+
 
 class TestAbbreviations:
     """Abbreviations with periods must NOT trigger sentence boundaries."""
@@ -204,6 +208,7 @@ class TestAbbreviations:
 
 # ── Category 4: Initials and dotted acronyms ────────────────
 
+
 class TestInitialsAndAcronyms:
     """Single-capital-letter abbreviations: U.S., initials like J. K. Rowling."""
 
@@ -225,6 +230,7 @@ class TestInitialsAndAcronyms:
 
 
 # ── Category 5: Decimal numbers ─────────────────────────────
+
 
 class TestDecimals:
     """Decimal periods (3.14) never trigger _BOUNDARY because the char after
@@ -267,6 +273,7 @@ class TestDecimals:
 
 # ── Category 6: URLs ────────────────────────────────────────
 
+
 class TestURLs:
     """URLs with periods must NOT trigger sentence boundaries."""
 
@@ -279,7 +286,9 @@ class TestURLs:
         assert "https://docs.python.org" in sentences[0]
 
     def test_url_with_path(self):
-        sentences = _feed_all("Go to https://api.example.com/v1/users for docs. It helps.")
+        sentences = _feed_all(
+            "Go to https://api.example.com/v1/users for docs. It helps."
+        )
         assert "https://api.example.com/v1/users" in sentences[0]
 
     def test_url_mid_sentence(self):
@@ -288,6 +297,7 @@ class TestURLs:
 
 
 # ── Category 7: Quoted speech and closing punctuation ───────
+
 
 class TestQuotedSpeech:
     """Punctuation inside quotes/parens: the boundary regex allows optional
@@ -329,6 +339,7 @@ class TestQuotedSpeech:
 
 # ── Category 8: Ellipsis ────────────────────────────────────
 
+
 class TestEllipsis:
     """Ellipsis (...) — only the last dot could trigger _BOUNDARY, and only
     if followed by whitespace + uppercase."""
@@ -359,6 +370,7 @@ class TestEllipsis:
 
 # ── Category 9: No boundary (lowercase after punctuation) ───
 
+
 class TestNoBoundaryLowercase:
     """_BOUNDARY requires uppercase after whitespace. Lowercase → no split."""
 
@@ -376,6 +388,7 @@ class TestNoBoundaryLowercase:
 
 
 # ── Category 10: Token-by-token streaming fidelity ──────────
+
 
 class TestTokenStreaming:
     """Verify correct behavior when input arrives as LLM-like token chunks,
@@ -402,9 +415,7 @@ class TestTokenStreaming:
 
     def test_gradual_token_buildup(self):
         """Simulate realistic multi-char token stream."""
-        sentences = _feed_tokens([
-            "The ", "cat ", "sat. ", "The ", "dog ", "ran."
-        ])
+        sentences = _feed_tokens(["The ", "cat ", "sat. ", "The ", "dog ", "ran."])
         assert sentences[0] == "The cat sat."
         assert sentences[1] == "The dog ran."
 
@@ -417,8 +428,8 @@ class TestTokenStreaming:
 
 # ── Category 11: Edge cases and unusual inputs ──────────────
 
-class TestEdgeCases:
 
+class TestEdgeCases:
     def test_empty_string_token(self):
         sd = SentenceDetector()
         assert sd.feed("") is None

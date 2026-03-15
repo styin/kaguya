@@ -8,6 +8,7 @@ not needed to run tests. Does NOT require RealtimeSTT, RealtimeTTS, or llama.cpp
 
 def test_config_defaults():
     from config import TalkerConfig
+
     c = TalkerConfig()
     assert c.gateway_socket == "/tmp/kaguya-gateway.sock"
     assert c.silence_threshold_ms == 800
@@ -18,6 +19,7 @@ def test_config_defaults():
 def test_turn_detector_instantiates():
     from config import TalkerConfig
     from voice.turn_detector import TurnDetector
+
     td = TurnDetector(TalkerConfig())
     assert td._silence_ms == 800
     assert td._syntax_ms == 300
@@ -26,6 +28,7 @@ def test_turn_detector_instantiates():
 def test_turn_detector_no_emit_before_vad_stop():
     from config import TalkerConfig
     from voice.turn_detector import TurnDetector
+
     td = TurnDetector(TalkerConfig())
     td.on_speech_start()
     # No vad_stop yet — should never emit regardless of text
@@ -79,7 +82,9 @@ def test_turn_detector_unconditional_emit_at_800ms():
     td._vad_stop_ts = time.monotonic() - 0.9
 
     result = td.on_silence_tick()
-    assert result is None  # buffer is empty — on_silence_tick guards with `not self._buffer`
+    assert (
+        result is None
+    )  # buffer is empty — on_silence_tick guards with `not self._buffer`
 
     # Now with buffer populated
     td2 = TurnDetector(TalkerConfig())
@@ -94,12 +99,14 @@ def test_turn_detector_unconditional_emit_at_800ms():
 
 def test_opus_decoder_instantiates():
     from voice.opus_decoder import OpusDecoder
+
     dec = OpusDecoder()
     assert dec._decoder is not None
 
 
 def test_proto_stubs_importable():
     from proto import kaguya_pb2  # type: ignore[import]
+
     # Instantiate a few key message types
     evt = kaguya_pb2.ListenerEvent()
     assert evt is not None
@@ -113,6 +120,7 @@ def test_proto_stubs_importable():
 
 def test_proto_stubs_services_exist():
     from proto import kaguya_pb2_grpc  # type: ignore[import]
+
     assert hasattr(kaguya_pb2_grpc, "ListenerServiceStub")
     assert hasattr(kaguya_pb2_grpc, "TalkerServiceServicer")
     assert hasattr(kaguya_pb2_grpc, "ReasonerServiceServicer")

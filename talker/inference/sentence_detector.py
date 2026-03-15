@@ -67,14 +67,16 @@ class SentenceDetector:
 
         # Scan all potential boundaries; use the first non-false-positive.
         for match in _BOUNDARY.finditer(self._buffer):
-            candidate_end = match.end(1)  # position after punctuation + closing quotes/parens
+            candidate_end = match.end(
+                1
+            )  # position after punctuation + closing quotes/parens
             candidate = self._buffer[:candidate_end].rstrip()
 
             if self._is_false_positive(candidate):
                 continue  # skip abbreviations, URLs
 
             # Emit the sentence; keep the remainder in the buffer.
-            self._buffer = self._buffer[match.end():]
+            self._buffer = self._buffer[match.end() :]
             return candidate
 
         return None

@@ -36,7 +36,7 @@ jobs:
       # RealtimeSTT/RealtimeTTS require CUDA — not available in CI.
       - run: |
           uv venv
-          uv pip install pydantic-settings opuslib grpcio httpx pytest pytest-asyncio
+          uv pip install pydantic-settings opuslib grpcio protobuf httpx pytest pytest-asyncio
       - run: uv run --no-project pytest tests/ -v
         env:
           PYTHONPATH: .

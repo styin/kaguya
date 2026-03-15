@@ -46,7 +46,9 @@ def test_concurrent_emit_only_produces_one_result():
 
     # Exactly one should have emitted "Hello there.", the other should be None.
     non_none = [r for r in results if r is not None]
-    assert len(non_none) == 1, f"Expected exactly 1 emit, got {len(non_none)}: {results}"
+    assert len(non_none) == 1, (
+        f"Expected exactly 1 emit, got {len(non_none)}: {results}"
+    )
     assert non_none[0] == "Hello there."
 
 
