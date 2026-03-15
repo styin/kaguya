@@ -4,9 +4,12 @@
 dev:
 	./scripts/dev.sh
 
-# Generate protobuf bindings
+# Generate Python protobuf bindings (dev only - stubs are committed for end users)
+# Rust stubs regenerate automatically via build.rs on next `cargo build`
 proto:
-	./scripts/generate_protos.sh
+	@echo "==> Regenerating Python proto stubs..."
+	cd talker && uv run python scripts/gen_proto.py
+	@echo "==> Done. Rust stubs will regenerate automatically on next 'cargo build'."
 
 test:
 	@echo "Running tests..."

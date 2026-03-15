@@ -420,7 +420,7 @@ service ReasonerService {
   rpc CancelTask(CancelRequest) returns (CancelAck);
 }
 
-service RouterControl {
+service RouterControlService {
   rpc SendControl(ControlSignal) returns (ControlAck);
 }
 ```

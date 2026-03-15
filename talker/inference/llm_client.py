@@ -1,0 +1,192 @@
+"""inference/llm_client.py — Async HTTP client to an OpenAI-compatible LLM server.
+
+Domain role: Streams token completions from the local LLM server (llama.cpp,
+LM Studio, or any OpenAI-compatible backend) and triggers KV cache prefill
+between turns.
+
+[DECISION] HTTP client, not gRPC. llama.cpp/LM Studio speak OpenAI-compatible
+HTTP. Overhead is ~0.1ms on localhost — negligible.
+
+TODO: Migrate from /v1/completions (raw prompt) to /v1/chat/completions
+(structured messages[]) when prompt_formatter returns messages instead of
+a string. See prompt_formatter.py module docstring.
+"""
+
+import asyncio
+import json
+import logging
+from collections.abc import AsyncIterator
+
+import httpx
+
+from config import TalkerConfig
+
+logger = logging.getLogger(__name__)
+
+
+class LLMClient:
+    """Async streaming client for OpenAI-compatible /v1/completions.
+
+    Lifecycle:
+        client = LLMClient(config)
+        async for token in client.stream_completion(prompt, cancel_event):
+            ...
+        await client.prefill(prompt)
+        await client.close()
+    """
+
+    def __init__(self, config: TalkerConfig) -> None:
+        self._base_url = config.llm_base_url.rstrip("/")
+        self._max_retries = config.llm_max_retries
+        self._retry_delay = config.llm_retry_delay
+        self._max_tokens = config.llm_max_tokens
+        self._timeout = config.llm_timeout
+        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def stream_completion(
+        self,
+        prompt: str,
+        cancel_event: asyncio.Event | None = None,
+    ) -> AsyncIterator[str]:
+        """POST to /v1/completions with streaming, yield token strings.
+
+        Args:
+            prompt: The full prompt string to send to the LLM.
+            cancel_event: If set, the stream is aborted immediately.
+                Used by PREPARE to interrupt mid-generation during barge-in.
+
+        Retries up to max_retries on connection/server errors before yielding
+        any tokens. Once tokens have been yielded, errors are not retried
+        (to avoid duplicate output).
+        """
+        payload = {
+            "prompt": prompt,
+            "stream": True,
+            "n_predict": self._max_tokens,
+            "cache_prompt": True,
+        }
+        last_exc: Exception | None = None
+        has_yielded = False
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                async with self._client.stream(
+                    "POST", "/v1/completions", json=payload
+                ) as response:
+                    response.raise_for_status()
+                    async for token in _parse_sse_cancellable(response, cancel_event):
+                        has_yielded = True
+                        yield token
+                    return  # stream completed successfully
+            except (
+                httpx.ConnectError,
+                httpx.TimeoutException,
+                httpx.HTTPStatusError,
+            ) as exc:
+                # Don't retry if we've already yielded tokens — retrying
+                # would re-send the same prompt and produce duplicate output.
+                if has_yielded:
+                    logger.error("LLM stream failed after yielding tokens: %s", exc)
+                    return
+                last_exc = exc
+                logger.warning(
+                    "LLM server request failed (attempt %d/%d): %s",
+                    attempt,
+                    self._max_retries,
+                    exc,
+                )
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._retry_delay * attempt)
+
+        raise ConnectionError(
+            f"LLM server unreachable after {self._max_retries} attempts"
+        ) from last_exc
+
+    async def prefill(self, prompt: str) -> None:
+        """Send a prefill-only request (n_predict=0) to warm the KV cache.
+
+        Used by PrefillCache RPC between turns. Errors are logged but not fatal
+        — a failed prefill just means slightly higher first-token latency.
+        """
+        payload = {
+            "prompt": prompt,
+            "n_predict": 0,
+            "cache_prompt": True,
+        }
+        try:
+            response = await self._client.post("/v1/completions", json=payload)
+            response.raise_for_status()
+        except (
+            httpx.ConnectError,
+            httpx.TimeoutException,
+            httpx.HTTPStatusError,
+        ) as exc:
+            logger.warning("Prefill request failed (non-fatal): %s", exc)
+
+
+async def _parse_sse_cancellable(
+    response: httpx.Response,
+    cancel_event: asyncio.Event | None = None,
+) -> AsyncIterator[str]:
+    """Parse Server-Sent Events with cancellation support.
+
+    Expected format (llama.cpp / LM Studio):
+        data: {"content": "Hello", "stop": false}
+        data: {"content": "", "stop": true}
+        data: [DONE]
+
+    If cancel_event is set, the iterator raises asyncio.CancelledError
+    to abort the stream immediately — no waiting for the next token.
+    """
+    line_iter = response.aiter_lines().__aiter__()
+
+    while True:
+        # Race the next SSE line against the cancel event.
+        if cancel_event is not None and cancel_event.is_set():
+            return
+
+        try:
+            if cancel_event is not None:
+                # Wait for either the next line or cancellation.
+                line_task = asyncio.ensure_future(_anext(line_iter))
+                cancel_task = asyncio.ensure_future(cancel_event.wait())
+                done, pending = await asyncio.wait(
+                    {line_task, cancel_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+
+                if cancel_task in done:
+                    line_task.cancel()
+                    return
+
+                line = line_task.result()
+            else:
+                line = await _anext(line_iter)
+        except StopAsyncIteration:
+            return
+
+        if not line.startswith("data: "):
+            continue
+        data = line[6:]  # strip "data: " prefix
+        if data == "[DONE]":
+            return
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            logger.debug("Malformed SSE JSON, skipping: %s", data[:100])
+            continue
+        content = chunk.get("content", "")
+        if content:
+            yield content
+        if chunk.get("stop", False):
+            return
+
+
+async def _anext(aiter: AsyncIterator) -> str:
+    """Wrapper for __anext__ to make it awaitable for asyncio.wait."""
+    return await aiter.__anext__()

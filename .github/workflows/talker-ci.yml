@@ -1,0 +1,58 @@
+name: Talker CI
+
+on:
+  push:
+    paths:
+      - 'talker/**'
+      - 'proto/kaguya/v1/kaguya.proto'
+  pull_request:
+    paths:
+      - 'talker/**'
+      - 'proto/kaguya/v1/kaguya.proto'
+
+defaults:
+  run:
+    working-directory: talker
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uvx ruff check .
+      - run: uvx ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      # Install only the lightweight deps tests actually need.
+      # RealtimeSTT/RealtimeTTS require CUDA — not available in CI.
+      - run: |
+          uv venv
+          uv pip install pydantic-settings opuslib grpcio protobuf httpx pytest pytest-asyncio
+      - run: uv run --no-project pytest tests/ -v
+        env:
+          PYTHONPATH: .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - run: |
+          uv venv
+          uv pip install pydantic-settings opuslib grpcio httpx mypy
+      # --ignore-missing-imports: RealtimeSTT/TTS not installed in CI.
+      # Scope to authored code only (not proto stubs).
+      - run: uv run --no-project mypy config.py voice/ inference/ --ignore-missing-imports

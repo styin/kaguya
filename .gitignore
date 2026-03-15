@@ -13,19 +13,31 @@ Thumbs.db
 # Talker (Python)
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
 .venv/
 .pytest_cache/
-/talker/.venv/
+.coverage
+htmlcov/
 
 # Reasoner & Tools (TypeScript)
 node_modules/
 dist/
-/reasoner/node_modules/
-/tools/node_modules/
+*.tsbuildinfo
 
 # Models
 /models/*
 !/models/.gitkeep
+
+# Proto generated stubs
+# Talker: stubs are COMMITTED (see M0 decision - zero setup for end users)
+# Reasoner: runtime loading via @grpc/proto-loader (no generation)
+# Gateway: tonic-build generates during cargo build (gitignored)
+/reasoner/proto/
+/gateway/src/proto/
+
+# Claude Code local settings (per-developer, not shared)
+.claude/
 
 # Local data
 /config/MEMORY.md
