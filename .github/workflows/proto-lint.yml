@@ -13,4 +13,14 @@ jobs:
         run: git fetch origin main:main || true
       - uses: bufbuild/buf-setup-action@v1
       - run: buf lint proto/
-      - run: buf breaking proto/ --against '.git#branch=main'
+      - name: Check if main has proto files
+        id: has_baseline
+        run: |
+          if git show main:proto/kaguya/v1/kaguya.proto > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Breaking change detection
+        if: steps.has_baseline.outputs.exists == 'true'
+        run: buf breaking proto/ --against '.git#branch=main'
