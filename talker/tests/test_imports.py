@@ -12,12 +12,12 @@ def test_config_defaults():
     assert c.gateway_socket == "/tmp/kaguya-gateway.sock"
     assert c.silence_threshold_ms == 800
     assert c.syntax_silence_threshold_ms == 300
-    assert c.llama_cpp_url == "http://localhost:8080"
+    assert c.llm_base_url == "http://localhost:8080"
 
 
 def test_turn_detector_instantiates():
     from config import TalkerConfig
-    from voice.turn_detection import TurnDetector
+    from voice.turn_detector import TurnDetector
     td = TurnDetector(TalkerConfig())
     assert td._silence_ms == 800
     assert td._syntax_ms == 300
@@ -25,7 +25,7 @@ def test_turn_detector_instantiates():
 
 def test_turn_detector_no_emit_before_vad_stop():
     from config import TalkerConfig
-    from voice.turn_detection import TurnDetector
+    from voice.turn_detector import TurnDetector
     td = TurnDetector(TalkerConfig())
     td.on_speech_start()
     # No vad_stop yet — should never emit regardless of text
@@ -36,7 +36,7 @@ def test_turn_detector_no_emit_before_vad_stop():
 def test_turn_detector_emits_after_vad_stop_complete_sentence():
     import time
     from config import TalkerConfig
-    from voice.turn_detection import TurnDetector
+    from voice.turn_detector import TurnDetector
 
     cfg = TalkerConfig()
     td = TurnDetector(cfg)
@@ -53,7 +53,7 @@ def test_turn_detector_emits_after_vad_stop_complete_sentence():
 def test_turn_detector_waits_for_incomplete_sentence():
     import time
     from config import TalkerConfig
-    from voice.turn_detection import TurnDetector
+    from voice.turn_detector import TurnDetector
 
     td = TurnDetector(TalkerConfig())
     td.on_speech_start()
@@ -69,7 +69,7 @@ def test_turn_detector_waits_for_incomplete_sentence():
 def test_turn_detector_unconditional_emit_at_800ms():
     import time
     from config import TalkerConfig
-    from voice.turn_detection import TurnDetector
+    from voice.turn_detector import TurnDetector
 
     td = TurnDetector(TalkerConfig())
     td.on_speech_start()
