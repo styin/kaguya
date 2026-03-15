@@ -111,7 +111,7 @@ def test_stale_tick_loop_exits_on_turn_id_mismatch():
     # on_silence_tick. Let's verify on_silence_tick would also be safe:
     td._vad_stop_ts = time.monotonic() - 1.0
     td._buffer = "New text."
-    result = td.on_silence_tick()
+    td.on_silence_tick()
     # This WOULD emit for the new utterance — but the tick loop never gets here
     # because it exits on turn_id mismatch first. Still, verify the turn_id
     # check is the correct guard:

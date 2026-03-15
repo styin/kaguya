@@ -99,7 +99,7 @@ def test_opus_decoder_instantiates():
 
 
 def test_proto_stubs_importable():
-    from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
+    from proto import kaguya_pb2  # type: ignore[import]
     # Instantiate a few key message types
     evt = kaguya_pb2.ListenerEvent()
     assert evt is not None

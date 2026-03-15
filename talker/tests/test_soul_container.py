@@ -10,7 +10,6 @@ import uuid
 from inference.soul_container import (
     IdentityConfig,
     VocabRule,
-    SoulContainerResult,
     parse_identity_config,
     process,
 )

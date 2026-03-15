@@ -31,3 +31,17 @@ dev-dependencies = [
 # NOTE: uv doesn't support [tool.uv.scripts] in stable releases yet.
 # To regenerate proto stubs: make proto (from repo root)
 # Or: python scripts/gen_proto.py (from talker/)
+
+[tool.ruff]
+exclude = ["proto/"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.mypy]
+# Generated proto stubs use dynamic protobuf descriptors — mypy can't resolve
+# attributes like kaguya_pb2.ListenerEvent or kaguya_pb2.ROLE_SYSTEM.
+# Skip type analysis on generated code; authored code still gets checked.
+[[tool.mypy.overrides]]
+module = "proto.*"
+follow_imports = "skip"

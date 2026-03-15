@@ -38,6 +38,8 @@ jobs:
           uv venv
           uv pip install pydantic-settings opuslib grpcio httpx pytest pytest-asyncio
       - run: uv run --no-project pytest tests/ -v
+        env:
+          PYTHONPATH: .
 
   typecheck:
     runs-on: ubuntu-latest
