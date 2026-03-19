@@ -81,8 +81,8 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         self._cancel_event.clear()  # clears from previous PREPARE event
         self._speaker.reset()
 
-        seq: int = 0  # increments with each yield, used for ...
-        sentence_count: int = 0  # increments with each sentence, used for ...
+        seq: int = 0  # increments with each yield, used for ... TODO
+        sentence_count: int = 0  # increments with each sentence, used for ... TODO
         turn_id = request.turn_id  # unique per ProcessPrompt call
 
         # Yield `ResponseStarted`
@@ -116,9 +116,11 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                     sentence_count += 1
 
                     # Emit sentence for post-processing -> TalkerOutput + TTS
-                    seq = yield from _emit_sentence(
+                    for out in _emit_sentence(
                         sentence, self._identity, self._speaker, seq
-                    )
+                    ):
+                        yield out
+                    seq = out.seq
 
                     # Truncation of over-long responses
                     if sentence_count >= self._config.max_response_sentences:
@@ -137,9 +139,11 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                 if remainder:
                     sentence_count += 1
                     if sentence_count <= self._config.max_response_sentences:
-                        seq = yield from _emit_sentence(
+                        for out in _emit_sentence(
                             remainder, self._identity, self._speaker, seq
-                        )
+                        ):
+                            yield out
+                        seq = out.seq
 
         except ConnectionError as exc:
             logger.error("LLM connection failed during generation: %s", exc)

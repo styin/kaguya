@@ -138,8 +138,8 @@ async def _parse_sse_cancellable(
         data: {"content": "", "stop": true}
         data: [DONE]
 
-    If cancel_event is set, the iterator raises asyncio.CancelledError
-    to abort the stream immediately — no waiting for the next token.
+    If cancel_event is set, the iterator returns immediately —
+    no waiting for the next token.
     """
     line_iter = response.aiter_lines().__aiter__()
 

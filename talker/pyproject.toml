@@ -7,7 +7,8 @@ dependencies = [
     "RealtimeSTT",
     "RealtimeTTS[kokoro]",
     "opuslib",
-    "grpcio>=1.60.0",
+    "grpcio>=1.78.0",
+    "protobuf>=6.31.1",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "httpx>=0.27.0",
@@ -25,7 +26,7 @@ packages = ["voice", "inference"]
 dev-dependencies = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "grpcio-tools>=1.60.0",
+    "grpcio-tools>=1.78.0",
 ]
 
 # NOTE: uv doesn't support [tool.uv.scripts] in stable releases yet.

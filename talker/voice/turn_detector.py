@@ -124,6 +124,10 @@ class TurnDetector:
     # ──────────────────────────────────────────
 
     def _evaluate(self, silence_ms: float) -> str | None:
+        # NOTE: _buffer is read here without _emit_lock. This is safe because
+        # partial transcripts are monotonically growing (each Whisper update is
+        # the full accumulated text), so a newer buffer is always a superset of
+        # what was validated. _emit() acquires the lock to prevent double-emit.
         if silence_ms < self._syntax_ms:
             # Firmly inside normal clause-boundary pause territory — always wait.
             return None
