@@ -1,0 +1,20 @@
+{
+  "name": "kaguya-reasoner",
+  "version": "0.1.0",
+  "description": "Kaguya Reasoner — OpenClaw/Claude Code adapter, streams ReasonerEvents to Gateway",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.10.0",
+    "@grpc/proto-loader": "^0.7.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}
