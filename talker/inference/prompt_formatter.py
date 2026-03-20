@@ -18,6 +18,7 @@ llama.cpp, LM Studio, and all OpenAI-compatible servers.
 import logging
 from datetime import datetime, timezone
 
+from inference.soul_container import VALID_EMOTIONS
 from proto import kaguya_pb2  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,8 @@ _IM_START = "<|im_start|>"
 _IM_END = "<|im_end|>"
 
 # Canonical emotion tag values (spec-agent §3.3, EmotionEvent comment).
-_EMOTION_VALUES = "joy|concern|thinking|surprise|neutral|determined"
+# Single source of truth lives in soul_container.VALID_EMOTIONS.
+_EMOTION_VALUES = "|".join(sorted(VALID_EMOTIONS))
 
 # Structured output instructions injected into the system prompt.
 _TAG_INSTRUCTIONS = f"""\
@@ -156,15 +158,17 @@ def _msg(role: str, content: str, *, name: str | None = None) -> str:
     return f"{_IM_START}{header}\n{content}{_IM_END}\n"
 
 
+_ROLE_MAP = {
+    kaguya_pb2.ROLE_SYSTEM: "system",
+    kaguya_pb2.ROLE_USER: "user",
+    kaguya_pb2.ROLE_ASSISTANT: "assistant",
+    kaguya_pb2.ROLE_TOOL: "tool",
+}
+
+
 def _role_to_str(role: int) -> str:
     """Convert proto Role enum to chat template role string."""
-    mapping = {
-        kaguya_pb2.ROLE_SYSTEM: "system",
-        kaguya_pb2.ROLE_USER: "user",
-        kaguya_pb2.ROLE_ASSISTANT: "assistant",
-        kaguya_pb2.ROLE_TOOL: "tool",
-    }
-    result = mapping.get(role)
+    result = _ROLE_MAP.get(role)
     if result is None:
         logger.warning("Unknown proto Role enum value %d, defaulting to 'user'", role)
         return "user"

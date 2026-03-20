@@ -55,6 +55,7 @@ async def main() -> None:
         pass
     finally:
         listener_task.cancel()
+        await asyncio.gather(listener_task, return_exceptions=True)
         await servicer.close()
         await server.stop(grace=2.0)
         logger.info("Talker Agent shut down")

@@ -34,6 +34,9 @@ _DELEGATE_RE = re.compile(r"\[DELEGATE:(.+?)\]")
 # Catch-all for any remaining bracket tags to strip hallucinations.
 _UNKNOWN_TAG_RE = re.compile(r"\[[A-Z_]+:[^\]]*\]")
 
+# Collapse runs of whitespace left after tag removal.
+_MULTI_SPACE_RE = re.compile(r"\s{2,}")
+
 # ──────────────────────────────────────────
 # Emotion normalization map
 # ──────────────────────────────────────────
@@ -56,7 +59,10 @@ _EMOTION_ALIASES: dict[str, str] = {
 
 # TODO: Move valid emotions and aliases to IDENTITY.md (configurable per persona).
 # Deferred until a downstream consumer (frontend, TTS prosody) defines requirements.
-_VALID_EMOTIONS = {"joy", "concern", "thinking", "surprise", "neutral", "determined"}
+# Canonical list. prompt_formatter.py imports this to keep prompt instructions in sync.
+VALID_EMOTIONS = frozenset(
+    {"joy", "concern", "thinking", "surprise", "neutral", "determined"}
+)
 
 
 # ──────────────────────────────────────────
@@ -163,7 +169,7 @@ def process(sentence: str, identity: IdentityConfig) -> SoulContainerResult:
     for match in _EMOTION_RE.finditer(text):
         raw = match.group(1).lower()
         normalized = _EMOTION_ALIASES.get(raw, raw)
-        if normalized in _VALID_EMOTIONS:
+        if normalized in VALID_EMOTIONS:
             result.emotions.append(normalized)
         else:
             logger.debug("Unknown emotion tag dropped: %s", raw)
@@ -194,7 +200,7 @@ def process(sentence: str, identity: IdentityConfig) -> SoulContainerResult:
     text = _UNKNOWN_TAG_RE.sub("", text)
 
     # 5. Clean up whitespace.
-    text = re.sub(r"\s{2,}", " ", text).strip()
+    text = _MULTI_SPACE_RE.sub(" ", text).strip()
 
     # 6. Apply vocabulary rules from IDENTITY.md.
     for rule in identity.vocab_rules:

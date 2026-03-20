@@ -10,6 +10,7 @@ cancellation and persona updates.
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator, Generator
 
 import grpc
 
@@ -63,7 +64,7 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         self,
         request: kaguya_pb2.TalkerContext,
         context: grpc.aio.ServicerContext,
-    ):
+    ) -> AsyncGenerator[kaguya_pb2.TalkerOutput, None]:
         """
         Format prompt → stream tokens → sentences → soul container → yield TalkerOutput.
 
@@ -148,8 +149,8 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         except ConnectionError as exc:
             logger.error("LLM connection failed during generation: %s", exc)
             was_interrupted = True
-        except Exception as exc:
-            logger.error("Unexpected error during generation: %s", exc)
+        except Exception:
+            logger.exception("Unexpected error during generation")
             was_interrupted = True
 
         # Yield `ResponseComplete` as the final message.
@@ -219,7 +220,7 @@ def _emit_sentence(
     identity: IdentityConfig,
     speaker: Speaker,
     seq: int,
-) -> int:
+) -> Generator[kaguya_pb2.TalkerOutput, None, None]:
     """Process a sentence through the soul container and yield TalkerOutput messages.
 
     Returns the updated sequence number.
@@ -264,4 +265,3 @@ def _emit_sentence(
             delegate_request=delegate_req,
         )
 
-    return seq
