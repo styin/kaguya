@@ -120,8 +120,8 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                     for out in _emit_sentence(
                         sentence, self._identity, self._speaker, seq
                     ):
-                        seq = out.seq
                         yield out
+                    seq = out.seq
 
                     # Truncation of over-long responses
                     if sentence_count >= self._config.max_response_sentences:
@@ -143,8 +143,8 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                         for out in _emit_sentence(
                             remainder, self._identity, self._speaker, seq
                         ):
-                            seq = out.seq
                             yield out
+                        seq = out.seq
 
         except ConnectionError as exc:
             logger.error("LLM connection failed during generation: %s", exc)
