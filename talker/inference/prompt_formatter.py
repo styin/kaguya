@@ -166,7 +166,7 @@ _ROLE_MAP = {
 }
 
 
-def _role_to_str(role: int) -> str:
+def _role_to_str(role: kaguya_pb2.Role.ValueType) -> str:
     """Convert proto Role enum to chat template role string."""
     result = _ROLE_MAP.get(role)
     if result is None:
