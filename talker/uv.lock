@@ -907,6 +907,7 @@ dependencies = [
     { name = "grpcio" },
     { name = "httpx" },
     { name = "opuslib" },
+    { name = "protobuf" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "realtimestt" },
@@ -922,9 +923,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "grpcio", specifier = ">=1.60.0" },
+    { name = "grpcio", specifier = ">=1.78.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "opuslib" },
+    { name = "protobuf", specifier = ">=6.31.1" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "realtimestt" },
@@ -933,7 +935,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "grpcio-tools", specifier = ">=1.60.0" },
+    { name = "grpcio-tools", specifier = ">=1.78.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
 ]
