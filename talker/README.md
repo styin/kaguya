@@ -38,14 +38,41 @@ pytest  # ✅ works immediately
 
 ## Prerequisites (Runtime)
 
-- **llama.cpp server** — running Qwen3-8B Q4 on `http://localhost:8080`
-- **Gateway** — running and listening on `/tmp/kaguya-gateway.sock`
+- **LLM server** — OpenAI-compatible `/v1/completions` endpoint (llama.cpp, LM Studio, vLLM)
+- **Gateway** — running and listening on `/tmp/kaguya-gateway.sock` (not needed for test harness)
 
 ---
 
 ## Environment Setup
 
-The project uses **conda for Python version management** and **uv for Python packages**. On Windows, opus.dll is bundled in `native/win32/` — no conda packages needed for native libraries.
+The project uses **conda for Python version management** and **uv for Python packages**.
+
+### System dependencies (Linux/WSL)
+
+```sh
+sudo apt install build-essential portaudio19-dev libopus-dev espeak-ng
+```
+
+| Package | Why |
+|---------|-----|
+| `build-essential` | C compiler for PyAudio wheel |
+| `portaudio19-dev` | PortAudio headers for PyAudio (mic capture) |
+| `libopus-dev` | Opus codec for opuslib |
+| `espeak-ng` | Phoneme engine for Kokoro TTS |
+
+### WSL2-specific setup (audio passthrough via WSLg)
+
+```sh
+# Route ALSA through PulseAudio (WSLg provides PulseAudio automatically)
+sudo apt install libasound2-plugins
+echo 'pcm.default pulse
+ctl.default pulse' > ~/.asoundrc
+
+# Verify mic access
+pactl info  # should show RDPSource/RDPSink
+```
+
+Ensure **microphone access** is enabled on Windows: Settings → Privacy & Security → Microphone → Let desktop apps access your microphone → On.
 
 ### First-time setup
 
@@ -60,6 +87,9 @@ pip install uv
 # 3. Install all Python dependencies
 cd talker
 uv sync
+
+# 4. Install pip into the venv (Kokoro TTS needs it at runtime)
+uv pip install pip
 ```
 
 ### Adding/removing dependencies
@@ -71,15 +101,8 @@ uv remove <package>
 
 ### Native Dependencies (Windows)
 
-- **opus.dll** is bundled in `native/win32/` — no conda install needed
-- For Linux/macOS: Install via system package manager
-  ```sh
-  # Linux
-  sudo apt install libopus0
-
-  # macOS
-  brew install opus
-  ```
+- **opus.dll** is bundled in `native/win32/` — no system install needed
+- For Linux/macOS: Install via system package manager (see above)
 
 ---
 
@@ -121,6 +144,26 @@ git commit -m "proto: update schema"
 conda activate kaguya
 pytest -v
 ```
+
+### Test Harness (Full Pipeline Without Gateway)
+
+`scripts/test_harness.py` spins up the Talker pipeline in a single process, bypassing the Gateway. Useful for end-to-end testing of STT → LLM → TTS.
+
+```sh
+# Text mode (no mic/TTS, just LLM pipeline):
+KAGUYA_LLM_BASE_URL=http://localhost:8080 uv run python scripts/test_harness.py --text --no-tts
+
+# Mic → STT → LLM → print (no TTS):
+KAGUYA_LLM_BASE_URL=http://localhost:8080 uv run python scripts/test_harness.py --mic --no-tts
+
+# Full E2E with TTS playback:
+KAGUYA_LLM_BASE_URL=http://localhost:8080 uv run python scripts/test_harness.py --mic
+
+# WSL2: LLM server on Windows host (LM Studio listening on 0.0.0.0):
+KAGUYA_LLM_BASE_URL=http://$(ip route show default | awk '{print $3}'):8080 uv run python scripts/test_harness.py --text --no-tts
+```
+
+**Note:** When running with TTS on WSL2, expect ALSA underrun warnings — this is a WSLg audio latency limitation, not a bug.
 
 ---
 

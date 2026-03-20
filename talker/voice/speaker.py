@@ -45,7 +45,7 @@ class Speaker:
         self._synthesized_count: int = 0
         self._playing: bool = False
 
-    def _on_sentence_synthesized(self) -> None:
+    def _on_sentence_synthesized(self, _sentence: str = "") -> None:
         """Callback from RealtimeTTS when a sentence finishes synthesis."""
         self._synthesized_count += 1
 
@@ -53,10 +53,12 @@ class Speaker:
         """Feed one sentence to TTS for synthesis and playback.
 
         Non-blocking. The sentence is queued; TTS streams audio as it generates.
+        Restarts playback if the previous play_async finished before new text
+        was fed (i.e., LLM generation was slower than TTS synthesis).
         """
         self._sentences.append(text)
         self._stream.feed(text)
-        if not self._playing:
+        if not self._playing or not self._stream.is_playing():
             self._stream.play_async(
                 on_sentence_synthesized=self._on_sentence_synthesized,
             )

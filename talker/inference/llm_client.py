@@ -65,8 +65,9 @@ class LLMClient:
         payload = {
             "prompt": prompt,
             "stream": True,
-            "n_predict": self._max_tokens,
-            "cache_prompt": True,
+            "max_tokens": self._max_tokens,  # OpenAI-compatible
+            "n_predict": self._max_tokens,  # llama.cpp native
+            "cache_prompt": True,  # llama.cpp KV cache reuse (ignored by others)
         }
         last_exc: Exception | None = None
         has_yielded = False
@@ -77,7 +78,9 @@ class LLMClient:
                     "POST", "/v1/completions", json=payload
                 ) as response:
                     response.raise_for_status()
-                    async for token in _parse_sse_cancellable(response, cancel_event):
+                    async for token in _strip_think_blocks(
+                        _parse_sse_cancellable(response, cancel_event)
+                    ):
                         has_yielded = True
                         yield token
                     return  # stream completed successfully
@@ -113,7 +116,8 @@ class LLMClient:
         """
         payload = {
             "prompt": prompt,
-            "n_predict": 0,
+            "max_tokens": 0,  # OpenAI-compatible
+            "n_predict": 0,  # llama.cpp native
             "cache_prompt": True,
         }
         try:
@@ -191,6 +195,70 @@ async def _parse_sse_cancellable(
             yield text
         if choice.get("finish_reason") is not None:
             return
+
+
+async def _strip_think_blocks(tokens: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Filter out tokens inside <think>...</think> blocks.
+
+    Some models (e.g., Qwen3.5) emit thinking blocks before or during speech.
+    This strips them at the token level so downstream consumers (sentence
+    detector, soul container) only see spoken content.
+
+    Handles partial tags across token boundaries (e.g., "<" then "think>")
+    and nested/repeated <think> tags.
+    """
+    in_think = False
+    buf = ""
+
+    async for token in tokens:
+        buf += token
+
+        while buf:
+            if in_think:
+                # Look for closing tag.
+                end = buf.find("</think>")
+                if end != -1:
+                    # Skip everything up to and including </think>.
+                    buf = buf[end + 8 :]
+                    in_think = False
+                    continue
+                # Might have a partial "</think" at the end — keep it buffered.
+                if buf.endswith("<") or any(
+                    buf.endswith("</think"[:i]) for i in range(2, 8)
+                ):
+                    break
+                # No closing tag and no partial — discard everything.
+                buf = ""
+                break
+            else:
+                # Look for opening tag.
+                start = buf.find("<think>")
+                if start != -1:
+                    # Yield text before the tag.
+                    before = buf[:start]
+                    if before:
+                        yield before
+                    buf = buf[start + 7 :]
+                    in_think = True
+                    continue
+                # Check for partial "<think" at the end.
+                if buf.endswith("<") or any(
+                    buf.endswith("<think"[:i]) for i in range(2, 7)
+                ):
+                    # Yield everything except the potential partial tag.
+                    safe = buf[: -(len(buf) - buf.rfind("<"))]
+                    if safe:
+                        yield safe
+                    buf = buf[len(safe) :]
+                    break
+                # No tag at all — yield everything.
+                yield buf
+                buf = ""
+                break
+
+    # Flush remaining buffer (not inside a think block).
+    if buf and not in_think:
+        yield buf
 
 
 async def _anext(aiter: AsyncIterator) -> str:
