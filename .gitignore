@@ -6,6 +6,10 @@
 .DS_Store
 Thumbs.db
 
+# IDE
+.vscode/
+.idea/
+
 # Gateway (Rust)
 /gateway/target/
 **/*.rs.bk
