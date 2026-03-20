@@ -180,10 +180,16 @@ async def _parse_sse_cancellable(
         except json.JSONDecodeError:
             logger.debug("Malformed SSE JSON, skipping: %s", data[:100])
             continue
-        content = chunk.get("content", "")
-        if content:
-            yield content
-        if chunk.get("stop", False):
+        # OpenAI-compatible /v1/completions format:
+        # {"choices": [{"text": "token", "finish_reason": null|"stop"}]}
+        choices = chunk.get("choices")
+        if not choices:
+            continue
+        choice = choices[0]
+        text = choice.get("text", "")
+        if text:
+            yield text
+        if choice.get("finish_reason") is not None:
             return
 
 

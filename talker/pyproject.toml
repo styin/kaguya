@@ -41,5 +41,10 @@ exclude = ["proto/"]
 pythonpath = ["."]
 
 [tool.mypy]
-# mypy-protobuf generates .pyi stubs alongside proto code, so mypy/Pylance
-# can resolve protobuf attributes. No need to skip proto imports.
+# mypy-protobuf generates .pyi stubs for proto code, so mypy/Pylance can
+# resolve protobuf message/enum attributes. The grpc stubs have @overload
+# signatures that mypy flags (overload-cannot-match) — suppress on generated
+# code only; authored code is fully checked.
+[[tool.mypy.overrides]]
+module = "proto.*"
+disable_error_code = ["overload-cannot-match"]
