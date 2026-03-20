@@ -264,4 +264,3 @@ def _emit_sentence(
             seq=seq,
             delegate_request=delegate_req,
         )
-
