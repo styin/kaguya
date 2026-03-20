@@ -27,6 +27,7 @@ dev-dependencies = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "grpcio-tools>=1.78.0",
+    "mypy-protobuf>=3.6",
 ]
 
 # NOTE: uv doesn't support [tool.uv.scripts] in stable releases yet.
@@ -40,9 +41,5 @@ exclude = ["proto/"]
 pythonpath = ["."]
 
 [tool.mypy]
-# Generated proto stubs use dynamic protobuf descriptors — mypy can't resolve
-# attributes like kaguya_pb2.ListenerEvent or kaguya_pb2.ROLE_SYSTEM.
-# Skip type analysis on generated code; authored code still gets checked.
-[[tool.mypy.overrides]]
-module = "proto.*"
-follow_imports = "skip"
+# mypy-protobuf generates .pyi stubs alongside proto code, so mypy/Pylance
+# can resolve protobuf attributes. No need to skip proto imports.

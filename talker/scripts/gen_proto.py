@@ -24,7 +24,9 @@ def main():
     proto_dir.mkdir(exist_ok=True)
 
     # Generate stubs using grpcio-tools (bundled protoc)
-    print("==> Generating Python stubs with grpcio-tools...")
+    # --mypy_out generates .pyi type stubs so Pylance/mypy can resolve
+    # dynamically-generated protobuf attributes (messages, enums, fields).
+    print("==> Generating Python stubs with grpcio-tools + mypy-protobuf...")
     subprocess.run(
         [
             sys.executable,
@@ -33,6 +35,8 @@ def main():
             f"-I{proto_src.parent}",
             f"--python_out={proto_dir}",
             f"--grpc_python_out={proto_dir}",
+            f"--mypy_out={proto_dir}",
+            f"--mypy_grpc_out={proto_dir}",
             proto_src.name,
         ],
         check=True,
