@@ -37,8 +37,8 @@ async def main() -> None:
     # Start gRPC server on Unix socket.
     server = grpc.aio.server()
     kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(servicer, server)
-    socket_addr = f"unix://{config.gateway_socket}"
-    server.add_insecure_port(socket_addr)
+    socket_addr = f"{config.talker_listen_addr}"
+    server.add_insecure_port(config.talker_listen_addr)
     await server.start()
     logger.info("gRPC TalkerService listening on %s", socket_addr)
 
