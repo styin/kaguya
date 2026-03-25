@@ -9,129 +9,118 @@
 
 use crate::history::History;
 use crate::memory::Memory;
+use crate::proto;
 use crate::tools::ToolRegistry;
-use crate::types::*;
-use std::time::Duration;
+use crate::types::ActiveTask;
 
+/// 常规 user turn
 pub async fn assemble(
+    conversation_id: &str,
+    turn_id: &str,
     user_input: &str,
     history: &History,
     memory: &Memory,
     tools: &ToolRegistry,
     active_tasks: &[ActiveTask],
-    pending_results: &[AsyncResult],
-) -> ContextPackage {
-    let now = chrono::Local::now();
-    ContextPackage {
-        user_input: user_input.to_string(),
-        memory_contents: memory.contents().await,
+) -> proto::TalkerContext {
+    proto::TalkerContext {
+        conversation_id: conversation_id.into(),
+        turn_id: turn_id.into(),
+        user_input: user_input.into(),
         history: history.recent().await,
-        active_tasks: active_tasks.to_vec(),
-        available_tools: tools.list(),
-        pending_results: pending_results.to_vec(),
-        metadata: ContextMetadata {
-            timestamp: now.to_rfc3339(),
-            timezone: now.format("%Z").to_string(),
-        },
+        memory_contents: memory.contents().await,
+        tools: tools.definitions(),
+        active_tasks_json: serde_json::to_string(active_tasks).unwrap_or_default(),
+        tool_result_content: String::new(),
+        tool_request_id: String::new(),
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        reasoner_task_id: String::new(),
+        reasoner_result_content: String::new(),
     }
 }
 
-/// 带工具结果的 context（工具完成后的续接轮次）
+/// 工具结果续接
 pub async fn with_tool_result(
-    tool_name: &str,
-    result: &serde_json::Value,
-    success: bool,
+    conversation_id: &str,
+    turn_id: &str,
+    request_id: &str,
+    content: &str,
     history: &History,
     memory: &Memory,
     tools: &ToolRegistry,
     active_tasks: &[ActiveTask],
-) -> ContextPackage {
-    assemble(
-        "", // 无新用户输入 — 续接轮次
-        history,
-        memory,
-        tools,
-        active_tasks,
-        &[AsyncResult {
-            source: "tool".into(),
-            name_or_id: tool_name.into(),
-            content: result.to_string(),
-            success,
-        }],
-    )
-    .await
+) -> proto::TalkerContext {
+    let mut ctx = assemble(conversation_id, turn_id, "", history, memory, tools, active_tasks).await;
+    ctx.tool_request_id = request_id.into();
+    ctx.tool_result_content = content.into();
+    ctx
 }
 
-/// 带推理结果的 context
+/// Reasoner 结果续接
 pub async fn with_reasoner_result(
+    conversation_id: &str,
+    turn_id: &str,
     task_id: &str,
     result: &str,
     history: &History,
     memory: &Memory,
     tools: &ToolRegistry,
     active_tasks: &[ActiveTask],
-) -> ContextPackage {
-    assemble(
-        "",
-        history,
-        memory,
-        tools,
-        active_tasks,
-        &[AsyncResult {
-            source: "reasoner".into(),
-            name_or_id: task_id.into(),
-            content: result.into(),
-            success: true,
-        }],
-    )
-    .await
+) -> proto::TalkerContext {
+    let mut ctx = assemble(conversation_id, turn_id, "", history, memory, tools, active_tasks).await;
+    ctx.reasoner_task_id = task_id.into();
+    ctx.reasoner_result_content = result.into();
+    ctx
 }
 
-/// 静默触发的 context
+/// 静默触发
 pub async fn for_silence(
-    duration: Duration,
+    conversation_id: &str,
+    turn_id: &str,
+    duration: std::time::Duration,
     history: &History,
     memory: &Memory,
     tools: &ToolRegistry,
-) -> ContextPackage {
+) -> proto::TalkerContext {
     assemble(
+        conversation_id,
+        turn_id,
         &format!("[SYSTEM: {}s silence since last exchange]", duration.as_secs()),
-        history,
-        memory,
-        tools,
-        &[],
-        &[],
-    )
-    .await
+        history, memory, tools, &[],
+    ).await
 }
 
-/// 叙事用 context（Reasoner 中间步骤）
+/// Reasoner 中间步骤叙事
 pub async fn for_narration(
+    conversation_id: &str,
+    turn_id: &str,
     step: &str,
     history: &History,
     memory: &Memory,
-) -> ContextPackage {
-    let now = chrono::Local::now();
-    ContextPackage {
+) -> proto::TalkerContext {
+    proto::TalkerContext {
+        conversation_id: conversation_id.into(),
+        turn_id: turn_id.into(),
         user_input: format!("[REASONER_UPDATE: {step}]"),
-        memory_contents: memory.contents().await,
         history: history.recent().await,
-        active_tasks: vec![],
-        available_tools: vec![],
-        pending_results: vec![],
-        metadata: ContextMetadata {
-            timestamp: now.to_rfc3339(),
-            timezone: now.format("%Z").to_string(),
-        },
+        memory_contents: memory.contents().await,
+        tools: vec![],
+        active_tasks_json: String::new(),
+        tool_result_content: String::new(),
+        tool_request_id: String::new(),
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        reasoner_task_id: String::new(),
+        reasoner_result_content: String::new(),
     }
 }
 
-/// 投机预填充用 context（n_predict: 0）
+/// 投机预填充
 pub async fn for_prefill(
+    conversation_id: &str,
     history: &History,
     memory: &Memory,
     tools: &ToolRegistry,
     active_tasks: &[ActiveTask],
-) -> ContextPackage {
-    assemble("", history, memory, tools, active_tasks, &[]).await
+) -> proto::TalkerContext {
+    assemble(conversation_id, "", "", history, memory, tools, active_tasks).await
 }

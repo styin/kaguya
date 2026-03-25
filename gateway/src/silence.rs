@@ -8,56 +8,40 @@
 
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-
 use crate::types::InputEvent;
 
 pub struct SilenceTimers {
-    thresholds: [Duration; 3],
+    soft_secs: u64,
+    follow_up_secs: u64,
+    context_shift_secs: u64,
     p4_tx: mpsc::Sender<InputEvent>,
 }
 
 impl SilenceTimers {
-    pub fn new(
-        soft_secs: u64,
-        follow_up_secs: u64,
-        context_shift_secs: u64,
-        p4_tx: mpsc::Sender<InputEvent>,
-    ) -> Self {
-        Self {
-            thresholds: [
-                Duration::from_secs(soft_secs),
-                Duration::from_secs(follow_up_secs),
-                Duration::from_secs(context_shift_secs),
-            ],
-            p4_tx,
-        }
+    pub fn new(soft: u64, follow_up: u64, context_shift: u64, p4_tx: mpsc::Sender<InputEvent>) -> Self {
+        Self { soft_secs: soft, follow_up_secs: follow_up, context_shift_secs: context_shift, p4_tx }
     }
 
-    /// 启动静默计时器。返回 CancellationToken 供事件循环持有。
-    /// 到达每个阈值时发出 P4 事件。被 cancel 则所有计时器立即停止。
+    /// 启动三级级联计时器，返回 token 用于取消
     pub fn start(&self) -> CancellationToken {
         let token = CancellationToken::new();
         let child = token.child_token();
-        let thresholds = self.thresholds;
+        let targets = [self.soft_secs, self.follow_up_secs, self.context_shift_secs];
         let tx = self.p4_tx.clone();
 
         tokio::spawn(async move {
-            let start = Instant::now();
-
-            for threshold in &thresholds {
-                let remaining = threshold.saturating_sub(start.elapsed());
+            let mut elapsed = 0u64;
+            for &target in &targets {
+                let wait = target.saturating_sub(elapsed);
                 tokio::select! {
-                    _ = time::sleep(remaining) => {
-                        let elapsed = start.elapsed();
-                        debug!(secs = elapsed.as_secs(), "silence threshold reached");
-                        let _ = tx
-                            .send(InputEvent::SilenceExceeded { duration: elapsed })
-                            .await;
-                    }
                     _ = child.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(wait)) => {
+                        elapsed = target;
+                        let _ = tx.send(InputEvent::SilenceExceeded {
+                            duration: Duration::from_secs(target),
+                        }).await;
+                    }
                 }
             }
         });

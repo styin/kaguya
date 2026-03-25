@@ -18,22 +18,11 @@ impl OutputManager {
         audio_tx: mpsc::Sender<bytes::Bytes>,
         metadata_tx: mpsc::Sender<MetadataEvent>,
     ) -> Self {
-        Self {
-            audio_muted: AtomicBool::new(false),
-            audio_tx,
-            metadata_tx,
-        }
+        Self { audio_muted: AtomicBool::new(false), audio_tx, metadata_tx }
     }
 
-    /// PREPARE 时调用 — 停止转发 Talker 音频
-    pub fn mute_audio(&self) {
-        self.audio_muted.store(true, Ordering::SeqCst);
-    }
-
-    /// 新推理轮次开始时调用 — 恢复转发
-    pub fn unmute_audio(&self) {
-        self.audio_muted.store(false, Ordering::SeqCst);
-    }
+    pub fn mute_audio(&self)   { self.audio_muted.store(true, Ordering::SeqCst); }
+    pub fn unmute_audio(&self) { self.audio_muted.store(false, Ordering::SeqCst); }
 
     pub async fn send_audio(&self, data: bytes::Bytes) {
         if !self.audio_muted.load(Ordering::SeqCst) {
@@ -41,23 +30,17 @@ impl OutputManager {
         }
     }
 
-    pub async fn send_text(&self, text: &str, is_final: bool) {
-        let _ = self
-            .metadata_tx
-            .send(MetadataEvent {
-                event_type: "transcript".into(),
-                data: serde_json::json!({"text": text, "is_final": is_final}),
-            })
-            .await;
+    pub async fn send_sentence(&self, text: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "sentence".into(),
+            data: serde_json::json!({ "text": text }),
+        }).await;
     }
 
-    pub async fn send_emotion(&self, emotion: &str, intensity: f32) {
-        let _ = self
-            .metadata_tx
-            .send(MetadataEvent {
-                event_type: "emotion".into(),
-                data: serde_json::json!({"emotion": emotion, "intensity": intensity}),
-            })
-            .await;
+    pub async fn send_emotion(&self, emotion: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "emotion".into(),
+            data: serde_json::json!({ "emotion": emotion }),
+        }).await;
     }
 }

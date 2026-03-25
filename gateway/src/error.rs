@@ -1,15 +1,15 @@
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Error)]
 pub enum GatewayError {
-    #[error("channel closed: {0}")]
-    ChannelClosed(String),
-    #[error("file error: {0}")]
-    File(#[from] std::io::Error),
+    #[error("gRPC error: {0}")]
+    Grpc(#[from] tonic::Status),
+    #[error("transport error: {0}")]
+    Transport(#[from] tonic::transport::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("config error: {0}")]
     Config(String),
-    #[error("gRPC: {0}")]
-    Grpc(#[from] tonic::Status),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[error("{0}")]
+    Other(String),
 }

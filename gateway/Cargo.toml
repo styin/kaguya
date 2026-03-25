@@ -3,30 +3,31 @@ name = "kaguya-gateway"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "kaguya-gateway"
+path = "src/main.rs"
+
 [dependencies]
-tokio       = { version = "1", features = ["full"] }
-tokio-util  = { version = "0.7", features = ["rt"] }  # CancellationToken
-tonic       = "0.12"
-prost       = "0.13"
-
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-toml        = "0.8"
-
-tracing            = "0.1"
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-chrono  = { version = "0.4", features = ["serde"] }
-uuid    = { version = "1", features = ["v4"] }
-bytes   = "1"
-notify  = "7"        # file watcher
-anyhow  = "1"
+anyhow = "1"
 thiserror = "2"
-
-# Phase 1 endpoint
-axum          = { version = "0.7", features = ["ws"] }
-tower-http    = { version = "0.6", features = ["trace"] }
-futures-util  = "0.3"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+bytes = "1"
+notify = "7"
 
 [build-dependencies]
 tonic-build = "0.12"

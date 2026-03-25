@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
     pub server: ServerConfig,
-    pub services: ServicesConfig,
+    pub clients: ClientsConfig,
     pub files: FilesConfig,
     pub history: HistoryConfig,
     pub silence: SilenceConfig,
@@ -13,11 +13,11 @@ pub struct GatewayConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub ws_addr: String,
+    pub grpc_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ServicesConfig {
-    pub listener_addr: String,
+pub struct ClientsConfig {
     pub talker_addr: String,
     pub reasoner_addr: String,
 }
@@ -54,9 +54,9 @@ impl Default for GatewayConfig {
         Self {
             server: ServerConfig {
                 ws_addr: "127.0.0.1:8080".into(),
+                grpc_addr: "0.0.0.0:50051".into(),
             },
-            services: ServicesConfig {
-                listener_addr: "http://127.0.0.1:50052".into(),
+            clients: ClientsConfig {
                 talker_addr: "http://127.0.0.1:50053".into(),
                 reasoner_addr: "http://127.0.0.1:50054".into(),
             },

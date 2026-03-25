@@ -4,104 +4,68 @@
 //! 启动时读取，缓存在内存中，文件变化时重新加载。
 //! 每轮对话结束后评估是否有值得记忆的内容。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::error;
 
+#[derive(Clone)]
 pub struct Memory {
-    path: PathBuf,
-    contents: RwLock<String>,
-    /// 标记自上次 UpdatePersona 以来是否有变化
-    dirty: RwLock<bool>,
+    content: Arc<RwLock<String>>,
+    path: Arc<RwLock<PathBuf>>,
+    dirty: Arc<AtomicBool>,
 }
 
 impl Memory {
-    pub async fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let contents = tokio::fs::read_to_string(&path).await.unwrap_or_else(|e| {
-            warn!("MEMORY.md read failed: {e}, starting with template");
-            "## User Profile\n\n## Project Context\n\n## Recent Context\n".into()
-        });
-        info!(bytes = contents.len(), "MEMORY.md loaded");
+    pub async fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let p = path.as_ref().to_path_buf();
+        let content = tokio::fs::read_to_string(&p).await.unwrap_or_default();
         Ok(Self {
-            path,
-            contents: RwLock::new(contents),
-            dirty: RwLock::new(false),
+            content: Arc::new(RwLock::new(content)),
+            path: Arc::new(RwLock::new(p)),
+            dirty: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    /// 获取缓存内容（~0ms，无磁盘 I/O）
     pub async fn contents(&self) -> String {
-        self.contents.read().await.clone()
+        self.content.read().await.clone()
     }
 
-    /// 外部编辑后重新加载
-    pub async fn reload(&self) {
-        if let Ok(s) = tokio::fs::read_to_string(&self.path).await {
-            *self.contents.write().await = s;
-            *self.dirty.write().await = true;
-            info!("MEMORY.md reloaded (external edit detected)");
-        }
+    pub async fn reload(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        *self.content.write().await = tokio::fs::read_to_string(path).await?;
+        Ok(())
     }
 
-    /// 回合后评估：这轮对话中有没有值得记忆的内容？
-    /// 如果有，追加到 MEMORY.md 并写盘。
-    ///
-    /// Phase 1: 规则匹配。Future: 轻量 LLM 分类。
+    /// Phase 1 简易记忆评估 — 关键词触发追加
     pub async fn evaluate_and_update(&self, user_input: &str, assistant_response: &str) {
-        let facts = extract_facts(user_input, assistant_response);
-        if facts.is_empty() {
+        let triggers = [
+            "记住", "我叫", "我的名字", "remember", "my name is",
+            "我喜欢", "我讨厌", "i like", "i hate", "别忘了", "don't forget",
+        ];
+
+        let lower = user_input.to_lowercase();
+        if !triggers.iter().any(|t| lower.contains(t)) {
             return;
         }
 
-        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let mut contents = self.contents.write().await;
+        let mut content = self.content.write().await;
+        let entry = format!(
+            "\n- [{}] User: {} → Noted: {}\n",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            user_input.chars().take(100).collect::<String>(),
+            assistant_response.chars().take(200).collect::<String>(),
+        );
+        content.push_str(&entry);
 
-        for fact in &facts {
-            let entry = format!("- [{}] {}\n", date, fact);
-            // 插入到 "## Recent Context" 段落下方
-            if let Some(pos) = contents.find("## Recent Context") {
-                let insert = contents[pos..]
-                    .find('\n')
-                    .map(|p| pos + p + 1)
-                    .unwrap_or(contents.len());
-                contents.insert_str(insert, &entry);
-            } else {
-                contents.push_str(&format!("\n## Recent Context\n{}", entry));
-            }
+        let path = self.path.read().await.clone();
+        if let Err(e) = tokio::fs::write(&path, content.as_str()).await {
+            error!("persist MEMORY.md failed: {e}");
         }
-
-        if let Err(e) = tokio::fs::write(&self.path, contents.as_bytes()).await {
-            warn!("MEMORY.md write failed: {e}");
-        } else {
-            *self.dirty.write().await = true;
-            debug!("MEMORY.md updated with {} facts", facts.len());
-        }
+        self.dirty.store(true, Ordering::SeqCst);
     }
 
-    /// 检查并清除 dirty 标记
     pub async fn take_dirty(&self) -> bool {
-        let mut d = self.dirty.write().await;
-        let was = *d;
-        *d = false;
-        was
+        self.dirty.swap(false, Ordering::SeqCst)
     }
-}
-
-/// 规则匹配提取记忆要点
-fn extract_facts(user: &str, _assistant: &str) -> Vec<String> {
-    let lower = user.to_lowercase();
-    let triggers = [
-        "my name is",
-        "i prefer",
-        "i'm working on",
-        "remember that",
-        "note that",
-        "important:",
-    ];
-    for t in triggers {
-        if lower.contains(t) {
-            return vec![user.to_string()];
-        }
-    }
-    Vec::new()
 }

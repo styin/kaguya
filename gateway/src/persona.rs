@@ -1,42 +1,23 @@
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
 
-/// SOUL.md + IDENTITY.md 文件管理。
-/// 启动时读取，文件变化时重新加载。
+#[derive(Clone)]
 pub struct Persona {
-    soul_path: PathBuf,
-    identity_path: PathBuf,
-    soul: RwLock<String>,
-    identity: RwLock<String>,
+    soul: Arc<RwLock<String>>,
+    identity: Arc<RwLock<String>>,
 }
 
 impl Persona {
-    pub async fn load(soul_path: PathBuf, identity_path: PathBuf) -> anyhow::Result<Self> {
-        let soul = tokio::fs::read_to_string(&soul_path)
-            .await
-            .unwrap_or_else(|e| {
-                warn!("SOUL.md read failed: {e}");
-                String::new()
-            });
-        let identity = tokio::fs::read_to_string(&identity_path)
-            .await
-            .unwrap_or_else(|e| {
-                warn!("IDENTITY.md read failed: {e}");
-                String::new()
-            });
-
-        info!(
-            soul_bytes = soul.len(),
-            identity_bytes = identity.len(),
-            "Persona files loaded"
-        );
-
+    pub async fn load(
+        soul_path: impl AsRef<Path>,
+        identity_path: impl AsRef<Path>,
+    ) -> anyhow::Result<Self> {
+        let soul = tokio::fs::read_to_string(soul_path).await.unwrap_or_default();
+        let identity = tokio::fs::read_to_string(identity_path).await.unwrap_or_default();
         Ok(Self {
-            soul_path,
-            identity_path,
-            soul: RwLock::new(soul),
-            identity: RwLock::new(identity),
+            soul: Arc::new(RwLock::new(soul)),
+            identity: Arc::new(RwLock::new(identity)),
         })
     }
 
@@ -48,15 +29,13 @@ impl Persona {
         self.identity.read().await.clone()
     }
 
-    /// 文件 watcher 触发时调用
-    pub async fn reload(&self) {
-        if let Ok(s) = tokio::fs::read_to_string(&self.soul_path).await {
-            *self.soul.write().await = s;
-            info!("SOUL.md reloaded");
-        }
-        if let Ok(s) = tokio::fs::read_to_string(&self.identity_path).await {
-            *self.identity.write().await = s;
-            info!("IDENTITY.md reloaded");
-        }
+    pub async fn reload_soul(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        *self.soul.write().await = tokio::fs::read_to_string(path).await?;
+        Ok(())
+    }
+
+    pub async fn reload_identity(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        *self.identity.write().await = tokio::fs::read_to_string(path).await?;
+        Ok(())
     }
 }

@@ -6,111 +6,162 @@
 //!   PrefillCache  — 投机预填充
 //!   UpdatePersona — 推送人格配置
 
-use tokio::sync::mpsc;
+//! Talker gRPC 客户端 — 封装与 Talker 的全部 4 个 RPC。
+
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tonic::transport::Channel;
+use tracing::{debug, error, info, warn};
 
-use crate::types::*;
+use crate::proto;
+use crate::proto::talker_service_client::TalkerServiceClient;
 
-/// PREPARE 信号的应答
-#[derive(Debug, Clone)]
-pub struct PrepareAck {
-    pub was_speaking: bool,
-    pub spoken_text: String,
-    pub unspoken_text: String,
-}
-
+#[derive(Clone)]
 pub struct TalkerClient {
-    _endpoint: String,
-    event_tx: mpsc::Sender<TalkerEvent>,
+    inner: Arc<RwLock<Option<TalkerServiceClient<Channel>>>>,
+    endpoint: String,
 }
 
 impl TalkerClient {
-    pub fn new(endpoint: String, event_tx: mpsc::Sender<TalkerEvent>) -> Self {
+    pub fn new(endpoint: String) -> Self {
         Self {
-            _endpoint: endpoint,
-            event_tx,
+            inner: Arc::new(RwLock::new(None)),
+            endpoint,
         }
     }
 
-    /// 发送 PREPARE 信号。Talker 停止当前生成（如果在说话）。
-    ///
-    /// Spec §5.1: "gRPC, fire-and-forget" — 但我们需要 PrepareAck
-    /// 来获取已说/未说的文本，所以实际上是 unary RPC。
-    pub async fn prepare(&self) -> PrepareAck {
-        debug!("→ PREPARE to Talker");
-        // TODO: proto::talker::talker_service_client::TalkerServiceClient
-        //       ::connect(&self._endpoint).await
-        //       .prepare(PrepareSignal { ... }).await
-        PrepareAck {
-            was_speaking: false,
-            spoken_text: String::new(),
-            unspoken_text: String::new(),
+    pub async fn connect(&self) -> anyhow::Result<()> {
+        let channel = Channel::from_shared(self.endpoint.clone())?
+            .connect()
+            .await?;
+        *self.inner.write().await = Some(TalkerServiceClient::new(channel));
+        info!(addr = %self.endpoint, "connected to Talker");
+        Ok(())
+    }
+
+    pub async fn try_connect(&self) {
+        match self.connect().await {
+            Ok(()) => {}
+            Err(e) => warn!("Talker not ready: {e} (will retry on first RPC)"),
         }
     }
 
-    /// 发送 context package，启动流式推理。
-    /// 在后台任务中处理 Talker 的流式返回，通过 event_tx 回传。
-    /// 返回 CancellationToken 供 barge-in 取消。
-    pub fn dispatch(&self, ctx: ContextPackage) -> CancellationToken {
+    async fn client(&self) -> Option<TalkerServiceClient<Channel>> {
+        self.inner.read().await.clone()
+    }
+
+    /// 尝试重连后获取 client
+    async fn client_or_reconnect(&self) -> Option<TalkerServiceClient<Channel>> {
+        if let Some(c) = self.client().await {
+            return Some(c);
+        }
+        self.try_connect().await;
+        self.client().await
+    }
+
+    /// PREPARE — 打断当前生成，返回 spoken/unspoken split
+    pub async fn prepare(&self, conversation_id: &str) -> proto::PrepareAck {
+        let Some(mut client) = self.client_or_reconnect().await else {
+            return proto::PrepareAck::default();
+        };
+        debug!("→ PREPARE");
+        match client.prepare(proto::PrepareSignal {
+            conversation_id: conversation_id.into(),
+        }).await {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
+                error!("Prepare failed: {e}");
+                proto::PrepareAck::default()
+            }
+        }
+    }
+
+    /// ProcessPrompt — 流式推理。输出通过 output_tx 回传。
+    /// 返回 CancellationToken 用于 barge-in 取消。
+    pub fn dispatch(
+        &self,
+        ctx: proto::TalkerContext,
+        output_tx: mpsc::Sender<proto::TalkerOutput>,
+    ) -> CancellationToken {
         let token = CancellationToken::new();
         let child = token.child_token();
-        let tx = self.event_tx.clone();
-        let _endpoint = self._endpoint.clone();
+        let inner = Arc::clone(&self.inner);
+        let endpoint = self.endpoint.clone();
 
         tokio::spawn(async move {
-            debug!(input = %ctx.user_input, "→ ProcessPrompt to Talker");
+            // 尝试获取或重连
+            let mut guard = inner.write().await;
+            if guard.is_none() {
+                match Channel::from_shared(endpoint).and_then(|c| Ok(c)) {
+                    Ok(ch) => match ch.connect().await {
+                        Ok(channel) => { *guard = Some(TalkerServiceClient::new(channel)); }
+                        Err(e) => { error!("reconnect failed: {e}"); return; }
+                    },
+                    Err(e) => { error!("bad endpoint: {e}"); return; }
+                }
+            }
+            let mut client = guard.clone().unwrap();
+            drop(guard);
 
-            // TODO: 实际 gRPC 流式调用
-            // let mut client = TalkerServiceClient::connect(_endpoint).await?;
-            // let mut stream = client.process_prompt(ctx_proto).await?.into_inner();
-            // loop {
-            //     tokio::select! {
-            //         _ = child.cancelled() => break,
-            //         msg = stream.message() => match msg { ... }
-            //     }
-            // }
+            debug!(input = %ctx.user_input, "→ ProcessPrompt");
 
-            // ── Stub: 模拟 Talker 回复 ──
-            tokio::select! {
-                _ = child.cancelled() => {
-                    debug!("Talker generation cancelled (barge-in)");
+            let mut stream = match client.process_prompt(ctx).await {
+                Ok(resp) => resp.into_inner(),
+                Err(e) => {
+                    error!("ProcessPrompt failed: {e}");
                     return;
                 }
-                _ = async {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    let text = format!(
-                        "[Kaguya] {}",
-                        if ctx.user_input.is_empty() { "(continuation)" }
-                        else { &ctx.user_input }
-                    );
-                    let _ = tx.send(TalkerEvent::TextChunk {
-                        content: text.clone(), is_final: true,
-                    }).await;
-                    let _ = tx.send(TalkerEvent::ResponseComplete {
-                        full_text: text,
-                    }).await;
-                } => {}
+            };
+
+            loop {
+                tokio::select! {
+                    _ = child.cancelled() => {
+                        debug!("Talker stream cancelled (barge-in)");
+                        break;
+                    }
+                    result = stream.message() => {
+                        match result {
+                            Ok(Some(output)) => {
+                                if output_tx.send(output).await.is_err() { break; }
+                            }
+                            Ok(None) => break,
+                            Err(e) => { error!("stream error: {e}"); break; }
+                        }
+                    }
+                }
             }
         });
 
         token
     }
 
-    /// 投机预填充（n_predict: 0, cache_prompt: true）
-    pub async fn prefill_cache(&self, _ctx: ContextPackage) {
-        debug!("→ PrefillCache to Talker");
-        // TODO: 实际 gRPC 调用
+    /// 投机预填充
+    pub async fn prefill_cache(&self, conversation_id: &str, ctx: proto::TalkerContext) {
+        let Some(mut client) = self.client().await else { return };
+        debug!("→ PrefillCache");
+        if let Err(e) = client.prefill_cache(proto::PrefillRequest {
+            conversation_id: conversation_id.into(),
+            context: Some(ctx),
+        }).await {
+            warn!("PrefillCache failed (non-fatal): {e}");
+        }
     }
 
     /// 推送人格配置
-    pub async fn update_persona(&self, bundle: PersonaBundle) {
+    pub async fn update_persona(&self, config: proto::PersonaConfig) {
+        let Some(mut client) = self.client_or_reconnect().await else {
+            warn!("cannot UpdatePersona: Talker not connected");
+            return;
+        };
         info!(
-            soul = bundle.soul_md.len(),
-            identity = bundle.identity_md.len(),
-            memory = bundle.memory_md.len(),
-            "→ UpdatePersona to Talker"
+            soul_len = config.soul_md.len(),
+            identity_len = config.identity_md.len(),
+            memory_len = config.memory_md.len(),
+            "→ UpdatePersona"
         );
-        // TODO: 实际 gRPC 调用
+        if let Err(e) = client.update_persona(config).await {
+            error!("UpdatePersona failed: {e}");
+        }
     }
 }
