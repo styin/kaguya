@@ -26,6 +26,28 @@ from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
 logger = logging.getLogger(__name__)
 
 
+def _gateway_target_for_temp_tcp(raw: str) -> str:
+    """Temporary Windows-safe routing: divert unix-style targets to TCP."""
+    value = raw.strip()
+    if "://" in value and not value.startswith(("http://", "https://", "dns://")):
+        logger.warning(
+            "Temporary TCP fallback: ignoring non-TCP gateway target '%s', using 127.0.0.1:50051",
+            value,
+        )
+        return "127.0.0.1:50051"
+
+    # Path-like values are treated as unix sockets in this codebase; divert for now.
+    if "/" in value or "\\" in value:
+        logger.warning(
+            "Temporary TCP fallback: ignoring path-like gateway target '%s', using 127.0.0.1:50051",
+            value,
+        )
+        return "127.0.0.1:50051"
+
+    # host:port remains untouched.
+    return value
+
+
 class Listener:
     """Wraps RealtimeSTT and streams ListenerEvents to the Gateway.
 
@@ -201,7 +223,7 @@ class Listener:
         Reconnects with exponential backoff on connection loss.
         """
         backoff = self._config.gateway_reconnect_initial_s
-        socket_addr = f"unix://{self._config.gateway_socket}"
+        socket_addr = _gateway_target_for_temp_tcp(self._config.gateway_socket)
 
         while True:
             try:
