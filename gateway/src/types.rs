@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// P0: 控制信号 — 绕过 Input Stream，最高优先级
+/// P0: Control — Bypasses input queue. Highest priority.
 #[derive(Debug, Clone)]
 pub enum ControlSignal {
     Stop,
@@ -12,24 +12,28 @@ pub enum ControlSignal {
     Shutdown,
 }
 
-/// P1–P5 Input Stream 事件
+/// P1–P5 Input Priority Queue
+/// - P1: User intent (`FinalTranscript`, `TextCommand`)
+/// - P2: ASR states (`VadSpeechStart`, `VadSpeechEnd`, `PartialTranscript`)
+/// - P3: Tool use & reasoner callbacks (`ToolResult`, `ReasonerStep`, `ReasonerCompleted`, `ReasonerError`)
+/// - P4: Conversation state (`SilenceExceeded`)
+/// - P5: Auxiliary events (`Telemetry`)
 #[derive(Debug, Clone)]
 pub enum InputEvent {
-    // P1: 完整用户意图
     FinalTranscript { text: String, confidence: f32 },
     TextCommand { text: String },
-    // P2: 部分信号
+
     VadSpeechStart,
     VadSpeechEnd { silence_duration_ms: f32 },
     PartialTranscript { text: String },
-    // P3: 异步结果
-    ToolResult { request_id: String, content: String },
+
+    ToolResult { request_id: String, tool_name: String, content: String },
     ReasonerStep { task_id: String, description: String },
     ReasonerCompleted { task_id: String, summary: String },
     ReasonerError { task_id: String, message: String, code: i32 },
-    // P4: 静默
+    
     SilenceExceeded { duration: Duration },
-    // P5: 环境
+    
     Telemetry { data: serde_json::Value },
 }
 

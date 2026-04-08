@@ -85,7 +85,7 @@ impl ToolRegistry {
                 }
             };
 
-            let _ = p3_tx.send(InputEvent::ToolResult { request_id, content }).await;
+            let _ = p3_tx.send(InputEvent::ToolResult { request_id, tool_name, content }).await;
         });
     }
 }

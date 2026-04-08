@@ -1,7 +1,9 @@
-//! Kaguya Gateway 入口 — 事件循环。
-//!
-//! 这个 loop 就是 Spec 第 3/5/6/7/8/9/10 节描述的全部行为。
-//! biased select! 保证 P0 > Talker > P1 > P2 > P3 > P4 > P5。
+//! Kaguya Gateway Entry Point
+//! 
+//! Creates channles: Control, Input (P1-P5), Talker Output, Audio Output, Metadata Output.
+//! Initializes components: History, Persona, Memory, Tools, Reasoner Manager, Silence Timers
+//! Manages gRPC server for Listener and Control, WebSocket endpoint for clients, and file watchers for persona/memory.
+//! Contains the main event loop that orchestrates everything based on incoming events and control signals.
 
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -32,9 +34,10 @@ use kaguya_gateway::types::*;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // Use "RUST_LOG=kaguya_gateway=debug" for verbose logging
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kaguya_gateway=debug".into()),
+                .unwrap_or_else(|_| "kaguya_gateway=info".into()), 
         )
         .init();
 
@@ -45,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         GatewayConfig::default()
     });
 
-    // ── 通道 ──
+    // ── Channels ──
 
     let (control_tx, mut control_rx) = mpsc::channel::<ControlSignal>(64);
     let (input_tx, mut input_rx) = input_stream::create(256);
@@ -53,8 +56,12 @@ async fn main() -> anyhow::Result<()> {
     let (audio_out_tx, audio_out_rx) = mpsc::channel::<bytes::Bytes>(512);
     let (metadata_out_tx, metadata_out_rx) = mpsc::channel::<MetadataEvent>(256);
 
-    // ── 组件 ──
-
+    // ── Components ──
+    
+    // unique conversation_id per startup (instance)
+    // unique turn_id per talker dispatch (ProcessPrompt call)
+    // unique request_id per tool call (one tool round trip)
+    // unique task_id per reasoner delegation (full reasoner lifecycle)
     let conversation_id = Uuid::new_v4().to_string();
     let history = History::new(config.history.max_recent_turns);
     let persona = Persona::load(&config.files.soul_path, &config.files.identity_path).await?;
@@ -89,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── 连接 Talker ──
+    // ── Connect Talker ──
 
     talker.try_connect().await;
     talker.update_persona(proto::PersonaConfig {
@@ -114,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
-    // ── 文件 watcher ──
+    // ── File watcher ──
 
     {
         use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, EventKind};
@@ -151,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         tokio::spawn(async move {
-            let _watcher = watcher; // 保持存活
+            let _watcher = watcher; // keep alive
             while let Some(changed) = watch_rx.recv().await {
                 info!(file = ?changed, "config file changed");
 
@@ -183,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Kaguya Gateway ready");
 
-    // ── 事件循环状态 ──
+    // ── Event Loop State ──
 
     let mut active_gen: Option<CancellationToken> = None;
     let mut active_silence: Option<CancellationToken> = None;
@@ -197,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             biased;
 
-            // ── P0: 控制信号 ──
+            // ── P0: Control Signal ──
             Some(ctrl) = control_rx.recv() => {
                 match ctrl {
                     ControlSignal::Stop => {
@@ -221,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // ── Talker 输出流 ──
+            // ── Talker Output Stream ──
             Some(out) = talker_output_rx.recv() => {
                 match out.payload {
                     Some(proto::talker_output::Payload::ResponseStarted(rs)) => {
@@ -230,12 +237,14 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     Some(proto::talker_output::Payload::Sentence(se)) => {
+                        debug!(text = %se.text, "→ [SENTENCE]");
                         current_response.push_str(&se.text);
                         current_response.push(' ');
                         output.send_sentence(&se.text).await;
                     }
 
                     Some(proto::talker_output::Payload::Emotion(em)) => {
+                        debug!(emotion = %em.emotion, "→ [EMOTION]");
                         output.send_emotion(&em.emotion).await;
                     }
 
@@ -288,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // ── P1: 完整用户意图 ──
+            // ── P1: User Intent──
             Some(event) = input_rx.p1.recv() => {
                 let text = match event {
                     InputEvent::FinalTranscript { text, .. }
@@ -312,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
                 active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()));
             }
 
-            // ── P2: VAD + 部分转写 ──
+            // ── P2: ASR States ──
             Some(event) = input_rx.p2.recv() => {
                 match event {
                     InputEvent::VadSpeechStart => {
@@ -335,12 +344,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // ── P3: 异步结果 ──
+            // ── P3: Tool Use & Reasoner Callbacks ──
             Some(event) = input_rx.p3.recv() => {
                 match event {
-                    InputEvent::ToolResult { request_id, content } => {
-                        info!(id = %request_id, "P3: tool result");
-                        history.append_tool_result("tool", &content).await;
+                    InputEvent::ToolResult { request_id, tool_name, content } => {
+                        info!(id = %request_id, tool = %tool_name, "P3: tool result");
+                        history.append_tool_result(&tool_name, &content).await;
                         let turn_id = Uuid::new_v4().to_string();
                         let tasks = reasoner.active_tasks().await;
                         let ctx = context::with_tool_result(
@@ -388,7 +397,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // ── P4: 静默 ──
+            // ── P4: Conversation State ──
             Some(event) = input_rx.p4.recv() => {
                 if let InputEvent::SilenceExceeded { duration } = event {
                     debug!(secs = duration.as_secs(), "P4: silence");
@@ -403,7 +412,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // ── P5: 环境 ──
+            // ── P5: Auxiliary Events ──
             Some(event) = input_rx.p5.recv() => {
                 if let InputEvent::Telemetry { data } = event {
                     debug!(?data, "P5: telemetry");
