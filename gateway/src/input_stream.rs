@@ -1,10 +1,8 @@
-//! Input Stream — P1-P5 优先级队列。
+//! Input Stream — P1-P5 Priority Queues
 //!
-//! Spec §3.3: "Per-level tokio::sync::mpsc channels,
-//! polled via tokio::select! with priority ordering."
-//!
-//! 优先级由事件循环的 `biased` select 强制执行，
-//! 不是由数据结构本身。这里只负责创建和分发通道。
+//! Per-level tokio::sync::mpsc channels, polled via tokio::select! with priority ordering.
+//! Note that priority is enforced by the biased select in the event loop, not by the data structure itself.
+//! This module defines the data structures and channel setup.
 
 use tokio::sync::mpsc;
 use crate::types::InputEvent;

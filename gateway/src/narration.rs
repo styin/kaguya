@@ -1,7 +1,4 @@
-//! Deliberative Narration Protocol — 过滤 Reasoner 中间步骤。
-//!
-//! Spec §9: "One utterance per meaningful state transition;
-//! rate-limited to prevent manic narration."
+//! Deliberative Narration Protocol - Filtering and rate-limiting for reasoner narration.
 
 use std::time::{Duration, Instant};
 

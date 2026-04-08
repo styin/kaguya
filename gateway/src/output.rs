@@ -1,7 +1,7 @@
-//! 输出流管理。
+//! Output Management
 //!
-//! 控制音频静音（PREPARE 时停止转发，新推理轮次时恢复）。
-//! 路由文本/情绪/状态元数据到端点。
+//! Controls audio and metadata forwarding of the Talker to the Endpoint.
+//! Sends audio data and metadata events (like sentences and emotions) via WebSocket for rendering.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;

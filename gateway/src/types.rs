@@ -1,5 +1,4 @@
-//! Gateway 内部类型。
-//! Proto 类型（ChatMessage, TalkerContext 等）在 proto 模块中。
+//! Gateway Internal Types
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

@@ -1,8 +1,7 @@
-//! MEMORY.md 管理 — 长期知识库。
+//! Memory Management
 //!
-//! Spec §4.1: "A plain-text file managed entirely by the Gateway."
-//! 启动时读取，缓存在内存中，文件变化时重新加载。
-//! 每轮对话结束后评估是否有值得记忆的内容。
+//! Loaded from disk at startup, and updated in-memory during conversation.
+//! Phase 1 simple keyword-based triggers for appending new entries, persisted back to disk immediately.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

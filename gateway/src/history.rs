@@ -1,7 +1,6 @@
-//! 对话历史 — 内存中的 rolling log。
-//!
-//! Spec §4.2: "Short-term conversation history. In-memory state in Gateway."
-//! 与 MEMORY.md 是两个独立概念：history 是短期，memory 是长期。
+//! Conversation History Management
+//! 
+//! In-memory storage of recent conversation turns, including user inputs, assistant responses, and tool results.
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

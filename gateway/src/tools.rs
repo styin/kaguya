@@ -1,7 +1,7 @@
-//! 工具注册表 + 调度。
+//! Tool Registry and Dispatcher
 //!
-//! 工具调用由 Talker 发起（[TOOL:...]），不是 Gateway。
-//! Gateway 只负责：维护注册表、执行调度、将结果作为 P3 事件回流。
+//! Tool dispatch initiated by Talker, executed by gateway ([TOOL:...] in prompt)
+//! Results sent back to Talker via P3 channel.
 
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;

@@ -1,11 +1,13 @@
-//! Context Package 组装。
+//! Context Management
 //!
-//! Spec §2.3: "Before every Talker dispatch, assemble a structured
-//! context package containing: user input, MEMORY.md contents, conversation
-//! history, active task state, current tool list, tool/reasoner results,
-//! and metadata."
-//!
-//! Gateway 组装结构化数据。Gateway 不知道 prompt 格式。
+//! This module provides functions to assemble the TalkerContext for different scenarios:
+//! - Regular user turns -> assemble()
+//! - Tool result callbacks -> with_tool_result()
+//! - Reasoner results -> with_reasoner_result()
+//! - Silence events -> for_silence()
+//! - Narration steps -> for_narration()
+//! - Prefill scenarios -> for_prefill()
+
 
 use crate::history::History;
 use crate::memory::Memory;

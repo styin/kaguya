@@ -1,12 +1,9 @@
-//! Talker gRPC 客户端。
+//! Talker gRPC Client — Encapsulates all 4 RPCs to the Talker:
 //!
-//! 封装与 Talker 的 4 个 RPC：
-//!   ProcessPrompt — 发送 context package，接收流式输出
-//!   Prepare       — 打断信号
-//!   PrefillCache  — 投机预填充
-//!   UpdatePersona — 推送人格配置
-
-//! Talker gRPC 客户端 — 封装与 Talker 的全部 4 个 RPC。
+//! ProcessPrompt: Unary-Stream - Dispatches with context, receives streaming output. Returns CancellationToken for barge-in.
+//! Prepare: Unary-Unary - Interrupts current generation, returns spoken/unspoken split for smooth turn-taking.
+//! PrefillCache: Unary-Unary - Speculative prefill of Talker's cache based on user input and conversation context.
+//! UpdatePersona: Unary-Unary - Pushes updated persona configuration (soul/identity/memory) to Talker.
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -51,7 +48,7 @@ impl TalkerClient {
         self.inner.read().await.clone()
     }
 
-    /// 尝试重连后获取 client
+    /// Attempt to get the client, or reconnect if not connected. Returns None if still unavailable after reconnect attempt.
     async fn client_or_reconnect(&self) -> Option<TalkerServiceClient<Channel>> {
         if let Some(c) = self.client().await {
             return Some(c);
@@ -60,7 +57,7 @@ impl TalkerClient {
         self.client().await
     }
 
-    /// PREPARE — 打断当前生成，返回 spoken/unspoken split
+    /// PREPARE - Barge-in
     pub async fn prepare(&self, conversation_id: &str) -> proto::PrepareAck {
         let Some(mut client) = self.client_or_reconnect().await else {
             return proto::PrepareAck::default();
@@ -77,8 +74,7 @@ impl TalkerClient {
         }
     }
 
-    /// ProcessPrompt — 流式推理。输出通过 output_tx 回传。
-    /// 返回 CancellationToken 用于 barge-in 取消。
+    /// ProcessPrompt Dispatch
     pub fn dispatch(
         &self,
         ctx: proto::TalkerContext,
@@ -90,7 +86,7 @@ impl TalkerClient {
         let endpoint = self.endpoint.clone();
 
         tokio::spawn(async move {
-            // 尝试获取或重连
+            // Attempt to get client, reconnect if necessary, finally log and exit if still unavailable
             let mut guard = inner.write().await;
             if guard.is_none() {
                 match Channel::from_shared(endpoint).and_then(|c| Ok(c)) {
@@ -136,7 +132,7 @@ impl TalkerClient {
         token
     }
 
-    /// 投机预填充
+    /// Speculative prefill
     pub async fn prefill_cache(&self, conversation_id: &str, ctx: proto::TalkerContext) {
         let Some(mut client) = self.client().await else { return };
         debug!("→ PrefillCache");
@@ -148,7 +144,7 @@ impl TalkerClient {
         }
     }
 
-    /// 推送人格配置
+    /// Update persona configuration
     pub async fn update_persona(&self, config: proto::PersonaConfig) {
         let Some(mut client) = self.client_or_reconnect().await else {
             warn!("cannot UpdatePersona: Talker not connected");

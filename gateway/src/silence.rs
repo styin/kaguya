@@ -1,10 +1,9 @@
-//! 静默计时器管理。
+//! Silence Timer Management
 //!
-//! Spec §8:
-//!   3s → soft prompt opportunity
-//!   8s → follow-up opportunity
-//!   30s → context shift
-//!   全部在 vad_speech_start 或 text_command 时取消。
+//! 3s → soft prompt opportunity
+//! 8s → follow-up opportunity
+//! 30s → context shift
+//! Cancelled on speech start (vad_speech_start) or new dispatch
 
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -23,7 +22,7 @@ impl SilenceTimers {
         Self { soft_secs: soft, follow_up_secs: follow_up, context_shift_secs: context_shift, p4_tx }
     }
 
-    /// 启动三级级联计时器，返回 token 用于取消
+    /// three tier silence timers, returning a CancellationToken that can be used to cancel all timers
     pub fn start(&self) -> CancellationToken {
         let token = CancellationToken::new();
         let child = token.child_token();

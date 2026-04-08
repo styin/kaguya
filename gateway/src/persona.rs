@@ -1,3 +1,7 @@
+//! Persona Management
+//! 
+//! Loads and manages the Talker's persona, including "soul" (core traits) and "identity" (current status).
+
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;

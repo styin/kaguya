@@ -1,4 +1,4 @@
-//! RouterControlService gRPC server — 接收 Endpoint 控制信号。
+//! RouterControlService gRPC server — Accepts control signals from external systems (e.g. UI) and forwards them to P0.
 
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};

@@ -1,3 +1,7 @@
+//! Reasoner Manager
+//! 
+//! Manages long-running reasoning tasks executed by the Reasoner component.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -74,13 +78,13 @@ impl ReasonerManager {
         tokio::spawn(async move {
             info!(task_id = %tid, "Reasoner task started");
 
-            // 尝试获取 gRPC client
+            // Attempts to get cached client or connect if not available
             let maybe_client = {
                 let g = client_arc.read().await;
                 g.clone()
             };
 
-            // 如果没有缓存的 client，尝试连接
+            // Attempt connection if client not cached
             let maybe_client = match maybe_client {
                 Some(c) => Some(c),
                 None => {
@@ -99,7 +103,7 @@ impl ReasonerManager {
             };
 
             if let Some(mut client) = maybe_client {
-                // ── 真实 gRPC 调用 ──
+                // ── gRPC TaskRequest ──
                 let task = proto::TaskRequest {
                     task_id: tid.clone(),
                     description: description.clone(),
@@ -126,19 +130,21 @@ impl ReasonerManager {
                                                     info!(task_id = %tid, "Reasoner started");
                                                 }
                                                 Some(proto::reasoner_event::Event::Step(s)) => {
+                                                    // intermediate step update -> potential narration
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
                                                         task_id: tid.clone(),
                                                         description: s.description,
                                                     }).await;
                                                 }
                                                 Some(proto::reasoner_event::Event::Output(o)) => {
-                                                    // 中间产出 — 当作 step 通知
+                                                    // intermediate output -> potential narration
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
                                                         task_id: tid.clone(),
                                                         description: format!("[output] {}", o.content),
                                                     }).await;
                                                 }
                                                 Some(proto::reasoner_event::Event::Completed(c)) => {
+                                                    // final completion -> ProcessPrompt call
                                                     let _ = p3_tx.send(InputEvent::ReasonerCompleted {
                                                         task_id: tid.clone(),
                                                         summary: c.summary,
@@ -181,7 +187,8 @@ impl ReasonerManager {
                     }
                 }
             } else {
-                // ── Reasoner 不可用 — fallback stub ──
+                // ── Reasoner unavailable - fallback ──
+                // TODO: Implement a more meaningful fallback behavior, e.g. local execution of simple tasks or retry logic.
                 warn!(task_id = %tid, "Reasoner unavailable, using stub");
                 tokio::select! {
                     _ = child.cancelled() => {}

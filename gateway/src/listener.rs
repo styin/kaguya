@@ -1,11 +1,5 @@
-//! Listener 事件桥接。
-//!
-//! 接收 Listener 的 VAD/STT 事件，路由到正确的 Input Stream 优先级：
-//!   VAD signals → P2
-//!   partial_transcript → P2
-//!   final_transcript → P1
-
-//! ListenerService gRPC server — 接收 Listener 的 VAD/STT 事件流。
+//! Listener Service
+//! TODO: Refactor - Flip server-client roles: Gateway connects to Listener as a gRPC client
 
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status, Streaming};

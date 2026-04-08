@@ -1,6 +1,6 @@
-//! Phase 1 开发端点 — WebSocket 连接 dev-GUI/TUI。
-//!
-//! Phase 2 替换为 OpenPod protobuf 协议。
+//! Phase 1 Endpoint Service — WebSocket server for dev-GUI
+//! ---
+//! Phase 2 targets OpenPod protocol integration
 
 use std::sync::Arc;
 use axum::{
