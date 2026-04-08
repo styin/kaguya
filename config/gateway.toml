@@ -1,5 +1,5 @@
 [server]
-ws_addr   = "127.0.0.1:8082"
+ws_addr   = "127.0.0.1:8080"
 grpc_addr = "0.0.0.0:50051"
 
 [clients]
