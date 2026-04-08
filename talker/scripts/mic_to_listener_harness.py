@@ -26,9 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import TalkerConfig
-from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
-from voice.turn_detector import TurnDetector
+from config import TalkerConfig  # noqa: E402
+from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]  # noqa: E402
+from voice.turn_detector import TurnDetector  # noqa: E402
 
 logger = logging.getLogger("mic-harness")
 
@@ -107,7 +107,9 @@ class MicHarness:
                 with open(self._events_log_file, "a", encoding="utf-8") as fp:
                     fp.write(line + "\n")
             except OSError as exc:
-                logger.warning("Failed writing events log '%s': %s", self._events_log_file, exc)
+                logger.warning(
+                    "Failed writing events log '%s': %s", self._events_log_file, exc
+                )
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -211,9 +213,7 @@ class MicHarness:
         self._enqueue(
             kaguya_pb2.ListenerEvent(
                 timestamp_ms=_now_ms(),
-                vad_speech_end=kaguya_pb2.VadSpeechEnd(
-                    silence_duration_ms=silence_ms
-                ),
+                vad_speech_end=kaguya_pb2.VadSpeechEnd(silence_duration_ms=silence_ms),
             )
         )
         if self._loop is not None:
