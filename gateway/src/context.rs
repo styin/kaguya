@@ -16,21 +16,28 @@ use crate::tools::ToolRegistry;
 use crate::types::ActiveTask;
 
 /// 常规 user turn
+// 在 assemble() 中新增 RAG 检索
 pub async fn assemble(
     conversation_id: &str,
     turn_id: &str,
     user_input: &str,
     history: &History,
-    memory: &Memory,
+    rag: &RagEngine,  // 替换旧的 memory: &Memory
     tools: &ToolRegistry,
     active_tasks: &[ActiveTask],
 ) -> proto::TalkerContext {
+    // 并行执行: RAG 检索 + memory 导出
+    let (retrieval_results, memory_md) = tokio::join!(
+        rag.retrieve(user_input),
+        rag.export_memory_md(),
+    );
+
     proto::TalkerContext {
         conversation_id: conversation_id.into(),
         turn_id: turn_id.into(),
         user_input: user_input.into(),
         history: history.recent().await,
-        memory_contents: memory.contents().await,
+        memory_contents: memory_md,      // 兼容旧字段
         tools: tools.definitions(),
         active_tasks_json: serde_json::to_string(active_tasks).unwrap_or_default(),
         tool_result_content: String::new(),
@@ -38,6 +45,7 @@ pub async fn assemble(
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         reasoner_task_id: String::new(),
         reasoner_result_content: String::new(),
+        retrieval_results,               // NEW: 混合检索结果
     }
 }
 
