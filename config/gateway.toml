@@ -5,11 +5,11 @@ grpc_addr = "0.0.0.0:50051"
 [clients]
 talker_addr   = "http://127.0.0.1:50053"
 reasoner_addr = "http://127.0.0.1:50054"
+listener_addr = "http://127.0.0.1:50055"  # NEW: Listener 独立服务
 
 [files]
 soul_path      = "config/SOUL.md"
 identity_path  = "config/IDENTITY.md"
-memory_path    = "config/MEMORY.md"
 workspace_root = "."
 
 [history]
@@ -19,3 +19,8 @@ max_recent_turns = 50
 soft_prompt_secs   = 3
 follow_up_secs     = 8
 context_shift_secs = 30
+
+[rag]
+db_path       = "data/kaguya.db"
+embedding_url = "http://127.0.0.1:8081"  # 本地 embedding server, 可选
+top_k         = 10

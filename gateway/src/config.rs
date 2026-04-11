@@ -8,6 +8,7 @@ pub struct GatewayConfig {
     pub files: FilesConfig,
     pub history: HistoryConfig,
     pub silence: SilenceConfig,
+    pub rag: RagConfig,      // NEW
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -20,6 +21,14 @@ pub struct ServerConfig {
 pub struct ClientsConfig {
     pub talker_addr: String,
     pub reasoner_addr: String,
+    pub listener_addr: String,  // NEW: Listener 现在是独立服务
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RagConfig {
+    pub db_path: PathBuf,
+    pub embedding_url: Option<String>,  // None = 不启用向量搜索
+    pub top_k: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

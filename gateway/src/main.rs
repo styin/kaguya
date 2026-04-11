@@ -333,14 +333,11 @@ async fn main() -> anyhow::Result<()> {
             Some(event) = input_rx.p2.recv() => {
                 match event {
                     InputEvent::VadSpeechStart => {
-                        debug!("P2: vad_speech_start → PREPARE");
-                        let ack = talker.prepare(&conversation_id).await;
-                        if !ack.spoken_text.is_empty() {
-                            history.append_assistant_partial(&ack.spoken_text).await;
-                        }
+                        debug!("P2: vad_speech_start → BARGE-IN (inline)");
+                        // 用 bidi 内联 barge-in，不再走独立 Prepare RPC
+                        talker.barge_in(&conversation_id).await;
                         output.mute_audio();
                         if let Some(t) = active_silence.take() { t.cancel(); }
-                        if let Some(t) = active_gen.take() { t.cancel(); }
                     }
                     InputEvent::PartialTranscript { text } => {
                         debug!(text = %text, "P2: partial");
@@ -350,6 +347,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                     _ => {}
                 }
+            }
+            
+            // Talker output stream 新增 BargeInAck 处理
+            Some(proto::talker_output::Payload::BargeInAck(ack)) => {
+                debug!("← BargeInAck");
+                if !ack.spoken_text.is_empty() {
+                    history.append_assistant_partial(&ack.spoken_text).await;
+                }
+                if let Some(t) = active_gen.take() { t.cancel(); }
+                output.unmute_audio();
+                current_response.clear();
             }
 
             // ── P3: Tool Use & Reasoner Callbacks ──

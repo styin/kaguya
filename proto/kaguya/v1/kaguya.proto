@@ -10,31 +10,52 @@ enum Role {
   ROLE_SYSTEM      = 1;
   ROLE_USER        = 2;
   ROLE_ASSISTANT   = 3;
-  ROLE_TOOL        = 4;  // tool result injection round
+  ROLE_TOOL        = 4;
 }
 
 message ChatMessage {
   Role   role         = 1;
   string content      = 2;
-  string name         = 3;  // tool name when role=ROLE_TOOL
+  string name         = 3;
   int64  timestamp_ms = 4;
 }
 
 message ToolDefinition {
   string name        = 1;
   string description = 2;
-  string args_schema = 3;  // JSON Schema string
+  string args_schema = 3;
 }
 
-// ─────────────────────────────────────────────
-// LISTENER SERVICE  (Listener → Gateway)
-// ─────────────────────────────────────────────
+// LISTENER SERVICE — Bidi streaming
+// Gateway = client, Listener = server
+
 
 service ListenerService {
-  rpc StreamEvents(stream ListenerEvent) returns (ListenerAck);
+  // Bidi: Gateway pushes audio chunks, Listener pushes back ASR events
+  rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
 }
 
-message ListenerEvent {
+message ListenerInput {
+  oneof payload {
+    AudioChunk       audio  = 1;  // raw audio from endpoint
+    ListenerControl  control = 2; // runtime config / reset
+  }
+}
+
+message AudioChunk {
+  bytes data        = 1;  // Opus or PCM bytes
+  int64 timestamp_ms = 2;
+  string encoding    = 3;  // "opus" | "pcm_s16le"
+}
+
+message ListenerControl {
+  oneof signal {
+    ListenerReset reset = 1;  // clear VAD state on new session
+  }
+}
+message ListenerReset {}
+
+message ListenerOutput {
   int64 timestamp_ms = 1;
   oneof event {
     VadSpeechStart    vad_speech_start   = 2;
@@ -49,39 +70,56 @@ message VadSpeechEnd      { float silence_duration_ms = 1; }
 message PartialTranscript { string text = 1; }
 message FinalTranscript   { string text = 1; float confidence = 2; }
 
-message ListenerAck {}
+// TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+// Gateway = client, Talker = server
 
-// ─────────────────────────────────────────────
-// TALKER SERVICE  (Gateway → Talker)
-// ─────────────────────────────────────────────
 
 service TalkerService {
-  rpc ProcessPrompt(TalkerContext)  returns (stream TalkerOutput);
-  rpc Prepare(PrepareSignal)        returns (PrepareAck);
-  rpc PrefillCache(PrefillRequest)  returns (PrefillAck);
-  rpc UpdatePersona(PersonaConfig)  returns (PersonaAck);
+  // Bidi: Gateway sends context + inline barge-in; Talker streams output
+  rpc Converse(stream TalkerInput) returns (stream TalkerOutput);
+
+  // Between-turn operations (unary, no need for bidi)
+  rpc PrefillCache(PrefillRequest) returns (PrefillAck);
+  rpc UpdatePersona(PersonaConfig) returns (PersonaAck);
 }
 
-// Full context package assembled by Gateway each turn.
-// Gateway assembles; Talker formats. Gateway has no knowledge of prompt format.
+message TalkerInput {
+  oneof payload {
+    TalkerContext    start    = 1;  // begin generation
+    BargeInSignal    barge_in = 2;  // interrupt mid-stream (was separate Prepare RPC)
+  }
+}
+
+message BargeInSignal {
+  string conversation_id = 1;
+}
+
+// TalkerContext 保持不变
 message TalkerContext {
   string   conversation_id          = 1;
-  string   turn_id                  = 2;   // unique per ProcessPrompt call
-  string   user_input               = 3;   // final_transcript text (natural language)
-  repeated ChatMessage history      = 4;   // recent turns, Gateway manages window
-  string   memory_contents          = 5;   // full MEMORY.md text (natural language → prompt)
+  string   turn_id                  = 2;
+  string   user_input               = 3;
+  repeated ChatMessage history      = 4;
+  string   memory_contents          = 5;
   repeated ToolDefinition tools     = 6;
-  string   active_tasks_json        = 7;   // JSON: ongoing Reasoner task summaries
-  string   tool_result_content      = 8;   // natural-language tool result (if tool-result round)
-  string   tool_request_id          = 9;   // correlates to ToolRequest.request_id
+  string   active_tasks_json        = 7;
+  string   tool_result_content      = 8;
+  string   tool_request_id          = 9;
   int64    timestamp_ms             = 10;
-  string   reasoner_task_id         = 11;  // correlates to DelegateRequest.task_id
-  string   reasoner_result_content  = 12;  // natural-language reasoner result (if reasoner-result round)
+  string   reasoner_task_id         = 11;
+  string   reasoner_result_content  = 12;
+  // ── NEW: RAG retrieval results ──
+  repeated RetrievalResult retrieval_results = 13;
 }
 
-// Streamed back to Gateway during generation.
-// One message per sentence boundary or extracted tag.
-// seq is monotonically increasing within a single ProcessPrompt call.
+// NEW: RAG 检索结果，注入到 context 中
+message RetrievalResult {
+  string id       = 1;
+  string content  = 2;
+  string source   = 3;  // "bm25" | "vector" | "lsp" | "structured"
+  float  score    = 4;
+}
+
 message TalkerOutput {
   uint32 seq = 1;
   oneof payload {
@@ -91,21 +129,27 @@ message TalkerOutput {
     ToolRequest      tool_request      = 5;
     DelegateRequest  delegate_request  = 6;
     ResponseComplete response_complete = 7;
+    BargeInAck       barge_in_ack      = 8;  // NEW: inline response to barge-in
   }
+}
+
+message BargeInAck {
+  string spoken_text   = 1;
+  string unspoken_text = 2;
 }
 
 message ResponseStarted  { string turn_id = 1; }
 message SentenceEvent    { string text = 1; }
-message EmotionEvent     { string emotion = 1; }  // joy|concern|thinking|surprise|neutral|determined
+message EmotionEvent     { string emotion = 1; }
 
 message ToolRequest {
-  string request_id = 1;   // Gateway correlates async result back to this
+  string request_id = 1;
   string tool_name  = 2;
-  string args_json  = 3;   // dynamic schema — string (not Struct) for simplicity
+  string args_json  = 3;
 }
 
 message DelegateRequest {
-  string task_id     = 1;   // generated by Talker; stable through full Reasoner lifecycle
+  string task_id     = 1;
   string description = 2;
 }
 
@@ -114,17 +158,9 @@ message ResponseComplete {
   bool   was_interrupted = 2;
 }
 
-message PrepareSignal   { string conversation_id = 1; }
-
-// spoken_text and unspoken_text are both empty if Talker was already idle.
-message PrepareAck {
-  string spoken_text   = 1;
-  string unspoken_text = 2;
-}
-
 message PrefillRequest {
   string conversation_id = 1;
-  TalkerContext context  = 2;  // same shape; n_predict=0 implied by call type
+  TalkerContext context  = 2;
 }
 message PrefillAck {}
 
@@ -135,22 +171,40 @@ message PersonaConfig {
 }
 message PersonaAck {}
 
-// ─────────────────────────────────────────────
-// REASONER SERVICE  (Gateway → Reasoner)
-// ─────────────────────────────────────────────
+
+// REASONER SERVICE — Multi-stream design
+
 
 service ReasonerService {
-  rpc ExecuteTask(TaskRequest)  returns (stream ReasonerEvent);
-  rpc CancelTask(CancelRequest) returns (CancelAck);
+  // Bidi per-task: Gateway sends task + context updates, Reasoner streams events
+  rpc Delegate(stream DelegateInput) returns (stream DelegateOutput);
+
+  // Unary interrupt: always available, even when no delegation in flight
+  rpc Interrupt(InterruptRequest) returns (InterruptAck);
+
+  // Server-streaming telemetry: continuous background context
+  rpc Telemetry(TelemetrySubscribe) returns (stream TelemetryEvent);
+}
+
+message DelegateInput {
+  oneof payload {
+    TaskRequest   start_task     = 1;
+    TaskContext    context_update = 2;  // NEW: send updated context mid-task
+  }
 }
 
 message TaskRequest {
-  string task_id     = 1;   // same ID from DelegateRequest.task_id
+  string task_id     = 1;
   string description = 2;
   map<string, string> metadata = 3;
 }
 
-message ReasonerEvent {
+message TaskContext {
+  string task_id   = 1;
+  string context   = 2;  // additional context during execution
+}
+
+message DelegateOutput {
   string task_id      = 1;
   int64  timestamp_ms = 2;
   oneof event {
@@ -168,11 +222,28 @@ message ReasonerOutput           { string content = 1; }
 message ReasonerCompleted        { string summary = 1; }
 message ReasonerError            { string message = 1; int32 code = 2; }
 
-message CancelRequest { string task_id = 1; }
-message CancelAck {}
+message InterruptRequest {
+  oneof signal {
+    TaskCancel  cancel   = 1;
+    GlobalStop  stop     = 2;
+    Shutdown    shutdown = 3;
+  }
+}
+message TaskCancel { string task_id = 1; }
+message GlobalStop {}
+message Shutdown   {}
+message InterruptAck {}
+
+message TelemetrySubscribe {}
+message TelemetryEvent {
+  string source      = 1;  // "openclaw" | "claude_code"
+  string event_type  = 2;
+  string data        = 3;  // JSON
+  int64  timestamp_ms = 4;
+}
 
 // ─────────────────────────────────────────────
-// GATEWAY CONTROL  (Endpoint → Gateway)
+// GATEWAY CONTROL (Endpoint → Gateway)
 // ─────────────────────────────────────────────
 
 service RouterControlService {

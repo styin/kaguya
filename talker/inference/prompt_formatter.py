@@ -116,6 +116,13 @@ def assemble_prompt(
 
     parts.append(_msg("system", "\n\n".join(system_sections)))
 
+    # 6.5 RAG Retrieval Results (injected by Gateway)
+    if ctx.retrieval_results:
+        retrieval_text = "Relevant context retrieved from memory:\n"
+        for r in ctx.retrieval_results:
+            retrieval_text += f"  [{r.source}] {r.content}\n"
+        system_sections.append(retrieval_text.strip())
+
     # ── Conversation history (section 7) ──
     for turn in ctx.history:
         role = _role_to_str(turn.role)
