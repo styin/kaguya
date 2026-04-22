@@ -21,7 +21,8 @@ class TalkerConfig(BaseSettings):
     # [OPEN] Voice selection requires listening tests after M3.6 lands (see OQ2).
     kokoro_voice: str = "af_heart"
     # ── Infrastructure ──
-    gateway_socket: str = "/tmp/kaguya-gateway.sock"
+    gateway_socket: str = "127.0.0.1:50051"
+    talker_listen_addr: str = "0.0.0.0:50053"
     gateway_reconnect_initial_s: float = 1.0
     gateway_reconnect_multiplier: float = 2.0
     gateway_reconnect_max_s: float = 30.0

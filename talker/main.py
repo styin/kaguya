@@ -19,6 +19,26 @@ from proto import kaguya_pb2_grpc  # type: ignore[import]
 logger = logging.getLogger(__name__)
 
 
+def _talker_bind_addr_for_temp_tcp(raw: str) -> str:
+    """Temporary Windows-safe routing: divert unix-style bind targets to TCP."""
+    value = raw.strip()
+    if "://" in value and not value.startswith(("http://", "https://", "dns://")):
+        logger.warning(
+            "Temporary TCP fallback: ignoring non-TCP Talker bind target '%s', using 0.0.0.0:50053",
+            value,
+        )
+        return "0.0.0.0:50053"
+
+    if "/" in value or "\\" in value:
+        logger.warning(
+            "Temporary TCP fallback: ignoring path-like Talker bind target '%s', using 0.0.0.0:50053",
+            value,
+        )
+        return "0.0.0.0:50053"
+
+    return value
+
+
 async def main() -> None:
     config = TalkerConfig()
 
@@ -34,10 +54,10 @@ async def main() -> None:
     servicer = TalkerServiceServicer(config, speaker)
     listener = Listener(config)
 
-    # Start gRPC server on Unix socket.
+    # Start gRPC server.
     server = grpc.aio.server()
     kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(servicer, server)
-    socket_addr = f"unix://{config.gateway_socket}"
+    socket_addr = _talker_bind_addr_for_temp_tcp(config.talker_listen_addr)
     server.add_insecure_port(socket_addr)
     await server.start()
     logger.info("gRPC TalkerService listening on %s", socket_addr)
