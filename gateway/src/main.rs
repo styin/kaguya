@@ -116,9 +116,17 @@ async fn main() -> anyhow::Result<()> {
     let ws_addr = config.server.ws_addr.clone();
     tokio::spawn(async move {
         let app = endpoint::router(endpoint_state);
-        let listener = tokio::net::TcpListener::bind(&ws_addr).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(&ws_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!(addr = %ws_addr, "WebSocket bind failed: {e}");
+                return;
+            }
+        };
         info!(addr = %ws_addr, "WebSocket endpoint listening");
-        axum::serve(listener, app).await.unwrap();
+        if let Err(e) = axum::serve(listener, app).await {
+            error!(addr = %ws_addr, "WebSocket endpoint failed: {e}");
+        }
     });
 
     // ── File watcher ──

@@ -40,11 +40,13 @@ impl ToolRegistry {
                     description: "Write to file".into(),
                     args_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}"#.into(),
                 },
-                ToolMeta {
-                    name: "run_command".into(),
-                    description: "Run shell command in sandbox".into(),
-                    args_schema: r#"{"type":"object","properties":{"cmd":{"type":"string"}}}"#.into(),
-                },
+                // DISABLED: run_command requires allowlist-based sandboxing before re-enabling.
+                // See GitHub issue for scoped implementation plan.
+                // ToolMeta {
+                //     name: "run_command".into(),
+                //     description: "Run shell command in sandbox".into(),
+                //     args_schema: r#"{"type":"object","properties":{"cmd":{"type":"string"}}}"#.into(),
+                // },
             ],
             workspace_root,
         }
@@ -73,7 +75,8 @@ impl ToolRegistry {
                 "list_files"   => exec_list_files(&root, &args_json).await,
                 "read_file"    => exec_read_file(&root, &args_json).await,
                 "write_file"   => exec_write_file(&root, &args_json).await,
-                "run_command"  => exec_run_command(&root, &args_json).await,
+                // DISABLED: see tool registration above
+                // "run_command"  => exec_run_command(&root, &args_json).await,
                 other          => Err(format!("unknown tool: {other}")),
             };
 
@@ -100,11 +103,17 @@ fn parse_arg(json: &str, key: &str) -> Result<String, String> {
 }
 
 fn safe_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    for component in Path::new(rel).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(format!("path contains '..': {rel}"));
+        }
+    }
     let candidate = root.join(rel);
-    let canon = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if !canon.starts_with(&root_canon) {
-        return Err(format!("path escapes workspace: {rel}"));
+    if let Ok(canon) = candidate.canonicalize() {
+        if !canon.starts_with(&root_canon) {
+            return Err(format!("path escapes workspace: {rel}"));
+        }
     }
     Ok(candidate)
 }
@@ -115,10 +124,10 @@ async fn exec_list_files(root: &Path, args: &str) -> Result<String, String> {
     let mut rd = tokio::fs::read_dir(&dir).await.map_err(|e| e.to_string())?;
     let mut files = Vec::new();
     while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
-        let ft = entry.file_type().await.unwrap();
+        let is_dir = entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false);
         files.push(serde_json::json!({
             "name": entry.file_name().to_string_lossy(),
-            "is_dir": ft.is_dir(),
+            "is_dir": is_dir,
         }));
     }
     Ok(serde_json::json!({ "files": files }).to_string())
