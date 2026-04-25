@@ -16,6 +16,7 @@ use uuid::Uuid;
 use kaguya_gateway::config::GatewayConfig;
 use kaguya_gateway::context;
 use kaguya_gateway::control::ControlServiceImpl;
+#[cfg(feature = "dev-console")]
 use kaguya_gateway::endpoint;
 use kaguya_gateway::history::History;
 use kaguya_gateway::input_stream;
@@ -105,29 +106,33 @@ async fn main() -> anyhow::Result<()> {
         memory_md: memory.contents().await,
     }).await;
 
-    // ── WebSocket endpoint ──
+    // ── WebSocket endpoint (dev-console feature) ──
 
-    let endpoint_state = Arc::new(endpoint::EndpointState {
-        control_tx: control_tx.clone(),
-        p1_tx: input_tx.p1.clone(),
-        audio_out_rx: tokio::sync::Mutex::new(audio_out_rx),
-        metadata_rx: tokio::sync::Mutex::new(metadata_out_rx),
-    });
-    let ws_addr = config.server.ws_addr.clone();
-    tokio::spawn(async move {
-        let app = endpoint::router(endpoint_state);
-        let listener = match tokio::net::TcpListener::bind(&ws_addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                error!(addr = %ws_addr, "WebSocket bind failed: {e}");
-                return;
+    #[cfg(feature = "dev-console")]
+    {
+        let endpoint_state = Arc::new(endpoint::EndpointState {
+            control_tx: control_tx.clone(),
+            p1_tx: input_tx.p1.clone(),
+            audio_out_rx: tokio::sync::Mutex::new(audio_out_rx),
+            metadata_rx: tokio::sync::Mutex::new(metadata_out_rx),
+            active_client: std::sync::Mutex::new(None),
+        });
+        let ws_addr = config.server.ws_addr.clone();
+        tokio::spawn(async move {
+            let app = endpoint::router(endpoint_state);
+            let listener = match tokio::net::TcpListener::bind(&ws_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(addr = %ws_addr, "WebSocket bind failed: {e}");
+                    return;
+                }
+            };
+            info!(addr = %ws_addr, "WebSocket endpoint listening");
+            if let Err(e) = axum::serve(listener, app).await {
+                error!(addr = %ws_addr, "WebSocket endpoint failed: {e}");
             }
-        };
-        info!(addr = %ws_addr, "WebSocket endpoint listening");
-        if let Err(e) = axum::serve(listener, app).await {
-            error!(addr = %ws_addr, "WebSocket endpoint failed: {e}");
-        }
-    });
+        });
+    }
 
     // ── File watcher ──
 

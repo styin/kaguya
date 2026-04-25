@@ -1,0 +1,19 @@
+{
+  "processes": {
+    "gateway": {
+      "command": "source $HOME/.cargo/env && cargo run --features dev-console",
+      "cwd": "../gateway",
+      "env": { "RUST_LOG": "kaguya_gateway=debug" }
+    },
+    "talker": {
+      "command": "conda run -n kaguya --no-banner python -m talker.main",
+      "cwd": "../talker",
+      "env": {}
+    },
+    "llm_server": {
+      "managed": false,
+      "health_url": "http://localhost:8080/health",
+      "poll_interval_ms": 5000
+    }
+  }
+}

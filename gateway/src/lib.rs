@@ -1,6 +1,7 @@
 pub mod config;
 pub mod context;
 pub mod control;
+#[cfg(feature = "dev-console")]
 pub mod endpoint;
 pub mod error;
 pub mod history;

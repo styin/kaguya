@@ -29,5 +29,8 @@ chrono = "0.4"
 bytes = "1"
 notify = "7"
 
+[features]
+dev-console = []
+
 [build-dependencies]
 tonic-build = "0.12"
