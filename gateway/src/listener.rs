@@ -1,7 +1,9 @@
-//! Listener gRPC Client — Bidi streaming
-//! Gateway = client, Listener = server
-//! Gateway streams audio chunks → Listener streams back ASR events
+//! Listener gRPC Client + raw audio socket forwarder.
+//! Gateway = client, Listener = server.
+//! Audio bypasses gRPC — raw TCP socket with length-prefixed frames.
 
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -12,38 +14,37 @@ use crate::proto::listener_service_client::ListenerServiceClient;
 use crate::types::InputEvent;
 
 pub struct ListenerClient {
-    endpoint: String,
-    audio_tx: Option<mpsc::Sender<proto::ListenerInput>>,
+    grpc_endpoint: String,
+    audio_addr: String,
 }
 
 impl ListenerClient {
-    pub fn new(endpoint: String) -> Self {
-        Self { endpoint, audio_tx: None }
+    pub fn new(grpc_endpoint: String, audio_addr: String) -> Self {
+        Self { grpc_endpoint, audio_addr }
     }
 
-    /// Start bidi stream. Returns handle to feed audio and spawns a task
-    /// to receive ASR events into the input stream.
+    /// Start bidi gRPC stream for ASR events + raw TCP forwarder for audio.
+    /// Returns the audio sender — caller (main.rs) passes it to EndpointState.
     pub async fn start(
-        &mut self,
+        &self,
         p1_tx: mpsc::Sender<InputEvent>,
         p2_tx: mpsc::Sender<InputEvent>,
-    ) -> anyhow::Result<mpsc::Sender<proto::ListenerInput>> {
-        let channel = Channel::from_shared(self.endpoint.clone())?
+    ) -> anyhow::Result<mpsc::Sender<bytes::Bytes>> {
+        // ── gRPC bidi stream for ASR events ──
+        let channel = Channel::from_shared(self.grpc_endpoint.clone())?
             .connect()
             .await?;
         let mut client = ListenerServiceClient::new(channel);
 
-        // Outbound: audio chunks from Gateway → Listener
-        let (audio_tx, audio_rx) = mpsc::channel::<proto::ListenerInput>(512);
-        let outbound = ReceiverStream::new(audio_rx);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<proto::ListenerInput>(16);
+        let outbound = ReceiverStream::new(ctrl_rx);
 
-        // Start bidi stream
         let response = client.stream(outbound).await?;
         let mut inbound = response.into_inner();
 
-        info!(addr = %self.endpoint, "Listener bidi stream established");
+        info!(addr = %self.grpc_endpoint, "Listener gRPC bidi stream established");
 
-        // Spawn receiver task: Listener events → Input Stream
+        // Spawn receiver: Listener ASR events → Input Stream
         tokio::spawn(async move {
             while let Ok(Some(output)) = inbound.message().await {
                 match output.event {
@@ -74,22 +75,43 @@ impl ListenerClient {
             warn!("Listener bidi stream ended");
         });
 
-        self.audio_tx = Some(audio_tx.clone());
-        Ok(audio_tx)
-    }
+        // ── Raw TCP socket forwarder for audio ──
+        let (audio_tx, mut audio_rx) = mpsc::channel::<bytes::Bytes>(512);
+        let audio_addr = self.audio_addr.clone();
 
-    /// Forward audio from endpoint to Listener
-    pub async fn feed_audio(&self, data: bytes::Bytes, encoding: &str) {
-        if let Some(tx) = &self.audio_tx {
-            let _ = tx.send(proto::ListenerInput {
-                payload: Some(proto::listener_input::Payload::Audio(
-                    proto::AudioChunk {
-                        data: data.to_vec(),
-                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                        encoding: encoding.into(),
+        tokio::spawn(async move {
+            loop {
+                match TcpStream::connect(&audio_addr).await {
+                    Ok(mut stream) => {
+                        info!(addr = %audio_addr, "Audio socket connected to Listener");
+                        while let Some(data) = audio_rx.recv().await {
+                            let len = (data.len() as u32).to_be_bytes();
+                            if stream.write_all(&len).await.is_err()
+                                || stream.write_all(&data).await.is_err()
+                            {
+                                warn!("Audio socket write failed, reconnecting");
+                                break;
+                            }
+                        }
+                        // recv() returned None → sender dropped → shutdown
+                        if audio_rx.is_closed() {
+                            debug!("Audio forwarder: sender dropped, exiting");
+                            return;
+                        }
                     }
-                )),
-            }).await;
-        }
+                    Err(e) => {
+                        // Check if sender is still alive before retrying
+                        if audio_rx.is_closed() {
+                            debug!("Audio forwarder: sender dropped during reconnect, exiting");
+                            return;
+                        }
+                        warn!("Audio socket connect failed: {e}, retrying in 2s");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        });
+
+        Ok(audio_tx)
     }
 }

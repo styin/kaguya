@@ -1,9 +1,8 @@
-//! Talker gRPC Client — Bidi Converse stream
-//! Gateway = client, Talker = server
-//! Barge-in is inline on the same stream (not a separate Prepare RPC)
+//! Talker gRPC Client — bidi Converse stream.
+//! Barge-in is inline on the same stream (BargeInSignal → BargeInAck).
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
@@ -16,7 +15,6 @@ use crate::proto::talker_service_client::TalkerServiceClient;
 pub struct TalkerClient {
     inner: Arc<RwLock<Option<TalkerServiceClient<Channel>>>>,
     endpoint: String,
-    /// Sender for the active bidi stream (None if no stream is open)
     stream_tx: Arc<Mutex<Option<mpsc::Sender<proto::TalkerInput>>>>,
 }
 
@@ -29,23 +27,21 @@ impl TalkerClient {
         }
     }
 
-    pub async fn connect(&self) -> anyhow::Result<()> {
-        let channel = Channel::from_shared(self.endpoint.clone())?
-            .connect()
-            .await?;
-        *self.inner.write().await = Some(TalkerServiceClient::new(channel));
-        info!(addr = %self.endpoint, "connected to Talker");
-        Ok(())
-    }
-
     pub async fn try_connect(&self) {
-        if let Err(e) = self.connect().await {
-            warn!("Talker not ready: {e} (will retry)");
+        match Channel::from_shared(self.endpoint.clone()) {
+            Ok(ch) => match ch.connect().await {
+                Ok(channel) => {
+                    *self.inner.write().await = Some(TalkerServiceClient::new(channel));
+                    info!(addr = %self.endpoint, "connected to Talker");
+                }
+                Err(e) => warn!("Talker not ready: {e}"),
+            },
+            Err(e) => warn!("bad talker endpoint: {e}"),
         }
     }
 
-    /// Start a bidi Converse stream and dispatch a context.
-    /// Returns CancellationToken for the stream lifetime.
+    /// Open a bidi Converse stream, send context, receive output.
+    /// Stores stream sender for inline barge-in.
     pub fn dispatch(
         &self,
         ctx: proto::TalkerContext,
@@ -58,23 +54,25 @@ impl TalkerClient {
         let endpoint = self.endpoint.clone();
 
         tokio::spawn(async move {
-            // Get or reconnect client
+            // Ensure client connected
             let mut guard = inner.write().await;
             if guard.is_none() {
-                match Channel::from_shared(endpoint) {
-                    Ok(ch) => match ch.connect().await {
-                        Ok(channel) => {
-                            *guard = Some(TalkerServiceClient::new(channel));
-                        }
-                        Err(e) => { error!("reconnect failed: {e}"); return; }
-                    },
-                    Err(e) => { error!("bad endpoint: {e}"); return; }
+                if let Ok(ch) = Channel::from_shared(endpoint) {
+                    if let Ok(channel) = ch.connect().await {
+                        *guard = Some(TalkerServiceClient::new(channel));
+                    } else {
+                        error!("Talker reconnect failed");
+                        return;
+                    }
+                } else {
+                    error!("bad Talker endpoint");
+                    return;
                 }
             }
             let mut client = guard.clone().unwrap();
             drop(guard);
 
-            // Create bidi stream channels
+            // Create bidi stream
             let (tx, rx) = mpsc::channel::<proto::TalkerInput>(64);
             let outbound = ReceiverStream::new(rx);
 
@@ -85,10 +83,9 @@ impl TalkerClient {
                 return;
             }
 
-            // Store tx for barge-in
+            // Store sender for barge-in
             *stream_tx_arc.lock().await = Some(tx);
 
-            // Open bidi stream
             let mut inbound = match client.converse(outbound).await {
                 Ok(resp) => resp.into_inner(),
                 Err(e) => {
@@ -98,11 +95,10 @@ impl TalkerClient {
                 }
             };
 
-            // Receive loop
             loop {
                 tokio::select! {
                     _ = child.cancelled() => {
-                        debug!("Talker stream cancelled externally");
+                        debug!("Talker dispatch cancelled externally");
                         break;
                     }
                     result = inbound.message() => {
@@ -111,7 +107,7 @@ impl TalkerClient {
                                 if output_tx.send(output).await.is_err() { break; }
                             }
                             Ok(None) => break,
-                            Err(e) => { error!("stream error: {e}"); break; }
+                            Err(e) => { error!("Talker stream error: {e}"); break; }
                         }
                     }
                 }
@@ -123,27 +119,28 @@ impl TalkerClient {
         token
     }
 
-    /// Send inline barge-in on the active bidi stream.
-    /// Returns BargeInAck via the output_tx channel (handled in main loop).
+    /// Send inline barge-in on the active Converse stream.
     pub async fn barge_in(&self, conversation_id: &str) {
         let guard = self.stream_tx.lock().await;
         if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(proto::TalkerInput {
+            let msg = proto::TalkerInput {
                 payload: Some(proto::talker_input::Payload::BargeIn(
-                    proto::BargeInSignal {
-                        conversation_id: conversation_id.into(),
-                    }
+                    proto::BargeInSignal { conversation_id: conversation_id.into() }
                 )),
-            }).await;
-            debug!("→ BargeIn (inline)");
+            };
+            if tx.send(msg).await.is_err() {
+                debug!("barge-in: stream already closed");
+            } else {
+                debug!("→ BargeIn (inline)");
+            }
         } else {
             debug!("barge-in: no active stream (Talker idle)");
         }
     }
 
-    // PrefillCache 和 UpdatePersona 保持 unary 不变
     pub async fn prefill_cache(&self, conversation_id: &str, ctx: proto::TalkerContext) {
         let Some(mut client) = self.inner.read().await.clone() else { return };
+        debug!("→ PrefillCache");
         if let Err(e) = client.prefill_cache(proto::PrefillRequest {
             conversation_id: conversation_id.into(),
             context: Some(ctx),
@@ -159,6 +156,8 @@ impl TalkerClient {
             return;
         };
         drop(guard);
+        info!(soul_len = config.soul_md.len(), identity_len = config.identity_md.len(),
+              memory_len = config.memory_md.len(), "→ UpdatePersona");
         if let Err(e) = client.update_persona(config).await {
             error!("UpdatePersona failed: {e}");
         }

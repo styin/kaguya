@@ -1,26 +1,21 @@
-.PHONY: dev proto clean test
+PROTO_DIR  := proto
+PROTO_FILE := $(PROTO_DIR)/kaguya/v1/kaguya.proto
 
-# Local development script
-dev:
-	./scripts/dev.sh
+# ── Python ──
+proto-py:
+	python -m grpc_tools.protoc \
+		-I$(PROTO_DIR) \
+		--python_out=talker/proto \
+		--grpc_python_out=talker/proto \
+		$(PROTO_FILE)
+	@# fix relative imports
+	sed -i 's/from kaguya.v1/from talker.proto.kaguya.v1/g' talker/proto/kaguya/v1/*_pb2_grpc.py
 
-# Generate Python protobuf bindings (dev only - stubs are committed for end users)
-# Rust stubs regenerate automatically via build.rs on next `cargo build`
-proto:
-	@echo "==> Regenerating Python proto stubs..."
-	cd talker && uv run python scripts/gen_proto.py
-	@echo "==> Done. Rust stubs will regenerate automatically on next 'cargo build'."
+# ── Rust (tonic-build in build.rs, cargo handles it) ──
+proto-rs:
+	cd gateway && cargo build
 
-test:
-	@echo "Running tests..."
-	cd gateway && cargo test
-	cd talker && uv run pytest
-	cd reasoner && npm test
-	cd tools && npm test
+# ── Both ──
+proto: proto-py proto-rs
 
-clean:
-	@echo "Cleaning artifacts..."
-	cd gateway && cargo clean
-	rm -rf talker/.venv
-	rm -rf reasoner/node_modules
-	rm -rf tools/node_modules
+.PHONY: proto proto-py proto-rs

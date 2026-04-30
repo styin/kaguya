@@ -1,6 +1,4 @@
-//! Phase 1 Endpoint Service — WebSocket server for dev-GUI
-//! ---
-//! Phase 2 targets OpenPod protocol integration
+//! Phase 1 Endpoint — WebSocket server for dev-GUI, audio forwarding to Listener.
 
 use std::sync::Arc;
 use axum::{
@@ -18,6 +16,7 @@ pub struct EndpointState {
     pub p1_tx: mpsc::Sender<InputEvent>,
     pub audio_out_rx: tokio::sync::Mutex<mpsc::Receiver<bytes::Bytes>>,
     pub metadata_rx: tokio::sync::Mutex<mpsc::Receiver<MetadataEvent>>,
+    pub listener_audio_tx: mpsc::Sender<bytes::Bytes>,
 }
 
 pub fn router(state: Arc<EndpointState>) -> Router {
@@ -38,6 +37,10 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
     info!("dev-GUI connected");
     while let Some(Ok(msg)) = socket.recv().await {
         match msg {
+            // Binary frames → raw audio → forward to Listener via raw socket
+            Message::Binary(data) => {
+                let _ = state.listener_audio_tx.send(bytes::Bytes::from(data)).await;
+            }
             Message::Text(json) => {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json) {
                     match parsed.get("type").and_then(|t| t.as_str()) {
