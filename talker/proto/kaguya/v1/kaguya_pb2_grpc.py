@@ -3,9 +3,9 @@
 import grpc
 import warnings
 
-from . import kaguya_pb2 as kaguya__pb2
+from kaguya.v1 import kaguya_pb2 as kaguya_dot_v1_dot_kaguya__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in kaguya_pb2_grpc.py depends on'
+        + ' but the generated code in kaguya/v1/kaguya_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -39,8 +39,8 @@ class ListenerServiceStub(object):
         """
         self.Stream = channel.stream_stream(
                 '/kaguya.v1.ListenerService/Stream',
-                request_serializer=kaguya__pb2.ListenerInput.SerializeToString,
-                response_deserializer=kaguya__pb2.ListenerOutput.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.ListenerInput.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.ListenerOutput.FromString,
                 _registered_method=True)
 
 
@@ -62,8 +62,8 @@ def add_ListenerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Stream': grpc.stream_stream_rpc_method_handler(
                     servicer.Stream,
-                    request_deserializer=kaguya__pb2.ListenerInput.FromString,
-                    response_serializer=kaguya__pb2.ListenerOutput.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.ListenerInput.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.ListenerOutput.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -94,8 +94,8 @@ class ListenerService(object):
             request_iterator,
             target,
             '/kaguya.v1.ListenerService/Stream',
-            kaguya__pb2.ListenerInput.SerializeToString,
-            kaguya__pb2.ListenerOutput.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.ListenerInput.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.ListenerOutput.FromString,
             options,
             channel_credentials,
             insecure,
@@ -121,18 +121,18 @@ class TalkerServiceStub(object):
         """
         self.Converse = channel.stream_stream(
                 '/kaguya.v1.TalkerService/Converse',
-                request_serializer=kaguya__pb2.TalkerInput.SerializeToString,
-                response_deserializer=kaguya__pb2.TalkerOutput.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.TalkerInput.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.TalkerOutput.FromString,
                 _registered_method=True)
         self.PrefillCache = channel.unary_unary(
                 '/kaguya.v1.TalkerService/PrefillCache',
-                request_serializer=kaguya__pb2.PrefillRequest.SerializeToString,
-                response_deserializer=kaguya__pb2.PrefillAck.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.PrefillRequest.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.PrefillAck.FromString,
                 _registered_method=True)
         self.UpdatePersona = channel.unary_unary(
                 '/kaguya.v1.TalkerService/UpdatePersona',
-                request_serializer=kaguya__pb2.PersonaConfig.SerializeToString,
-                response_deserializer=kaguya__pb2.PersonaAck.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.PersonaConfig.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.PersonaAck.FromString,
                 _registered_method=True)
 
 
@@ -167,18 +167,18 @@ def add_TalkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Converse': grpc.stream_stream_rpc_method_handler(
                     servicer.Converse,
-                    request_deserializer=kaguya__pb2.TalkerInput.FromString,
-                    response_serializer=kaguya__pb2.TalkerOutput.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.TalkerInput.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.TalkerOutput.SerializeToString,
             ),
             'PrefillCache': grpc.unary_unary_rpc_method_handler(
                     servicer.PrefillCache,
-                    request_deserializer=kaguya__pb2.PrefillRequest.FromString,
-                    response_serializer=kaguya__pb2.PrefillAck.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.PrefillRequest.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.PrefillAck.SerializeToString,
             ),
             'UpdatePersona': grpc.unary_unary_rpc_method_handler(
                     servicer.UpdatePersona,
-                    request_deserializer=kaguya__pb2.PersonaConfig.FromString,
-                    response_serializer=kaguya__pb2.PersonaAck.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.PersonaConfig.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.PersonaAck.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -209,8 +209,8 @@ class TalkerService(object):
             request_iterator,
             target,
             '/kaguya.v1.TalkerService/Converse',
-            kaguya__pb2.TalkerInput.SerializeToString,
-            kaguya__pb2.TalkerOutput.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.TalkerInput.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.TalkerOutput.FromString,
             options,
             channel_credentials,
             insecure,
@@ -236,8 +236,8 @@ class TalkerService(object):
             request,
             target,
             '/kaguya.v1.TalkerService/PrefillCache',
-            kaguya__pb2.PrefillRequest.SerializeToString,
-            kaguya__pb2.PrefillAck.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.PrefillRequest.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.PrefillAck.FromString,
             options,
             channel_credentials,
             insecure,
@@ -263,8 +263,8 @@ class TalkerService(object):
             request,
             target,
             '/kaguya.v1.TalkerService/UpdatePersona',
-            kaguya__pb2.PersonaConfig.SerializeToString,
-            kaguya__pb2.PersonaAck.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.PersonaConfig.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.PersonaAck.FromString,
             options,
             channel_credentials,
             insecure,
@@ -289,18 +289,18 @@ class ReasonerServiceStub(object):
         """
         self.Delegate = channel.stream_stream(
                 '/kaguya.v1.ReasonerService/Delegate',
-                request_serializer=kaguya__pb2.DelegateInput.SerializeToString,
-                response_deserializer=kaguya__pb2.DelegateOutput.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.DelegateInput.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.DelegateOutput.FromString,
                 _registered_method=True)
         self.Interrupt = channel.unary_unary(
                 '/kaguya.v1.ReasonerService/Interrupt',
-                request_serializer=kaguya__pb2.InterruptRequest.SerializeToString,
-                response_deserializer=kaguya__pb2.InterruptAck.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.InterruptRequest.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.InterruptAck.FromString,
                 _registered_method=True)
         self.Telemetry = channel.unary_stream(
                 '/kaguya.v1.ReasonerService/Telemetry',
-                request_serializer=kaguya__pb2.TelemetrySubscribe.SerializeToString,
-                response_deserializer=kaguya__pb2.TelemetryEvent.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.TelemetrySubscribe.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.TelemetryEvent.FromString,
                 _registered_method=True)
 
 
@@ -335,18 +335,18 @@ def add_ReasonerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Delegate': grpc.stream_stream_rpc_method_handler(
                     servicer.Delegate,
-                    request_deserializer=kaguya__pb2.DelegateInput.FromString,
-                    response_serializer=kaguya__pb2.DelegateOutput.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.DelegateInput.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.DelegateOutput.SerializeToString,
             ),
             'Interrupt': grpc.unary_unary_rpc_method_handler(
                     servicer.Interrupt,
-                    request_deserializer=kaguya__pb2.InterruptRequest.FromString,
-                    response_serializer=kaguya__pb2.InterruptAck.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.InterruptRequest.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.InterruptAck.SerializeToString,
             ),
             'Telemetry': grpc.unary_stream_rpc_method_handler(
                     servicer.Telemetry,
-                    request_deserializer=kaguya__pb2.TelemetrySubscribe.FromString,
-                    response_serializer=kaguya__pb2.TelemetryEvent.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.TelemetrySubscribe.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.TelemetryEvent.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -376,8 +376,8 @@ class ReasonerService(object):
             request_iterator,
             target,
             '/kaguya.v1.ReasonerService/Delegate',
-            kaguya__pb2.DelegateInput.SerializeToString,
-            kaguya__pb2.DelegateOutput.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.DelegateInput.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.DelegateOutput.FromString,
             options,
             channel_credentials,
             insecure,
@@ -403,8 +403,8 @@ class ReasonerService(object):
             request,
             target,
             '/kaguya.v1.ReasonerService/Interrupt',
-            kaguya__pb2.InterruptRequest.SerializeToString,
-            kaguya__pb2.InterruptAck.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.InterruptRequest.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.InterruptAck.FromString,
             options,
             channel_credentials,
             insecure,
@@ -430,8 +430,8 @@ class ReasonerService(object):
             request,
             target,
             '/kaguya.v1.ReasonerService/Telemetry',
-            kaguya__pb2.TelemetrySubscribe.SerializeToString,
-            kaguya__pb2.TelemetryEvent.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.TelemetrySubscribe.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.TelemetryEvent.FromString,
             options,
             channel_credentials,
             insecure,
@@ -458,8 +458,8 @@ class RouterControlServiceStub(object):
         """
         self.SendControl = channel.unary_unary(
                 '/kaguya.v1.RouterControlService/SendControl',
-                request_serializer=kaguya__pb2.ControlSignal.SerializeToString,
-                response_deserializer=kaguya__pb2.ControlAck.FromString,
+                request_serializer=kaguya_dot_v1_dot_kaguya__pb2.ControlSignal.SerializeToString,
+                response_deserializer=kaguya_dot_v1_dot_kaguya__pb2.ControlAck.FromString,
                 _registered_method=True)
 
 
@@ -481,8 +481,8 @@ def add_RouterControlServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'SendControl': grpc.unary_unary_rpc_method_handler(
                     servicer.SendControl,
-                    request_deserializer=kaguya__pb2.ControlSignal.FromString,
-                    response_serializer=kaguya__pb2.ControlAck.SerializeToString,
+                    request_deserializer=kaguya_dot_v1_dot_kaguya__pb2.ControlSignal.FromString,
+                    response_serializer=kaguya_dot_v1_dot_kaguya__pb2.ControlAck.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -514,8 +514,8 @@ class RouterControlService(object):
             request,
             target,
             '/kaguya.v1.RouterControlService/SendControl',
-            kaguya__pb2.ControlSignal.SerializeToString,
-            kaguya__pb2.ControlAck.FromString,
+            kaguya_dot_v1_dot_kaguya__pb2.ControlSignal.SerializeToString,
+            kaguya_dot_v1_dot_kaguya__pb2.ControlAck.FromString,
             options,
             channel_credentials,
             insecure,

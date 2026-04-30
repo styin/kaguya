@@ -1,18 +1,8 @@
 """inference/prompt_formatter.py — TalkerContext + PersonaConfig → LLM prompt string.
 
-Domain role: Formats the structured context package from the Gateway into a
-complete prompt for the LLM. The Gateway assembles the context;
-the Talker formats. Gateway has zero knowledge of prompt format.
-
-[DECISION] This boundary is strict (implementation plan §2, design principle 1).
-
-TODO: Migrate from /v1/completions (raw prompt string with hardcoded chat
-template delimiters) to /v1/chat/completions (structured messages[] array).
-This shifts template responsibility to the inference server, making the
-Talker model-agnostic. Currently hardcodes ChatML-style delimiters
-(<|im_start|>/<|im_end|>) which are correct for Qwen3 but wrong for
-Llama 3, Mistral, Phi, etc. The /v1/chat/completions API is supported by
-llama.cpp, LM Studio, and all OpenAI-compatible servers.
+[FIX] Retrieval results are now injected into system_sections BEFORE the
+system message is joined and appended to parts. Previous version appended
+to system_sections after parts.append() — a no-op bug.
 """
 
 import logging
@@ -23,16 +13,11 @@ from proto import kaguya_pb2  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
 
-# ChatML-style delimiters. Used by Qwen3, Yi, and others.
-# TODO: Remove when migrating to /v1/chat/completions (see module docstring).
 _IM_START = "<|im_start|>"
 _IM_END = "<|im_end|>"
 
-# Canonical emotion tag values (spec-agent §3.3, EmotionEvent comment).
-# Single source of truth lives in soul_container.VALID_EMOTIONS.
 _EMOTION_VALUES = "|".join(sorted(VALID_EMOTIONS))
 
-# Structured output instructions injected into the system prompt.
 _TAG_INSTRUCTIONS = f"""\
 You may use the following tags in your response. Tags are extracted before \
 the user hears your speech — they are metadata, not spoken aloud.
@@ -48,7 +33,6 @@ Delegation (hands off a task to a Reasoner agent for deep work — you may \
 continue speaking while the Reasoner works in the background):
   [DELEGATE:description of the task]"""
 
-# Few-shot tool/delegation examples.
 _TOOL_EXAMPLES = """\
 Examples:
   User asks about a URL → "Let me check that. [TOOL:web_fetch({"url": "https://..."})]"
@@ -61,24 +45,7 @@ def assemble_prompt(
     ctx: kaguya_pb2.TalkerContext,
     persona: kaguya_pb2.PersonaConfig,
 ) -> str:
-    """Build a complete chat-template prompt from context + persona.
-
-    Prompt structure (per spec-agent §3.3):
-        1. System: SOUL.md + IDENTITY.md persona
-        2. System: structured output instructions (tags)
-        3. System: available tools list
-        4. System: tool use examples
-        5. System: current context (timestamp, active tasks)
-        6. Memory: MEMORY.md contents
-        7. Conversation history as alternating turns
-        8. If tool_result_content: inject as tool turn
-        9. If reasoner_result_content: inject as tool turn
-       10. User: user_input
-       11. Prime assistant generation (open-ended, no closing delimiter)
-    """
     parts: list[str] = []
-
-    # ── System message (sections 1-6 combined) ──
     system_sections: list[str] = []
 
     # 1. Persona
@@ -114,46 +81,44 @@ def assemble_prompt(
     if ctx.memory_contents:
         system_sections.append(f"Memory:\n{ctx.memory_contents.strip()}")
 
+    # 6.5 RAG Retrieval Results — MUST be before parts.append (FIX)
+    if ctx.retrieval_results:
+        retrieval_text = "Relevant context retrieved from memory:\n" + "\n".join(
+            f"  [{r.source}] {r.content}" for r in ctx.retrieval_results
+        )
+        system_sections.append(retrieval_text)
+
+    # NOW join everything into the system message
     parts.append(_msg("system", "\n\n".join(system_sections)))
 
-    # ── Conversation history (section 7) ──
+    # 7. Conversation history
     for turn in ctx.history:
         role = _role_to_str(turn.role)
-        # name parameter supports multi-user voice chat (e.g., "user:Alice").
-        # Currently single-user, but the plumbing is here for future use.
         parts.append(_msg(role, turn.content, name=turn.name or None))
 
-    # ── Tool result injection (section 8) ──
+    # 8. Tool result injection
     if ctx.tool_result_content:
         label = f"[TOOL_RESULT:{ctx.tool_request_id}] " if ctx.tool_request_id else ""
         parts.append(_msg("tool", f"{label}{ctx.tool_result_content}"))
 
-    # ── Reasoner result injection (section 9) ──
+    # 9. Reasoner result injection
     if ctx.reasoner_result_content:
         label = (
             f"[REASONER_RESULT:{ctx.reasoner_task_id}] " if ctx.reasoner_task_id else ""
         )
         parts.append(_msg("tool", f"{label}{ctx.reasoner_result_content}"))
 
-    # ── User input (section 10) ──
+    # 10. User input
     if ctx.user_input:
         parts.append(_msg("user", ctx.user_input))
 
-    # ── Prime assistant generation (section 11) ──
-    # No closing _IM_END — this is intentional. The open-ended message signals
-    # the model to generate from here. Adding _IM_END would close the message
-    # and the model would start a new turn instead of generating content.
+    # 11. Prime assistant generation
     parts.append(f"{_IM_START}assistant\n")
 
     return "".join(parts)
 
 
 def _msg(role: str, content: str, *, name: str | None = None) -> str:
-    """Format a single chat message with ChatML-style delimiters.
-
-    The name parameter produces "<|im_start|>role:name\\n" headers, supporting
-    multi-participant conversations (e.g., "user:Alice", "user:Bob").
-    """
     header = f"{role}:{name}" if name else role
     return f"{_IM_START}{header}\n{content}{_IM_END}\n"
 
@@ -167,7 +132,6 @@ _ROLE_MAP = {
 
 
 def _role_to_str(role: kaguya_pb2.Role.ValueType) -> str:
-    """Convert proto Role enum to chat template role string."""
     result = _ROLE_MAP.get(role)
     if result is None:
         logger.warning("Unknown proto Role enum value %d, defaulting to 'user'", role)
