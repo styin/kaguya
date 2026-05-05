@@ -37,7 +37,7 @@ The result: Responsive voice interaction that doesn't compromise on capability, 
 - ⚡ **Local execution**: Everything runs on your hardware (tested on RTX 5070 Ti, 16GB VRAM)
 - 🧠 **Smart delegation**: Fast-path LLM (Qwen3-8B) knows when to delegate complex reasoning to specialized agents
 - 🔧 **Tool integration**: Sandboxed execution environment with MCP support for extensibility
-- 📝 **Memory system**: Persistent context across conversations (file-based in Phase 1, vector DB in Phase 2)
+- 📝 **Memory system**: Hybrid retrieval — BM25 full-text search over a SQLite-backed memory store, with optional vector embeddings for semantic recall
 
 ---
 
@@ -48,9 +48,9 @@ The result: Responsive voice interaction that doesn't compromise on capability, 
 **🦀 Gateway (Rust)** — The conductor
 
 - Deterministic orchestrator that routes all events through a priority queue
-- Manages conversation state, memory files, and tool dispatch
+- Manages conversation state, the RAG memory store, and tool dispatch
 - Never does LLM inference—just pure coordination
-- Handles barge-in gracefully: every turn starts with a unified PREPARE signal
+- Handles barge-in inline on the same bidi stream as inference, no separate RPC roundtrip
 
 **🐍 Talker (Python)** — The voice
 
@@ -106,11 +106,14 @@ For more architectural details: [`docs/spec-gateway-v0.1.0.md`](./docs/spec-gate
 
 🚧 **Phase 1 is in active development**
 
-- ✅ Proto schema finalized with gRPC best practices
-- ⏳ Currently on M0 (proto generation + buf lint CI) → M1 (Gateway core)
+- ✅ Proto schema finalized; bidi `Converse` and `Stream` topology in place
+- ✅ Gateway core: event routing, RAG memory store (SQLite + FTS5 BM25), tool registry, silence timers
+- ✅ Listener: VAD + STT (faster-whisper), rule-based turn detection, raw TCP audio socket
+- ✅ Talker inference: prompt formatter, soul container, Kokoro TTS, sentence streaming
+- ⏳ Reasoner adapters (OpenClaw, Claude Code) and end-to-end smoke flows still in progress
 - 📋 Full implementation plan: [`docs/implementation-plan-v0.1.0.md`](./docs/implementation-plan-v0.1.0.md)
 
-**Contributions are welcome once M1-M3 land** and the core voice pipeline is running. We're building in the open—feel free to follow progress, open issues, or explore the architecture.
+**Contributions are welcome** — the core voice pipeline runs locally and we're now hardening it. Open issues if you spot architectural concerns or want to chat about a contribution.
 
 ---
 
@@ -135,15 +138,73 @@ Should work on most modern NVIDIA GPUs with 12+ GB VRAM. Cloud fallbacks (Deepgr
 
 ### Prerequisites
 
-- **Rust** (for Gateway)
-- **Python 3.10+** (for Talker)
-- **Node.js 20+ & pnpm** (for Reasoner and Toolkit)
-- **llama.cpp** server running Qwen3-8B
-- **CUDA-capable GPU** (12+ GB VRAM recommended)
+- **Rust** (`rustup`) — for the Gateway
+- **Python 3.11+** + **uv** — for the Talker (uv manages the Python interpreter and venv)
+- **Node.js 20+** with **npm** — for the Reasoner / Toolkit
+- **`buf`** + **`protoc`** — for proto generation and lint (Rust uses tonic-build's eager generation; Python regen is optional, stubs are committed)
+- **llama.cpp** (or any OpenAI-compatible server) running Qwen3-8B at `http://localhost:8080`
+- **CUDA-capable GPU** with 12+ GB VRAM recommended for the LLM
 
 ### Installation
 
-_Detailed setup instructions will be added as Phase 1 milestones complete. For now, see the implementation plan for the module-by-module build sequence._
+#### macOS (Apple Silicon or Intel)
+
+```sh
+# 1. System tools via Homebrew
+brew install uv buf protobuf portaudio opus
+# Rust toolchain (or `brew install rustup-init && rustup-init -y`)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# 2. Optional Python tooling installed as isolated CLIs
+uv tool install ruff
+uv tool install mypy
+
+# 3. Per-component setup
+git clone <this-repo> kaguya && cd kaguya
+cd talker   && uv sync --dev   && cd ..
+cd reasoner && npm install     && cd ..
+cd gateway  && cargo build     && cd ..
+```
+
+#### Linux / WSL
+
+Same uv / cargo / npm flow, but install the system libraries via your
+distro:
+
+```sh
+sudo apt install build-essential portaudio19-dev libopus-dev espeak-ng \
+                 protobuf-compiler
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# rustup as above; buf via https://buf.build/docs/installation
+```
+
+#### Windows
+
+`opus.dll` is bundled in `talker/native/win32/`. Install Python 3.11+,
+[uv](https://docs.astral.sh/uv/getting-started/installation/),
+[rustup](https://rustup.rs/), Node.js 20+, and
+[buf](https://buf.build/docs/installation) via your preferred method,
+then run the per-component commands above (PowerShell or WSL).
+
+#### Running
+
+In separate terminals:
+
+```sh
+# Talker
+cd talker && uv run python main.py
+
+# Gateway
+cd gateway && cargo run
+
+# Open the dev WebSocket
+echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
+```
+
+For per-component details and gotchas (macOS port-binding, audio
+passthrough on WSL2, etc.), see [`talker/README.md`](./talker/README.md)
+and the specs in [`docs/`](./docs/).
 
 ---
 
@@ -151,15 +212,15 @@ _Detailed setup instructions will be added as Phase 1 milestones complete. For n
 
 ### Phase 1: Core Voice Pipeline _(in progress)_
 
-- [x] Proto schema finalized
-- [ ] M0: Proto generation + buf lint CI
-- [ ] M1: Gateway core (event routing, state management, turn lifecycle)
-- [ ] M2: Listener (VAD, STT, turn detection)
-- [ ] M3: Talker inference (LLM, soul container, TTS)
-- [ ] M4: Toolkit (sandboxed tools, MCP integration)
+- [x] Proto schema finalized (bidi `Converse` + `Stream`, RAG retrieval results)
+- [x] M0: Proto generation + buf lint
+- [x] M1: Gateway core (event routing, state management, turn lifecycle, RAG memory store)
+- [x] M2: Listener (VAD, STT, turn detection, raw TCP audio socket)
+- [x] M3: Talker inference (LLM, soul container, TTS, sentence streaming)
+- [ ] M4: Toolkit (sandboxed tools, MCP integration) — partial; `run_command` disabled pending allowlist
 - [ ] M5: Reasoner adapters (OpenClaw, Claude Code)
-- [ ] M6: Local dev interface (WebSocket TUI/GUI)
-- [ ] M7: Integration tests
+- [x] M6: Local dev interface (WebSocket endpoint for text + audio)
+- [ ] M7: Integration tests (end-to-end smoke flows)
 
 **Goal:** End-to-end voice conversation with tool calling and task delegation, running entirely locally.
 
@@ -167,7 +228,8 @@ _Detailed setup instructions will be added as Phase 1 milestones complete. For n
 
 - OpenPod protocol integration for multi-modal transport
 - Partial transcript prefill (reduce latency by prefilling during user speech)
-- ChromaDB for vector memory when MEMORY.md outgrows context window
+- LLM-based memory extraction to replace the keyword-trigger pass
+- Vector embedder beyond the current optional local endpoint (cloud fallback, batched indexing)
 - QLoRA fine-tuning for more consistent persona and action tags
 - Custom TTS voice (Chatterbox or Qwen3-TTS)
 - Learned turn detection model
@@ -191,7 +253,7 @@ _Detailed setup instructions will be added as Phase 1 milestones complete. For n
 
 **gRPC with buf:** Proto schemas enforced via `buf lint` and `buf breaking` in CI. Catches backwards-incompatible changes automatically before they cause cross-language breakage.
 
-**Persona as files:** `SOUL.md` defines personality, `IDENTITY.md` defines constraints, `MEMORY.md` stores facts. Gateway watches these files and delivers updates to Talker via gRPC. You can edit Kaguya's personality with a text editor.
+**Persona as files, memory as a store:** `SOUL.md` defines personality and `IDENTITY.md` defines constraints — both are plain Markdown that the Gateway watches and re-delivers to the Talker on edit. Long-term memory (user facts, preferences, project context) lives in a SQLite + FTS5 store (`data/kaguya.db`) populated post-turn from the conversation; retrieval uses BM25 with optional vector embeddings, fused via Reciprocal Rank Fusion before being injected into the next turn's context.
 
 For deeper architectural rationale, see the specs in [`docs/`](./docs/).
 
