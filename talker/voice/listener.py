@@ -26,6 +26,12 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
         self._event_queue = event_queue
 
     async def Stream(self, request_iterator, context):
+        # Flush response headers immediately. Without this, grpcio-aio defers
+        # sending the HTTP/2 HEADERS frame until the first `yield`, but our
+        # event queue is empty until ASR fires — so the client's `Stream(...)`
+        # call would block on the handshake indefinitely.
+        await context.send_initial_metadata(())
+
         async def read_control():
             async for msg in request_iterator:
                 which = msg.WhichOneof("payload")

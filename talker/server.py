@@ -45,6 +45,13 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         request_iterator,
         context: grpc.aio.ServicerContext,
     ) -> AsyncGenerator[kaguya_pb2.TalkerOutput, None]:
+        # Flush response headers immediately. Without this, grpcio-aio defers
+        # the HTTP/2 HEADERS frame until the first `yield`, which only happens
+        # after `start` arrives and a sentence is generated. The Gateway's
+        # `client.converse(...).await` would otherwise block indefinitely on
+        # the handshake before it can send the initial TalkerInput.start.
+        await context.send_initial_metadata(())
+
         output_queue: asyncio.Queue[kaguya_pb2.TalkerOutput | None] = asyncio.Queue()
         cancel_event = asyncio.Event()
         generation_task: asyncio.Task | None = None
