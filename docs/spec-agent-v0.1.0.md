@@ -130,7 +130,7 @@ RealtimeSTT handles the audio frame → VAD → STT → partial/final transcript
 
 - Language: Python.
 - Runs as a persistent `asyncio` task within Process 2 (shared with Talker).
-- Exposes events to the Gateway via gRPC streaming (`ListenerService.StreamEvents`).
+- Exposes a gRPC server (`ListenerService.Stream`); the Gateway connects as the client. Audio bytes do not flow over gRPC — see §2.9.
 - ~200-300 lines of custom code wrapping RealtimeSTT callbacks + turn detection logic.
 
 ### 2.8 Component Selection (STT + VAD)
@@ -143,15 +143,18 @@ RealtimeSTT handles the audio frame → VAD → STT → partial/final transcript
 
 Cloud fallback (STT): Deepgram Nova-3.
 
-### 2.9 IPC: Listener → Gateway
+### 2.9 IPC: Gateway ↔ Listener
+
+The Listener is a gRPC **server**; the Gateway is the client. Audio bytes do not flow over gRPC — they ride a separate raw TCP socket so that 50fps Opus frames never touch protobuf serialization (architecture invariant: "Audio bytes never enter protobuf serialization at 50fps").
 
 ```protobuf
 service ListenerService {
-  rpc StreamEvents(stream ListenerEvent) returns (ListenerAck);
+  // Bidi: Gateway pushes control signals; Listener pushes ASR events.
+  rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
 }
 ```
 
-Events streamed via gRPC over Unix domain socket. Each `ListenerEvent` carries one of: `vad_speech_start`, `vad_speech_end`, `partial_transcript`, `final_transcript`.
+`ListenerOutput` carries one of: `vad_speech_start`, `vad_speech_end`, `partial_transcript`, `final_transcript`. `ListenerInput` carries optional `ListenerControl` (e.g. reset on new session). Audio is delivered out-of-band: the Gateway opens a length-prefixed TCP connection to `listener_audio_addr:listener_audio_port` and writes Opus frames as `[u32 BE length][bytes]`.
 
 ---
 
@@ -164,7 +167,7 @@ The Talker Agent is Kaguya's voice. It owns the fast-path LLM and TTS. It is the
 **The Talker does NOT own:**
 
 - Conversation history management (owned by Gateway).
-- Memory retrieval (Gateway reads `MEMORY.md` and includes its contents in the context package; ChromaDB in Phase 2).
+- Memory retrieval (the Gateway runs the RAG engine — SQLite + FTS5 BM25 + optional vector embeddings — and injects retrieved entries into the context package; see spec-gateway §4).
 - Tool execution (Talker emits `[TOOL:...]` tags; Gateway dispatches to Toolkit).
 - Filesystem access (Talker receives all configuration and context via gRPC from Gateway).
 
@@ -172,8 +175,8 @@ The Talker Agent is Kaguya's voice. It owns the fast-path LLM and TTS. It is the
 
 ### 3.2 Responsibilities
 
-- Receive context packages from the Gateway containing: user input, memory fragments, conversation history, active tasks, tool list, tool results, and current metadata.
-- Receive persona configuration (`SOUL.md` + `IDENTITY.md` + `MEMORY.md`) from the Gateway at startup and on change via `UpdatePersona` gRPC call. Cache all three in memory. Never access the filesystem directly.
+- Receive context packages from the Gateway containing: user input, RAG retrieval results, conversation history, active tasks, tool list, tool results, and current metadata.
+- Receive persona configuration (`SOUL.md`, `IDENTITY.md`, and a synthesized `memory_md` produced by the Gateway from its RAG store) from the Gateway at startup and on change via `UpdatePersona` gRPC call. Cache all three in memory. Never access the filesystem directly.
 - Format the final LLM prompt string from the context package + cached persona config.
 - Run streaming LLM inference on the fast-path local model (Qwen3-8B via llama.cpp HTTP).
 - Detect sentence boundaries in the token stream.
@@ -202,12 +205,13 @@ The Talker Agent is Kaguya's voice. It owns the fast-path LLM and TTS. It is the
   - User asks something requiring tool discovery → [TOOL:search_tools("query")]
   - User asks a complex multi-step task → [DELEGATE:description]]
 [System: Current context — time, active tasks, recent history summary]
-[Memory: MEMORY.md contents — user profile, project facts, long-term context]
+[Memory: synthesized memory_md — user profile + project context + recent semantic memories, sourced from the Gateway's RAG store]
+[Retrieval: top-k entries returned from this turn's hybrid query (BM25 + optional vector), each tagged with its source]
 [Conversation: Recent turns]
 [User: {final_transcript}]
 ```
 
-The Gateway assembles the context package including `MEMORY.md` contents; the Talker formats this into the above prompt structure. The Gateway has no knowledge of the prompt format. The Talker caches `MEMORY.md` content in memory (received via `UpdatePersona`); it does not read any file directly.
+The Gateway assembles the context package — including the synthesized `memory_md` and per-turn `retrieval_results` from its RAG engine. The Talker formats this into the above prompt structure. The Gateway has no knowledge of the prompt format. The Talker caches the persona config (received via `UpdatePersona`) in memory; it does not read any file directly.
 
 ### 3.4 The Soul Container (Post-Processing Middleware)
 
@@ -266,23 +270,23 @@ LLM tokens accumulate in a buffer. Flushed to TTS when a sentence-ending pattern
 
 Phase 1: sentence-level boundaries for correct TTS intonation. Phase 2: clause-level exploration.
 
-### 3.8 PREPARE Signal Handling (Custom)
+### 3.8 Barge-In Handling (inline on Converse stream)
 
-Received via `TalkerService.Prepare` gRPC call from the Gateway on every `vad_speech_start` or `text_command`.
+Barge-in is delivered as a `BargeInSignal` on the active `TalkerService.Converse` bidi stream — there is no separate `Prepare` RPC. The Gateway sends one on every `vad_speech_start` or text-command pre-emption.
 
 **IF the Talker is currently speaking/generating:**
 
-1. Immediately stop RealtimeTTS playback (mid-word if necessary).
-2. Cancel any in-flight LLM generation.
-3. Record which text was already spoken vs. still pending.
-4. Send `partial_response` metadata to Gateway (spoken text + unspoken text). Gateway uses this to append only the spoken portion to conversation history.
-5. Talker is now idle, waiting for the next context package.
+1. Set the cancel event observed by the LLM streaming loop and the sentence emitter.
+2. Stop RealtimeTTS playback (mid-word if necessary).
+3. Compute the spoken / unspoken split for the in-flight response.
+4. Emit `BargeInAck { spoken_text, unspoken_text }` back on the same Converse stream. Gateway uses `spoken_text` to append only the spoken portion to conversation history, then unmutes audio.
+5. The current Converse stream completes naturally with `ResponseComplete { was_interrupted = true }`.
 
-**IF the Talker is already idle:**
+**IF the Talker is already idle (no active Converse stream):**
 
-1. No-op. Talker is already ready (KV cache warm from prefix prefill).
+1. No-op. The Gateway's `barge_in()` finds no live stream and logs at debug.
 
-Implementation: ~100-150 lines of Python, tracking playback position against the LLM token stream. RealtimeTTS supports playback interruption natively, which simplifies the audio cutoff. Token accounting — knowing exactly which sentence was playing when PREPARE arrived — is the harder part.
+Implementation: ~100-150 lines of Python, tracking playback position against the LLM token stream. RealtimeTTS supports playback interruption natively, which simplifies the audio cutoff. Token accounting — knowing exactly which sentence was playing when the barge-in arrived — is the harder part.
 
 ### 3.9 KV Cache Prefill Strategy
 
@@ -300,7 +304,7 @@ The LLM prompt has two parts: a _stable prefix_ (system prompt + memory + conver
 
 GPU is idle between turns — this costs nothing. When `final_transcript` arrives, the Talker sends the complete prompt — llama.cpp detects the cached prefix, processes only the user's ~10-50 new tokens, and begins generation almost immediately. Reduces first-token latency from ~200-400ms to ~50-100ms.
 
-Cache invalidation: if memory context changes between turns (e.g., a Reasoner completes and the Gateway appends new facts to `MEMORY.md` and sends `UpdatePersona`), the Gateway signals the Talker to re-trigger prefix prefill via a new `PrefillCache` call with updated context.
+Cache invalidation: if memory context changes between turns (e.g., the post-turn `RagEngine::evaluate_and_store` adds entries that change the synthesized `memory_md`, or a Reasoner completes), the Gateway sends a fresh `UpdatePersona` followed by a new `PrefillCache` call with the updated context.
 
 **Phase 2 — Partial Transcript Prefill.** The Gateway forwards each `partial_transcript` event as an incremental prefill request. The Talker extends the cached prefix:
 
@@ -404,12 +408,17 @@ The Gateway manages multiple concurrent Reasoner Agents, each with a unique `tas
 - gRPC client connecting to Gateway.
 - Adapter pattern: swapping frameworks (OpenClaw → Claude Code → custom) requires only a new adapter, not architectural changes.
 
-### 4.5 IPC: Reasoner → Gateway
+### 4.5 IPC: Gateway ↔ Reasoner
 
 ```protobuf
 service ReasonerService {
-  rpc ExecuteTask(TaskRequest) returns (stream ReasonerEvent);
-  rpc CancelTask(CancelRequest) returns (CancelAck);
+  // Gateway dispatches a task and receives streamed events; can push
+  // additional context mid-task on the same stream.
+  rpc Delegate(stream DelegateInput) returns (stream DelegateOutput);
+  // Gateway sends interrupt signals (cancel a task, global stop, shutdown).
+  rpc Interrupt(InterruptRequest) returns (InterruptAck);
+  // Server-streaming background telemetry (deferred — proto only in Phase 1).
+  rpc Telemetry(TelemetrySubscribe) returns (stream TelemetryEvent);
 }
 ```
 
@@ -417,34 +426,36 @@ service ReasonerService {
 
 ## 5. IPC: Agents → Gateway (Full Protocol)
 
-All agent-to-Gateway communication uses gRPC with Protocol Buffers over Unix domain sockets.
+All agent-to-Gateway communication uses gRPC with Protocol Buffers. Audio is the one exception: it rides a raw length-prefixed TCP socket (see §2.9), preserving the architecture invariant that audio bytes never enter protobuf serialization at 50fps.
 
 ```protobuf
+// Listener: Gateway = client, Listener = server
 service ListenerService {
-  rpc StreamEvents(stream ListenerEvent) returns (ListenerAck);
+  rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
 }
 
+// Talker: Gateway = client, Talker = server
 service TalkerService {
-  // Gateway dispatches context package for LLM inference
-  rpc ProcessPrompt(TalkerContext) returns (stream TalkerOutput);
-  // Gateway signals new turn (cancel if busy, warm up if idle)
-  // PrepareAck carries partial_response when Talker was mid-speech:
-  //   { spoken_text: string, unspoken_text: string }
-  // Both fields are empty if Talker was already idle.
-  rpc Prepare(PrepareSignal) returns (PrepareAck);
-  // Gateway sends prefill-only context (no generation)
+  // Bidi: Gateway sends TalkerInput.start (TalkerContext) to begin, then
+  // optionally TalkerInput.barge_in to interrupt. Talker streams back
+  // TalkerOutput (sentences, emotion tags, tool requests, barge-in acks,
+  // response_complete).
+  rpc Converse(stream TalkerInput) returns (stream TalkerOutput);
+  // Between-turn: speculative prefix prefill on warm cache.
   rpc PrefillCache(PrefillRequest) returns (PrefillAck);
-  // Gateway delivers persona config at startup and on change
+  // Persona delivery — soul + identity + synthesized memory_md.
   rpc UpdatePersona(PersonaConfig) returns (PersonaAck);
 }
 
+// Reasoner: Gateway = client, Reasoner = server
 service ReasonerService {
-  rpc ExecuteTask(TaskRequest) returns (stream ReasonerEvent);
-  rpc CancelTask(CancelRequest) returns (CancelAck);
+  rpc Delegate(stream DelegateInput) returns (stream DelegateOutput);
+  rpc Interrupt(InterruptRequest) returns (InterruptAck);
+  rpc Telemetry(TelemetrySubscribe) returns (stream TelemetryEvent);
 }
 ```
 
-Audio frames (Opus, 50fps) use a dedicated low-overhead path (raw bytes over Unix socket or minimal-wrapping gRPC stream) to avoid protobuf overhead at 50fps.
+Audio frames (Opus, 50fps) flow on a dedicated raw TCP socket between Gateway and Listener — Gateway opens the socket and writes `[u32 BE length][bytes]` records, never via gRPC.
 
 ---
 
@@ -482,9 +493,9 @@ Audio frames (Opus, 50fps) use a dedicated low-overhead path (raw bytes over Uni
 
 ### 8.1 Phase 1: System Prompt Steering + File-Based Memory
 
-Persona enforced via `SOUL.md` + `IDENTITY.md` loaded by the Gateway at startup and delivered to the Talker via `UpdatePersona` gRPC. `MEMORY.md` (user profile, project facts, long-term context) is bundled into the same `UpdatePersona` call and cached in the Talker alongside the persona files. The Talker injects all three as the fixed prefix of every LLM call. Action tags (`[EMOTION:...]`, `[DELEGATE:...]`, `[TOOL:...]`) instructed in the system prompt.
+Persona enforced via `SOUL.md` + `IDENTITY.md` loaded by the Gateway at startup and delivered to the Talker via `UpdatePersona` gRPC. The Gateway's RAG engine synthesizes a `memory_md` document (user profile + project context + recent semantic memories from its SQLite store) and bundles it into the same `UpdatePersona` call; the Talker caches all three alongside the persona files. The Talker injects them as the fixed prefix of every LLM call. Action tags (`[EMOTION:...]`, `[DELEGATE:...]`, `[TOOL:...]`) instructed in the system prompt.
 
-When the Gateway appends new facts to `MEMORY.md` after a turn, it sends a new `UpdatePersona` call to the Talker with the updated content. The Talker replaces its cached copy. The Talker never reads or writes any file directly.
+When the Gateway's post-turn `RagEngine::evaluate_and_store` adds entries that change the synthesized `memory_md`, it sends a fresh `UpdatePersona` call to the Talker with the new content. The Talker replaces its cached copy. The Talker never reads or writes any file directly.
 
 ### 8.2 Phase 2: QLoRA Fine-Tuning
 
@@ -521,7 +532,7 @@ Audio can be disabled. In text-only mode: Listener is inactive, Talker returns t
 - PREPARE signal handling with token accounting.
 - Always-on prefix KV cache prefill (system + memory + history pre-warmed between turns).
 - Reasoner Adapter for OpenClaw with output interception.
-- Persona + memory enforcement via system prompt (`SOUL.md` + `IDENTITY.md` + `MEMORY.md` delivered by Gateway via `UpdatePersona`).
+- Persona + memory enforcement via system prompt (`SOUL.md` + `IDENTITY.md` + RAG-synthesized `memory_md` delivered by Gateway via `UpdatePersona`).
 - Text-only fallback mode.
 - Basic Deliberative Narration (acknowledge + wait + summarize).
 - Tool use examples in system prompt.
