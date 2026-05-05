@@ -45,3 +45,7 @@ dist/
 
 # Local data
 /config/MEMORY.md
+# RAG memory store — SQLite + WAL/SHM files, per-user runtime data
+/gateway/data/
+# RealtimeSTT writes a log here at runtime
+/talker/*.log
