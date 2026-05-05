@@ -1,11 +1,22 @@
 """Temporary harness: microphone -> ListenerService stream.
 
-Runs independently from the full Talker agent. It captures microphone audio via
-RealtimeSTT, applies the same TurnDetector logic used by Talker, and streams
-ListenerEvent messages to Gateway's ListenerService.
+================================================================================
+DEPRECATED — broken after the Listener/Gateway role flip on this branch.
+The Listener is now a gRPC server (in the Talker process); the Gateway pushes
+audio over a raw TCP socket. This harness still dials the Gateway as a gRPC
+client and uses removed proto symbols (`ListenerEvent`, `StreamEvents`).
 
-Usage (from talker/):
-    python scripts/mic_to_listener_harness.py --target 127.0.0.1:50051 --events-log-file events.jsonl --log-level DEBUG
+Pending rewrite — should become either:
+  (a) a Gateway-side audio-injection harness that pushes Opus frames to the
+      Listener's raw TCP socket on `listener_audio_addr:listener_audio_port`,
+      OR
+  (b) a standalone audio source that connects to the Gateway's WS endpoint
+      (`/ws`) and sends binary frames the same way the dev-GUI does.
+
+Not imported by any production code path. Do not run as-is — it will fail at
+import time on `kaguya_pb2.ListenerEvent` and at connect time on the wrong
+gRPC role. Kept in tree as a starting point for the rewrite.
+================================================================================
 """
 
 from __future__ import annotations

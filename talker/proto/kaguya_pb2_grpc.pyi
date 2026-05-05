@@ -27,96 +27,90 @@ GRPC_GENERATED_VERSION: str
 GRPC_VERSION: str
 
 class ListenerServiceStub:
-    """─────────────────────────────────────────────
-    LISTENER SERVICE  (Listener → Gateway)
-    ─────────────────────────────────────────────
+    """LISTENER SERVICE — Bidi streaming
+    Gateway = client, Listener = server
     """
 
     @_typing.overload
     def __new__(cls, channel: _grpc.Channel) -> _Self: ...
     @_typing.overload
     def __new__(cls, channel: _aio.Channel) -> ListenerServiceAsyncStub: ...
-    StreamEvents: _grpc.StreamUnaryMultiCallable[_kaguya_pb2.ListenerEvent, _kaguya_pb2.ListenerAck]
+    Stream: _grpc.StreamStreamMultiCallable[_kaguya_pb2.ListenerInput, _kaguya_pb2.ListenerOutput]
+    """Bidi: Gateway pushes audio chunks, Listener pushes back ASR events"""
 
 @_typing.type_check_only
 class ListenerServiceAsyncStub(ListenerServiceStub):
-    """─────────────────────────────────────────────
-    LISTENER SERVICE  (Listener → Gateway)
-    ─────────────────────────────────────────────
+    """LISTENER SERVICE — Bidi streaming
+    Gateway = client, Listener = server
     """
 
     def __init__(self, channel: _aio.Channel) -> None: ...
-    StreamEvents: _aio.StreamUnaryMultiCallable[_kaguya_pb2.ListenerEvent, _kaguya_pb2.ListenerAck]  # type: ignore[assignment]
+    Stream: _aio.StreamStreamMultiCallable[_kaguya_pb2.ListenerInput, _kaguya_pb2.ListenerOutput]  # type: ignore[assignment]
+    """Bidi: Gateway pushes audio chunks, Listener pushes back ASR events"""
 
 class ListenerServiceServicer(metaclass=_abc_1.ABCMeta):
-    """─────────────────────────────────────────────
-    LISTENER SERVICE  (Listener → Gateway)
-    ─────────────────────────────────────────────
+    """LISTENER SERVICE — Bidi streaming
+    Gateway = client, Listener = server
     """
 
     @_abc_1.abstractmethod
-    def StreamEvents(
+    def Stream(
         self,
-        request_iterator: _MaybeAsyncIterator[_kaguya_pb2.ListenerEvent],
+        request_iterator: _MaybeAsyncIterator[_kaguya_pb2.ListenerInput],
         context: _ServicerContext,
-    ) -> _typing.Union[_kaguya_pb2.ListenerAck, _abc.Awaitable[_kaguya_pb2.ListenerAck]]: ...
+    ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.ListenerOutput], _abc.AsyncIterator[_kaguya_pb2.ListenerOutput]]:
+        """Bidi: Gateway pushes audio chunks, Listener pushes back ASR events"""
 
 def add_ListenerServiceServicer_to_server(servicer: ListenerServiceServicer, server: _typing.Union[_grpc.Server, _aio.Server]) -> None: ...
 
 class TalkerServiceStub:
-    """─────────────────────────────────────────────
-    TALKER SERVICE  (Gateway → Talker)
-    ─────────────────────────────────────────────
+    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    Gateway = client, Talker = server
     """
 
     @_typing.overload
     def __new__(cls, channel: _grpc.Channel) -> _Self: ...
     @_typing.overload
     def __new__(cls, channel: _aio.Channel) -> TalkerServiceAsyncStub: ...
-    ProcessPrompt: _grpc.UnaryStreamMultiCallable[_kaguya_pb2.TalkerContext, _kaguya_pb2.TalkerOutput]
-    Prepare: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.PrepareSignal, _kaguya_pb2.PrepareAck]
+    Converse: _grpc.StreamStreamMultiCallable[_kaguya_pb2.TalkerInput, _kaguya_pb2.TalkerOutput]
+    """Bidi: Gateway sends context + inline barge-in; Talker streams output"""
     PrefillCache: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.PrefillRequest, _kaguya_pb2.PrefillAck]
+    """Between-turn operations (unary, no need for bidi)"""
     UpdatePersona: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.PersonaConfig, _kaguya_pb2.PersonaAck]
 
 @_typing.type_check_only
 class TalkerServiceAsyncStub(TalkerServiceStub):
-    """─────────────────────────────────────────────
-    TALKER SERVICE  (Gateway → Talker)
-    ─────────────────────────────────────────────
+    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    Gateway = client, Talker = server
     """
 
     def __init__(self, channel: _aio.Channel) -> None: ...
-    ProcessPrompt: _aio.UnaryStreamMultiCallable[_kaguya_pb2.TalkerContext, _kaguya_pb2.TalkerOutput]  # type: ignore[assignment]
-    Prepare: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.PrepareSignal, _kaguya_pb2.PrepareAck]  # type: ignore[assignment]
+    Converse: _aio.StreamStreamMultiCallable[_kaguya_pb2.TalkerInput, _kaguya_pb2.TalkerOutput]  # type: ignore[assignment]
+    """Bidi: Gateway sends context + inline barge-in; Talker streams output"""
     PrefillCache: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.PrefillRequest, _kaguya_pb2.PrefillAck]  # type: ignore[assignment]
+    """Between-turn operations (unary, no need for bidi)"""
     UpdatePersona: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.PersonaConfig, _kaguya_pb2.PersonaAck]  # type: ignore[assignment]
 
 class TalkerServiceServicer(metaclass=_abc_1.ABCMeta):
-    """─────────────────────────────────────────────
-    TALKER SERVICE  (Gateway → Talker)
-    ─────────────────────────────────────────────
+    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    Gateway = client, Talker = server
     """
 
     @_abc_1.abstractmethod
-    def ProcessPrompt(
+    def Converse(
         self,
-        request: _kaguya_pb2.TalkerContext,
+        request_iterator: _MaybeAsyncIterator[_kaguya_pb2.TalkerInput],
         context: _ServicerContext,
-    ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.TalkerOutput], _abc.AsyncIterator[_kaguya_pb2.TalkerOutput]]: ...
-
-    @_abc_1.abstractmethod
-    def Prepare(
-        self,
-        request: _kaguya_pb2.PrepareSignal,
-        context: _ServicerContext,
-    ) -> _typing.Union[_kaguya_pb2.PrepareAck, _abc.Awaitable[_kaguya_pb2.PrepareAck]]: ...
+    ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.TalkerOutput], _abc.AsyncIterator[_kaguya_pb2.TalkerOutput]]:
+        """Bidi: Gateway sends context + inline barge-in; Talker streams output"""
 
     @_abc_1.abstractmethod
     def PrefillCache(
         self,
         request: _kaguya_pb2.PrefillRequest,
         context: _ServicerContext,
-    ) -> _typing.Union[_kaguya_pb2.PrefillAck, _abc.Awaitable[_kaguya_pb2.PrefillAck]]: ...
+    ) -> _typing.Union[_kaguya_pb2.PrefillAck, _abc.Awaitable[_kaguya_pb2.PrefillAck]]:
+        """Between-turn operations (unary, no need for bidi)"""
 
     @_abc_1.abstractmethod
     def UpdatePersona(
@@ -128,54 +122,63 @@ class TalkerServiceServicer(metaclass=_abc_1.ABCMeta):
 def add_TalkerServiceServicer_to_server(servicer: TalkerServiceServicer, server: _typing.Union[_grpc.Server, _aio.Server]) -> None: ...
 
 class ReasonerServiceStub:
-    """─────────────────────────────────────────────
-    REASONER SERVICE  (Gateway → Reasoner)
-    ─────────────────────────────────────────────
-    """
+    """REASONER SERVICE — Multi-stream design"""
 
     @_typing.overload
     def __new__(cls, channel: _grpc.Channel) -> _Self: ...
     @_typing.overload
     def __new__(cls, channel: _aio.Channel) -> ReasonerServiceAsyncStub: ...
-    ExecuteTask: _grpc.UnaryStreamMultiCallable[_kaguya_pb2.TaskRequest, _kaguya_pb2.ReasonerEvent]
-    CancelTask: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.CancelRequest, _kaguya_pb2.CancelAck]
+    Delegate: _grpc.StreamStreamMultiCallable[_kaguya_pb2.DelegateInput, _kaguya_pb2.DelegateOutput]
+    """Bidi per-task: Gateway sends task + context updates, Reasoner streams events"""
+    Interrupt: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.InterruptRequest, _kaguya_pb2.InterruptAck]
+    """Unary interrupt: always available, even when no delegation in flight"""
+    Telemetry: _grpc.UnaryStreamMultiCallable[_kaguya_pb2.TelemetrySubscribe, _kaguya_pb2.TelemetryEvent]
+    """Server-streaming telemetry: continuous background context"""
 
 @_typing.type_check_only
 class ReasonerServiceAsyncStub(ReasonerServiceStub):
-    """─────────────────────────────────────────────
-    REASONER SERVICE  (Gateway → Reasoner)
-    ─────────────────────────────────────────────
-    """
+    """REASONER SERVICE — Multi-stream design"""
 
     def __init__(self, channel: _aio.Channel) -> None: ...
-    ExecuteTask: _aio.UnaryStreamMultiCallable[_kaguya_pb2.TaskRequest, _kaguya_pb2.ReasonerEvent]  # type: ignore[assignment]
-    CancelTask: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.CancelRequest, _kaguya_pb2.CancelAck]  # type: ignore[assignment]
+    Delegate: _aio.StreamStreamMultiCallable[_kaguya_pb2.DelegateInput, _kaguya_pb2.DelegateOutput]  # type: ignore[assignment]
+    """Bidi per-task: Gateway sends task + context updates, Reasoner streams events"""
+    Interrupt: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.InterruptRequest, _kaguya_pb2.InterruptAck]  # type: ignore[assignment]
+    """Unary interrupt: always available, even when no delegation in flight"""
+    Telemetry: _aio.UnaryStreamMultiCallable[_kaguya_pb2.TelemetrySubscribe, _kaguya_pb2.TelemetryEvent]  # type: ignore[assignment]
+    """Server-streaming telemetry: continuous background context"""
 
 class ReasonerServiceServicer(metaclass=_abc_1.ABCMeta):
-    """─────────────────────────────────────────────
-    REASONER SERVICE  (Gateway → Reasoner)
-    ─────────────────────────────────────────────
-    """
+    """REASONER SERVICE — Multi-stream design"""
 
     @_abc_1.abstractmethod
-    def ExecuteTask(
+    def Delegate(
         self,
-        request: _kaguya_pb2.TaskRequest,
+        request_iterator: _MaybeAsyncIterator[_kaguya_pb2.DelegateInput],
         context: _ServicerContext,
-    ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.ReasonerEvent], _abc.AsyncIterator[_kaguya_pb2.ReasonerEvent]]: ...
+    ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.DelegateOutput], _abc.AsyncIterator[_kaguya_pb2.DelegateOutput]]:
+        """Bidi per-task: Gateway sends task + context updates, Reasoner streams events"""
 
     @_abc_1.abstractmethod
-    def CancelTask(
+    def Interrupt(
         self,
-        request: _kaguya_pb2.CancelRequest,
+        request: _kaguya_pb2.InterruptRequest,
         context: _ServicerContext,
-    ) -> _typing.Union[_kaguya_pb2.CancelAck, _abc.Awaitable[_kaguya_pb2.CancelAck]]: ...
+    ) -> _typing.Union[_kaguya_pb2.InterruptAck, _abc.Awaitable[_kaguya_pb2.InterruptAck]]:
+        """Unary interrupt: always available, even when no delegation in flight"""
+
+    @_abc_1.abstractmethod
+    def Telemetry(
+        self,
+        request: _kaguya_pb2.TelemetrySubscribe,
+        context: _ServicerContext,
+    ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.TelemetryEvent], _abc.AsyncIterator[_kaguya_pb2.TelemetryEvent]]:
+        """Server-streaming telemetry: continuous background context"""
 
 def add_ReasonerServiceServicer_to_server(servicer: ReasonerServiceServicer, server: _typing.Union[_grpc.Server, _aio.Server]) -> None: ...
 
 class RouterControlServiceStub:
     """─────────────────────────────────────────────
-    GATEWAY CONTROL  (Endpoint → Gateway)
+    GATEWAY CONTROL (Endpoint → Gateway)
     ─────────────────────────────────────────────
     """
 
@@ -188,7 +191,7 @@ class RouterControlServiceStub:
 @_typing.type_check_only
 class RouterControlServiceAsyncStub(RouterControlServiceStub):
     """─────────────────────────────────────────────
-    GATEWAY CONTROL  (Endpoint → Gateway)
+    GATEWAY CONTROL (Endpoint → Gateway)
     ─────────────────────────────────────────────
     """
 
@@ -197,7 +200,7 @@ class RouterControlServiceAsyncStub(RouterControlServiceStub):
 
 class RouterControlServiceServicer(metaclass=_abc_1.ABCMeta):
     """─────────────────────────────────────────────
-    GATEWAY CONTROL  (Endpoint → Gateway)
+    GATEWAY CONTROL (Endpoint → Gateway)
     ─────────────────────────────────────────────
     """
 

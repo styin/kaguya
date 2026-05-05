@@ -47,7 +47,7 @@ class TurnDetector:
     so the 300ms/800ms thresholds apply to actual post-speech silence.
 
     Designed to be called from the RealtimeSTT callback thread.
-    Returns a final transcript string (to be enqueued as ListenerEvent) or None.
+    Returns a final transcript string (to be enqueued as ListenerOutput) or None.
     """
 
     def __init__(self, config: TalkerConfig) -> None:

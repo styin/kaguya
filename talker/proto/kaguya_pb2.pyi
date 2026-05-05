@@ -30,7 +30,6 @@ class _RoleEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Role.ValueType],
     ROLE_USER: _Role.ValueType  # 2
     ROLE_ASSISTANT: _Role.ValueType  # 3
     ROLE_TOOL: _Role.ValueType  # 4
-    """tool result injection round"""
 
 class Role(_Role, metaclass=_RoleEnumTypeWrapper):
     """─────────────────────────────────────────────
@@ -43,7 +42,6 @@ ROLE_SYSTEM: Role.ValueType  # 1
 ROLE_USER: Role.ValueType  # 2
 ROLE_ASSISTANT: Role.ValueType  # 3
 ROLE_TOOL: Role.ValueType  # 4
-"""tool result injection round"""
 Global___Role: _TypeAlias = Role  # noqa: Y015
 
 @_typing.final
@@ -57,7 +55,6 @@ class ChatMessage(_message.Message):
     role: Global___Role.ValueType
     content: _builtins.str
     name: _builtins.str
-    """tool name when role=ROLE_TOOL"""
     timestamp_ms: _builtins.int
     def __init__(
         self,
@@ -82,7 +79,6 @@ class ToolDefinition(_message.Message):
     name: _builtins.str
     description: _builtins.str
     args_schema: _builtins.str
-    """JSON Schema string"""
     def __init__(
         self,
         *,
@@ -96,7 +92,95 @@ class ToolDefinition(_message.Message):
 Global___ToolDefinition: _TypeAlias = ToolDefinition  # noqa: Y015
 
 @_typing.final
-class ListenerEvent(_message.Message):
+class ListenerInput(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    AUDIO_FIELD_NUMBER: _builtins.int
+    CONTROL_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def audio(self) -> Global___AudioChunk:
+        """raw audio from endpoint"""
+
+    @_builtins.property
+    def control(self) -> Global___ListenerControl:
+        """runtime config / reset"""
+
+    def __init__(
+        self,
+        *,
+        audio: Global___AudioChunk | None = ...,
+        control: Global___ListenerControl | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["audio", b"audio", "control", b"control", "payload", b"payload"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["audio", b"audio", "control", b"control", "payload", b"payload"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["audio", "control"]  # noqa: Y015
+    _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
+
+Global___ListenerInput: _TypeAlias = ListenerInput  # noqa: Y015
+
+@_typing.final
+class AudioChunk(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DATA_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_MS_FIELD_NUMBER: _builtins.int
+    ENCODING_FIELD_NUMBER: _builtins.int
+    data: _builtins.bytes
+    """Opus or PCM bytes"""
+    timestamp_ms: _builtins.int
+    encoding: _builtins.str
+    """"opus" | "pcm_s16le" """
+    def __init__(
+        self,
+        *,
+        data: _builtins.bytes = ...,
+        timestamp_ms: _builtins.int = ...,
+        encoding: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "encoding", b"encoding", "timestamp_ms", b"timestamp_ms"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___AudioChunk: _TypeAlias = AudioChunk  # noqa: Y015
+
+@_typing.final
+class ListenerControl(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    RESET_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def reset(self) -> Global___ListenerReset:
+        """clear VAD state on new session"""
+
+    def __init__(
+        self,
+        *,
+        reset: Global___ListenerReset | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["reset", b"reset", "signal", b"signal"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["reset", b"reset", "signal", b"signal"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType_signal: _TypeAlias = _typing.Literal["reset"]  # noqa: Y015
+    _WhichOneofArgType_signal: _TypeAlias = _typing.Literal["signal", b"signal"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType_signal) -> _WhichOneofReturnType_signal | None: ...
+
+Global___ListenerControl: _TypeAlias = ListenerControl  # noqa: Y015
+
+@_typing.final
+class ListenerReset(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+Global___ListenerReset: _TypeAlias = ListenerReset  # noqa: Y015
+
+@_typing.final
+class ListenerOutput(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     TIMESTAMP_MS_FIELD_NUMBER: _builtins.int
@@ -130,7 +214,7 @@ class ListenerEvent(_message.Message):
     _WhichOneofArgType_event: _TypeAlias = _typing.Literal["event", b"event"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_event) -> _WhichOneofReturnType_event | None: ...
 
-Global___ListenerEvent: _TypeAlias = ListenerEvent  # noqa: Y015
+Global___ListenerOutput: _TypeAlias = ListenerOutput  # noqa: Y015
 
 @_typing.final
 class VadSpeechStart(_message.Message):
@@ -194,20 +278,54 @@ class FinalTranscript(_message.Message):
 Global___FinalTranscript: _TypeAlias = FinalTranscript  # noqa: Y015
 
 @_typing.final
-class ListenerAck(_message.Message):
+class TalkerInput(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
+
+    START_FIELD_NUMBER: _builtins.int
+    BARGE_IN_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def start(self) -> Global___TalkerContext:
+        """begin generation"""
+
+    @_builtins.property
+    def barge_in(self) -> Global___BargeInSignal:
+        """interrupt mid-stream (was separate Prepare RPC)"""
 
     def __init__(
         self,
+        *,
+        start: Global___TalkerContext | None = ...,
+        barge_in: Global___BargeInSignal | None = ...,
     ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["barge_in", b"barge_in", "payload", b"payload", "start", b"start"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["barge_in", b"barge_in", "payload", b"payload", "start", b"start"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["start", "barge_in"]  # noqa: Y015
+    _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
 
-Global___ListenerAck: _TypeAlias = ListenerAck  # noqa: Y015
+Global___TalkerInput: _TypeAlias = TalkerInput  # noqa: Y015
+
+@_typing.final
+class BargeInSignal(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CONVERSATION_ID_FIELD_NUMBER: _builtins.int
+    conversation_id: _builtins.str
+    def __init__(
+        self,
+        *,
+        conversation_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["conversation_id", b"conversation_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___BargeInSignal: _TypeAlias = BargeInSignal  # noqa: Y015
 
 @_typing.final
 class TalkerContext(_message.Message):
-    """Full context package assembled by Gateway each turn.
-    Gateway assembles; Talker formats. Gateway has no knowledge of prompt format.
-    """
+    """TalkerContext 保持不变"""
 
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -223,30 +341,25 @@ class TalkerContext(_message.Message):
     TIMESTAMP_MS_FIELD_NUMBER: _builtins.int
     REASONER_TASK_ID_FIELD_NUMBER: _builtins.int
     REASONER_RESULT_CONTENT_FIELD_NUMBER: _builtins.int
+    RETRIEVAL_RESULTS_FIELD_NUMBER: _builtins.int
     conversation_id: _builtins.str
     turn_id: _builtins.str
-    """unique per ProcessPrompt call"""
     user_input: _builtins.str
-    """final_transcript text (natural language)"""
     memory_contents: _builtins.str
-    """full MEMORY.md text (natural language → prompt)"""
     active_tasks_json: _builtins.str
-    """JSON: ongoing Reasoner task summaries"""
     tool_result_content: _builtins.str
-    """natural-language tool result (if tool-result round)"""
     tool_request_id: _builtins.str
-    """correlates to ToolRequest.request_id"""
     timestamp_ms: _builtins.int
     reasoner_task_id: _builtins.str
-    """correlates to DelegateRequest.task_id"""
     reasoner_result_content: _builtins.str
-    """natural-language reasoner result (if reasoner-result round)"""
     @_builtins.property
-    def history(self) -> _containers.RepeatedCompositeFieldContainer[Global___ChatMessage]:
-        """recent turns, Gateway manages window"""
-
+    def history(self) -> _containers.RepeatedCompositeFieldContainer[Global___ChatMessage]: ...
     @_builtins.property
     def tools(self) -> _containers.RepeatedCompositeFieldContainer[Global___ToolDefinition]: ...
+    @_builtins.property
+    def retrieval_results(self) -> _containers.RepeatedCompositeFieldContainer[Global___RetrievalResult]:
+        """── NEW: RAG retrieval results ──"""
+
     def __init__(
         self,
         *,
@@ -262,19 +375,43 @@ class TalkerContext(_message.Message):
         timestamp_ms: _builtins.int = ...,
         reasoner_task_id: _builtins.str = ...,
         reasoner_result_content: _builtins.str = ...,
+        retrieval_results: _abc.Iterable[Global___RetrievalResult] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["active_tasks_json", b"active_tasks_json", "conversation_id", b"conversation_id", "history", b"history", "memory_contents", b"memory_contents", "reasoner_result_content", b"reasoner_result_content", "reasoner_task_id", b"reasoner_task_id", "timestamp_ms", b"timestamp_ms", "tool_request_id", b"tool_request_id", "tool_result_content", b"tool_result_content", "tools", b"tools", "turn_id", b"turn_id", "user_input", b"user_input"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["active_tasks_json", b"active_tasks_json", "conversation_id", b"conversation_id", "history", b"history", "memory_contents", b"memory_contents", "reasoner_result_content", b"reasoner_result_content", "reasoner_task_id", b"reasoner_task_id", "retrieval_results", b"retrieval_results", "timestamp_ms", b"timestamp_ms", "tool_request_id", b"tool_request_id", "tool_result_content", b"tool_result_content", "tools", b"tools", "turn_id", b"turn_id", "user_input", b"user_input"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TalkerContext: _TypeAlias = TalkerContext  # noqa: Y015
 
 @_typing.final
-class TalkerOutput(_message.Message):
-    """Streamed back to Gateway during generation.
-    One message per sentence boundary or extracted tag.
-    seq is monotonically increasing within a single ProcessPrompt call.
-    """
+class RetrievalResult(_message.Message):
+    """NEW: RAG 检索结果，注入到 context 中"""
 
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ID_FIELD_NUMBER: _builtins.int
+    CONTENT_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SCORE_FIELD_NUMBER: _builtins.int
+    id: _builtins.str
+    content: _builtins.str
+    source: _builtins.str
+    """"bm25" | "vector" | "lsp" | "structured" """
+    score: _builtins.float
+    def __init__(
+        self,
+        *,
+        id: _builtins.str = ...,
+        content: _builtins.str = ...,
+        source: _builtins.str = ...,
+        score: _builtins.float = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["content", b"content", "id", b"id", "score", b"score", "source", b"source"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___RetrievalResult: _TypeAlias = RetrievalResult  # noqa: Y015
+
+@_typing.final
+class TalkerOutput(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     SEQ_FIELD_NUMBER: _builtins.int
@@ -284,6 +421,7 @@ class TalkerOutput(_message.Message):
     TOOL_REQUEST_FIELD_NUMBER: _builtins.int
     DELEGATE_REQUEST_FIELD_NUMBER: _builtins.int
     RESPONSE_COMPLETE_FIELD_NUMBER: _builtins.int
+    BARGE_IN_ACK_FIELD_NUMBER: _builtins.int
     seq: _builtins.int
     @_builtins.property
     def response_started(self) -> Global___ResponseStarted: ...
@@ -297,6 +435,10 @@ class TalkerOutput(_message.Message):
     def delegate_request(self) -> Global___DelegateRequest: ...
     @_builtins.property
     def response_complete(self) -> Global___ResponseComplete: ...
+    @_builtins.property
+    def barge_in_ack(self) -> Global___BargeInAck:
+        """NEW: inline response to barge-in"""
+
     def __init__(
         self,
         *,
@@ -307,16 +449,36 @@ class TalkerOutput(_message.Message):
         tool_request: Global___ToolRequest | None = ...,
         delegate_request: Global___DelegateRequest | None = ...,
         response_complete: Global___ResponseComplete | None = ...,
+        barge_in_ack: Global___BargeInAck | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["delegate_request", b"delegate_request", "emotion", b"emotion", "payload", b"payload", "response_complete", b"response_complete", "response_started", b"response_started", "sentence", b"sentence", "tool_request", b"tool_request"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["barge_in_ack", b"barge_in_ack", "delegate_request", b"delegate_request", "emotion", b"emotion", "payload", b"payload", "response_complete", b"response_complete", "response_started", b"response_started", "sentence", b"sentence", "tool_request", b"tool_request"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["delegate_request", b"delegate_request", "emotion", b"emotion", "payload", b"payload", "response_complete", b"response_complete", "response_started", b"response_started", "sentence", b"sentence", "seq", b"seq", "tool_request", b"tool_request"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["barge_in_ack", b"barge_in_ack", "delegate_request", b"delegate_request", "emotion", b"emotion", "payload", b"payload", "response_complete", b"response_complete", "response_started", b"response_started", "sentence", b"sentence", "seq", b"seq", "tool_request", b"tool_request"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["response_started", "sentence", "emotion", "tool_request", "delegate_request", "response_complete"]  # noqa: Y015
+    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["response_started", "sentence", "emotion", "tool_request", "delegate_request", "response_complete", "barge_in_ack"]  # noqa: Y015
     _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
 
 Global___TalkerOutput: _TypeAlias = TalkerOutput  # noqa: Y015
+
+@_typing.final
+class BargeInAck(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SPOKEN_TEXT_FIELD_NUMBER: _builtins.int
+    UNSPOKEN_TEXT_FIELD_NUMBER: _builtins.int
+    spoken_text: _builtins.str
+    unspoken_text: _builtins.str
+    def __init__(
+        self,
+        *,
+        spoken_text: _builtins.str = ...,
+        unspoken_text: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["spoken_text", b"spoken_text", "unspoken_text", b"unspoken_text"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___BargeInAck: _TypeAlias = BargeInAck  # noqa: Y015
 
 @_typing.final
 class ResponseStarted(_message.Message):
@@ -374,10 +536,8 @@ class ToolRequest(_message.Message):
     TOOL_NAME_FIELD_NUMBER: _builtins.int
     ARGS_JSON_FIELD_NUMBER: _builtins.int
     request_id: _builtins.str
-    """Gateway correlates async result back to this"""
     tool_name: _builtins.str
     args_json: _builtins.str
-    """dynamic schema — string (not Struct) for simplicity"""
     def __init__(
         self,
         *,
@@ -397,7 +557,6 @@ class DelegateRequest(_message.Message):
     TASK_ID_FIELD_NUMBER: _builtins.int
     DESCRIPTION_FIELD_NUMBER: _builtins.int
     task_id: _builtins.str
-    """generated by Talker; stable through full Reasoner lifecycle"""
     description: _builtins.str
     def __init__(
         self,
@@ -430,43 +589,6 @@ class ResponseComplete(_message.Message):
 Global___ResponseComplete: _TypeAlias = ResponseComplete  # noqa: Y015
 
 @_typing.final
-class PrepareSignal(_message.Message):
-    DESCRIPTOR: _descriptor.Descriptor
-
-    CONVERSATION_ID_FIELD_NUMBER: _builtins.int
-    conversation_id: _builtins.str
-    def __init__(
-        self,
-        *,
-        conversation_id: _builtins.str = ...,
-    ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["conversation_id", b"conversation_id"]  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-
-Global___PrepareSignal: _TypeAlias = PrepareSignal  # noqa: Y015
-
-@_typing.final
-class PrepareAck(_message.Message):
-    """spoken_text and unspoken_text are both empty if Talker was already idle."""
-
-    DESCRIPTOR: _descriptor.Descriptor
-
-    SPOKEN_TEXT_FIELD_NUMBER: _builtins.int
-    UNSPOKEN_TEXT_FIELD_NUMBER: _builtins.int
-    spoken_text: _builtins.str
-    unspoken_text: _builtins.str
-    def __init__(
-        self,
-        *,
-        spoken_text: _builtins.str = ...,
-        unspoken_text: _builtins.str = ...,
-    ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["spoken_text", b"spoken_text", "unspoken_text", b"unspoken_text"]  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-
-Global___PrepareAck: _TypeAlias = PrepareAck  # noqa: Y015
-
-@_typing.final
 class PrefillRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -474,9 +596,7 @@ class PrefillRequest(_message.Message):
     CONTEXT_FIELD_NUMBER: _builtins.int
     conversation_id: _builtins.str
     @_builtins.property
-    def context(self) -> Global___TalkerContext:
-        """same shape; n_predict=0 implied by call type"""
-
+    def context(self) -> Global___TalkerContext: ...
     def __init__(
         self,
         *,
@@ -533,6 +653,34 @@ class PersonaAck(_message.Message):
 Global___PersonaAck: _TypeAlias = PersonaAck  # noqa: Y015
 
 @_typing.final
+class DelegateInput(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    START_TASK_FIELD_NUMBER: _builtins.int
+    CONTEXT_UPDATE_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def start_task(self) -> Global___TaskRequest: ...
+    @_builtins.property
+    def context_update(self) -> Global___TaskContext:
+        """NEW: send updated context mid-task"""
+
+    def __init__(
+        self,
+        *,
+        start_task: Global___TaskRequest | None = ...,
+        context_update: Global___TaskContext | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["context_update", b"context_update", "payload", b"payload", "start_task", b"start_task"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["context_update", b"context_update", "payload", b"payload", "start_task", b"start_task"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["start_task", "context_update"]  # noqa: Y015
+    _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
+
+Global___DelegateInput: _TypeAlias = DelegateInput  # noqa: Y015
+
+@_typing.final
 class TaskRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -557,7 +705,6 @@ class TaskRequest(_message.Message):
     DESCRIPTION_FIELD_NUMBER: _builtins.int
     METADATA_FIELD_NUMBER: _builtins.int
     task_id: _builtins.str
-    """same ID from DelegateRequest.task_id"""
     description: _builtins.str
     @_builtins.property
     def metadata(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
@@ -574,7 +721,27 @@ class TaskRequest(_message.Message):
 Global___TaskRequest: _TypeAlias = TaskRequest  # noqa: Y015
 
 @_typing.final
-class ReasonerEvent(_message.Message):
+class TaskContext(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TASK_ID_FIELD_NUMBER: _builtins.int
+    CONTEXT_FIELD_NUMBER: _builtins.int
+    task_id: _builtins.str
+    context: _builtins.str
+    """additional context during execution"""
+    def __init__(
+        self,
+        *,
+        task_id: _builtins.str = ...,
+        context: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "task_id", b"task_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___TaskContext: _TypeAlias = TaskContext  # noqa: Y015
+
+@_typing.final
+class DelegateOutput(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     TASK_ID_FIELD_NUMBER: _builtins.int
@@ -615,7 +782,7 @@ class ReasonerEvent(_message.Message):
     _WhichOneofArgType_event: _TypeAlias = _typing.Literal["event", b"event"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_event) -> _WhichOneofReturnType_event | None: ...
 
-Global___ReasonerEvent: _TypeAlias = ReasonerEvent  # noqa: Y015
+Global___DelegateOutput: _TypeAlias = DelegateOutput  # noqa: Y015
 
 @_typing.final
 class ReasonerStarted(_message.Message):
@@ -701,7 +868,37 @@ class ReasonerError(_message.Message):
 Global___ReasonerError: _TypeAlias = ReasonerError  # noqa: Y015
 
 @_typing.final
-class CancelRequest(_message.Message):
+class InterruptRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CANCEL_FIELD_NUMBER: _builtins.int
+    STOP_FIELD_NUMBER: _builtins.int
+    SHUTDOWN_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def cancel(self) -> Global___TaskCancel: ...
+    @_builtins.property
+    def stop(self) -> Global___GlobalStop: ...
+    @_builtins.property
+    def shutdown(self) -> Global___Shutdown: ...
+    def __init__(
+        self,
+        *,
+        cancel: Global___TaskCancel | None = ...,
+        stop: Global___GlobalStop | None = ...,
+        shutdown: Global___Shutdown | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["cancel", b"cancel", "shutdown", b"shutdown", "signal", b"signal", "stop", b"stop"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cancel", b"cancel", "shutdown", b"shutdown", "signal", b"signal", "stop", b"stop"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType_signal: _TypeAlias = _typing.Literal["cancel", "stop", "shutdown"]  # noqa: Y015
+    _WhichOneofArgType_signal: _TypeAlias = _typing.Literal["signal", b"signal"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType_signal) -> _WhichOneofReturnType_signal | None: ...
+
+Global___InterruptRequest: _TypeAlias = InterruptRequest  # noqa: Y015
+
+@_typing.final
+class TaskCancel(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     TASK_ID_FIELD_NUMBER: _builtins.int
@@ -714,17 +911,74 @@ class CancelRequest(_message.Message):
     _ClearFieldArgType: _TypeAlias = _typing.Literal["task_id", b"task_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-Global___CancelRequest: _TypeAlias = CancelRequest  # noqa: Y015
+Global___TaskCancel: _TypeAlias = TaskCancel  # noqa: Y015
 
 @_typing.final
-class CancelAck(_message.Message):
+class GlobalStop(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     def __init__(
         self,
     ) -> None: ...
 
-Global___CancelAck: _TypeAlias = CancelAck  # noqa: Y015
+Global___GlobalStop: _TypeAlias = GlobalStop  # noqa: Y015
+
+@_typing.final
+class Shutdown(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+Global___Shutdown: _TypeAlias = Shutdown  # noqa: Y015
+
+@_typing.final
+class InterruptAck(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+Global___InterruptAck: _TypeAlias = InterruptAck  # noqa: Y015
+
+@_typing.final
+class TelemetrySubscribe(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+Global___TelemetrySubscribe: _TypeAlias = TelemetrySubscribe  # noqa: Y015
+
+@_typing.final
+class TelemetryEvent(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SOURCE_FIELD_NUMBER: _builtins.int
+    EVENT_TYPE_FIELD_NUMBER: _builtins.int
+    DATA_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_MS_FIELD_NUMBER: _builtins.int
+    source: _builtins.str
+    """"openclaw" | "claude_code" """
+    event_type: _builtins.str
+    data: _builtins.str
+    """JSON"""
+    timestamp_ms: _builtins.int
+    def __init__(
+        self,
+        *,
+        source: _builtins.str = ...,
+        event_type: _builtins.str = ...,
+        data: _builtins.str = ...,
+        timestamp_ms: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "event_type", b"event_type", "source", b"source", "timestamp_ms", b"timestamp_ms"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___TelemetryEvent: _TypeAlias = TelemetryEvent  # noqa: Y015
 
 @_typing.final
 class ControlSignal(_message.Message):
