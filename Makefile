@@ -35,10 +35,19 @@ lint:
 	cd talker  && uv run ruff check .
 	buf lint $(PROTO_DIR)
 
+# ── Format ──
+# Writes formatting changes in place. CI typically uses `--check` flavors
+# (cargo fmt --check, ruff format --check, buf format --diff) — see lint
+# semantics. This target is for local "fix it" runs.
+format:
+	cd gateway && cargo fmt
+	cd talker  && uv run ruff format .
+	buf format -w $(PROTO_DIR)
+
 # ── Clean ──
 clean:
 	cd gateway && cargo clean
 	rm -rf talker/.venv
 	rm -rf reasoner/node_modules
 
-.PHONY: proto proto-py proto-rs test lint clean
+.PHONY: proto proto-py proto-rs test lint format clean
