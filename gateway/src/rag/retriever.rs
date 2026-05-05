@@ -8,11 +8,16 @@ use crate::proto;
 use crate::rag::embedder::{cosine_similarity, Embedder};
 use crate::rag::ranker::{self, RankedItem};
 use crate::rag::store::RagStore;
+use crate::rag::truncate_chars;
 
 pub struct HybridRetriever {
     store: Arc<RagStore>,
     embedder: Option<Arc<Embedder>>,
     top_k: usize,
+    /// Per-result content cap applied after RRF fusion. `None` = unlimited.
+    /// The store always holds full content; this only governs what the
+    /// Talker sees per turn.
+    max_chars_per_result: Option<usize>,
 }
 
 impl HybridRetriever {
@@ -20,8 +25,14 @@ impl HybridRetriever {
         store: Arc<RagStore>,
         embedder: Option<Arc<Embedder>>,
         top_k: usize,
+        max_chars_per_result: Option<usize>,
     ) -> Self {
-        Self { store, embedder, top_k }
+        Self {
+            store,
+            embedder,
+            top_k,
+            max_chars_per_result,
+        }
     }
 
     pub async fn retrieve(&self, query: &str) -> Vec<proto::RetrievalResult> {
@@ -63,8 +74,23 @@ impl HybridRetriever {
 
         let mut fused = ranker::reciprocal_rank_fusion(sources);
         fused.truncate(self.top_k);
-        debug!("Hybrid retrieval: {} final results for '{}'",
-            fused.len(), query.chars().take(50).collect::<String>());
+
+        // Apply per-result content cap, if configured. Done at output time
+        // so the store keeps full fidelity — only the prompt-injected slice
+        // is bounded.
+        if let Some(cap) = self.max_chars_per_result {
+            for r in fused.iter_mut() {
+                if r.content.chars().count() > cap {
+                    r.content = truncate_chars(&r.content, cap).to_string();
+                }
+            }
+        }
+
+        debug!(
+            "Hybrid retrieval: {} final results for '{}'",
+            fused.len(),
+            query.chars().take(50).collect::<String>()
+        );
         fused
     }
 }

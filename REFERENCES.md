@@ -333,4 +333,37 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 
 ---
 
+## REF-010 — RAG Memory Truncation: Storage-Time vs. Output-Time (Gateway RAG)
+
+**Decision:** The RAG store keeps full-fidelity memory content. Truncation only happens at *output* time — when retrieval results or the exported `memory_md` document are assembled for the Talker prompt. The store side has only a defensive sanity bound.
+
+**Configuration ([gateway/src/config.rs](gateway/src/config.rs#L48), `[rag]` block in `config/gateway.toml`):**
+
+| Knob                       | Default     | Layer       | Purpose                                                                                                |
+| -------------------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------ |
+| `max_storage_chars`        | `Some(4096)` | Storage     | Defensive cap on the `memories.content` row. Real voice utterances never approach this. Prevents pathological pastes / adversarial inputs from poisoning the index. |
+| `max_chars_per_result`     | `None`      | Retrieval   | Cap on each `RetrievalResult.content` injected into the per-turn Talker prompt. `None` = let the model context budget govern. Set to bound per-turn prompt cost when many retrievals fire. |
+| `max_chars_per_md_entry`   | `None`      | Persona MD  | Cap on each row of the "Recent Context" section in `RagStore::export_as_markdown` (delivered via `UpdatePersona`). Independent of retrieval; affects the long-term-prefix cost. |
+
+**Rationale:**
+
+- **Truncation at storage time is information loss that cascades.** Once a row is written truncated, every future BM25 search, every vector embedding, every exported `memory_md` row gets the damaged version. The original phrasing — including the *reason* a preference exists ("...because we're migrating off Java") — is gone forever. Keep storage authoritative; let consumers decide their own budget.
+
+- **Output-time caps are reversible.** A future change to `max_chars_per_result` (or removing the cap entirely) immediately benefits all stored memories on the next retrieval. No migration, no re-extraction.
+
+- **The 4 KB storage sanity bound is defensive only.** A 60-second monologue at conversational pace is ~1000 chars (English) or ~250–400 chars (Chinese, denser). 4096 chars is ~10–15× that, so legitimate voice input never hits the cap. Its only job is to bound the worst case if a user pastes raw text into a future text-input path or if an upstream component sends pathological content.
+
+- **Why `None` (unlimited) for output caps:** The 8B fast-path Talker has an 8K–32K context window depending on the `llama.cpp` config; with `top_k=10` retrievals at typical voice-utterance length (~150–300 chars each), the retrieval section is ~1.5–3 KB. That's well within budget. Capping at the output layer is *available* for deployments that hit budget pressure (large `top_k`, long memories, smaller-context models) but isn't needed for the default Phase-1 setup.
+
+- **Asymmetry with REF-006 (`max_response_sentences = 4`):** That sets a hard cap on assistant output for voice brevity. RAG truncation defaults to unlimited because input retrieval already passes through `top_k` (count-based) and BM25 ranking (relevance-based) — those are the right knobs for budget. Adding an additional length cap by default would over-constrain.
+
+**Phase-2 work that supersedes this:** Replace keyword-trigger extraction with LLM-based extraction (see `docs/spec-gateway-v0.1.0.md` Section 4). LLM extraction will produce concise, normalized memory entries directly — at which point `max_storage_chars` becomes vestigial defense and the output caps may shift to operate on token counts rather than char counts.
+
+**Sources:**
+
+- "Retrieve and refine, don't truncate" — general RAG-pipeline practice; e.g. LlamaIndex / LangChain documentation on chunking-vs-truncation tradeoffs.
+- SQLite cell-size limits: https://www.sqlite.org/limits.html (default 1 GB; 4 KB is far below any practical concern).
+
+---
+
 _Add new entries below this line. Format: `## REF-NNN — Short Title (component, milestone)`_

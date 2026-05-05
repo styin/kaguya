@@ -55,10 +55,8 @@ async fn main() -> anyhow::Result<()> {
     let history = History::new(config.history.max_recent_turns);
     let persona = Persona::load(&config.files.soul_path, &config.files.identity_path).await?;
     let rag = Arc::new(RagEngine::new(
-        &config.rag.db_path,
+        &config.rag,
         config.files.workspace_root.clone(),
-        config.rag.embedding_url.clone(),
-        config.rag.top_k,
     )?);
     let tools = ToolRegistry::new(config.files.workspace_root.clone());
     let reasoner = ReasonerManager::new(config.clients.reasoner_addr.clone());

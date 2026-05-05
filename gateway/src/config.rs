@@ -50,6 +50,26 @@ pub struct RagConfig {
     pub db_path: PathBuf,
     pub embedding_url: Option<String>,
     pub top_k: usize,
+    /// Hard cap on stored memory content length (chars). Defensive only;
+    /// real voice utterances never approach this. Prevents pathological
+    /// inputs (paste-bombs, adversarial content) from poisoning the index.
+    /// `None` = unlimited.
+    #[serde(default = "default_max_storage_chars")]
+    pub max_storage_chars: Option<usize>,
+    /// Per-RetrievalResult.content cap injected into the talker prompt.
+    /// `None` = unlimited (let the model's context budget govern). Set to
+    /// bound per-turn prompt cost when many retrievals fire.
+    #[serde(default)]
+    pub max_chars_per_result: Option<usize>,
+    /// Per-row cap on the "Recent Context" section of the exported
+    /// memory_md (the long-term-persona prefix delivered via UpdatePersona).
+    /// `None` = unlimited.
+    #[serde(default)]
+    pub max_chars_per_md_entry: Option<usize>,
+}
+
+fn default_max_storage_chars() -> Option<usize> {
+    Some(4096)
 }
 
 impl Default for RagConfig {
@@ -58,6 +78,9 @@ impl Default for RagConfig {
             db_path: "data/kaguya.db".into(),
             embedding_url: None,
             top_k: 10,
+            max_storage_chars: default_max_storage_chars(),
+            max_chars_per_result: None,
+            max_chars_per_md_entry: None,
         }
     }
 }

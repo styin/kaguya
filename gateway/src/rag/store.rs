@@ -219,7 +219,10 @@ impl RagStore {
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    pub async fn export_as_markdown(&self) -> String {
+    /// Render the long-term-persona memory_md document delivered via
+    /// `UpdatePersona`. `max_chars_per_entry` caps the "Recent Context"
+    /// rows at output time — the store itself always holds full content.
+    pub async fn export_as_markdown(&self, max_chars_per_entry: Option<usize>) -> String {
         let conn = self.conn.lock().await;
         let mut md = String::from("## User Profile\n\n");
 
@@ -253,7 +256,13 @@ impl RagStore {
         ) {
             if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
                 for c in rows.flatten() {
-                    md.push_str(&format!("- {c}\n"));
+                    let line = match max_chars_per_entry {
+                        Some(cap) if c.chars().count() > cap => {
+                            crate::rag::truncate_chars(&c, cap).to_string()
+                        }
+                        _ => c,
+                    };
+                    md.push_str(&format!("- {line}\n"));
                 }
             }
         }
