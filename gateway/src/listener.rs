@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::proto;
 use crate::proto::listener_service_client::ListenerServiceClient;

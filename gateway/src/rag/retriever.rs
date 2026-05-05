@@ -64,7 +64,7 @@ impl HybridRetriever {
         let mut fused = ranker::reciprocal_rank_fusion(sources);
         fused.truncate(self.top_k);
         debug!("Hybrid retrieval: {} final results for '{}'",
-            fused.len(), &query[..query.len().min(50)]);
+            fused.len(), query.chars().take(50).collect::<String>());
         fused
     }
 }

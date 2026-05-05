@@ -74,7 +74,7 @@ impl RagEngine {
                      "我喜欢", "我讨厌", "我偏好", "我习惯"];
         if pref.iter().any(|t| lower.contains(t)) {
             results.push((
-                format!("User preference: {}", &user_input[..user_input.len().min(200)]),
+                format!("User preference: {}", truncate_chars(user_input, 200)),
                 MemoryType::Preference,
             ));
         }
@@ -84,8 +84,8 @@ impl RagEngine {
         if fact.iter().any(|t| lower.contains(t)) {
             results.push((
                 format!("User: {} → Noted: {}",
-                    &user_input[..user_input.len().min(150)],
-                    &assistant_response[..assistant_response.len().min(200)]),
+                    truncate_chars(user_input, 150),
+                    truncate_chars(assistant_response, 200)),
                 MemoryType::Fact,
             ));
         }
@@ -93,7 +93,7 @@ impl RagEngine {
         let proj = ["project", "repo", "codebase", "pipeline", "项目", "仓库"];
         if proj.iter().any(|t| lower.contains(t)) {
             results.push((
-                format!("Project: {}", &user_input[..user_input.len().min(200)]),
+                format!("Project: {}", truncate_chars(user_input, 200)),
                 MemoryType::Project,
             ));
         }
@@ -101,8 +101,8 @@ impl RagEngine {
         if user_input.len() > 20 && assistant_response.len() > 20 {
             results.push((
                 format!("Q: {} → A: {}",
-                    &user_input[..user_input.len().min(100)],
-                    &assistant_response[..assistant_response.len().min(150)]),
+                    truncate_chars(user_input, 100),
+                    truncate_chars(assistant_response, 150)),
                 MemoryType::Conversation,
             ));
         }
@@ -112,5 +112,42 @@ impl RagEngine {
 
     pub async fn export_memory_md(&self) -> String {
         self.store.export_as_markdown().await
+    }
+}
+
+// Truncates `s` to at most `max_chars` Unicode characters, never splitting a
+// multi-byte char. Plain `&s[..n]` panics when `n` falls inside a UTF-8
+// sequence, which happens routinely on the Chinese trigger keywords above.
+fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_chars_handles_multibyte_boundaries() {
+        // 6 chars × 3 bytes = 18 bytes
+        let s = "我喜欢喝咖啡";
+        assert_eq!(truncate_chars(s, 3), "我喜欢");
+        assert_eq!(truncate_chars(s, 100), s);
+        assert_eq!(truncate_chars(s, 0), "");
+    }
+
+    #[test]
+    fn extract_memories_does_not_panic_on_long_chinese_input() {
+        let long_pref = "我喜欢".repeat(100); // 300 chars, 900 bytes
+        let _ = RagEngine::extract_memories(&long_pref, "ok");
+        let long_fact = "记住".to_string() + &"测试内容".repeat(80);
+        let _ = RagEngine::extract_memories(&long_fact, &"回应".repeat(80));
+        let long_proj = "项目".to_string() + &"详情".repeat(120);
+        let _ = RagEngine::extract_memories(&long_proj, "ack");
+        let long_conv_user = "u".to_string() + &"问".repeat(60);
+        let long_conv_resp = "a".to_string() + &"答".repeat(60);
+        let _ = RagEngine::extract_memories(&long_conv_user, &long_conv_resp);
     }
 }

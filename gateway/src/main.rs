@@ -339,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
 
                 if let Some(t) = active_gen.take() { t.cancel(); }
                 output.unmute_audio();
-                active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()));
+                active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
             }
 
             // ── P2: ASR States ──
@@ -375,7 +375,7 @@ async fn main() -> anyhow::Result<()> {
                         ).await;
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
-                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()));
+                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                     }
                     InputEvent::ReasonerStep { task_id: _, description } => {
                         if narration.should_narrate(&description) {
@@ -385,7 +385,7 @@ async fn main() -> anyhow::Result<()> {
                                 &description, &history, &last_memory_md,
                             ).await;
                             if active_gen.is_none() {
-                                active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()));
+                                active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                             }
                         }
                     }
@@ -400,7 +400,7 @@ async fn main() -> anyhow::Result<()> {
                         ).await;
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
-                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()));
+                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                     }
                     InputEvent::ReasonerError { task_id, message, .. } => {
                         warn!(task_id = %task_id, err = %message, "P3: reasoner error");
@@ -419,7 +419,7 @@ async fn main() -> anyhow::Result<()> {
                             &conversation_id, &turn_id,
                             duration, &history, &last_memory_md, &tools,
                         ).await;
-                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()));
+                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                     }
                 }
             }

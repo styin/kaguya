@@ -10,8 +10,6 @@ import logging
 import struct
 import time
 
-import grpc
-
 from config import TalkerConfig
 from voice.opus_decoder import OpusDecoder
 from voice.turn_detector import TurnDetector

@@ -251,7 +251,7 @@ impl RagStore {
             "SELECT content FROM memories WHERE memory_type IN ('conversation','fact')
              ORDER BY created_at DESC LIMIT 30",
         ) {
-            if let Ok(rows) = stmt.query_map([], |r| Ok(r.get::<_, String>(0)?)) {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
                 for c in rows.flatten() {
                     md.push_str(&format!("- {c}\n"));
                 }

@@ -33,23 +33,6 @@ impl ReasonerManager {
         }
     }
 
-    async fn ensure_client(&self) -> Option<ReasonerServiceClient<Channel>> {
-        let guard = self.client.read().await;
-        if guard.is_some() { return guard.clone(); }
-        drop(guard);
-        match Channel::from_shared(self.endpoint.clone()) {
-            Ok(ch) => match ch.connect().await {
-                Ok(channel) => {
-                    let c = ReasonerServiceClient::new(channel);
-                    *self.client.write().await = Some(c.clone());
-                    Some(c)
-                }
-                Err(e) => { warn!("Reasoner not available: {e}"); None }
-            },
-            Err(e) => { warn!("bad reasoner endpoint: {e}"); None }
-        }
-    }
-
     pub async fn start(
         &self,
         task_id: String,

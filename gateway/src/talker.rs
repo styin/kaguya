@@ -42,7 +42,11 @@ impl TalkerClient {
 
     /// Open a bidi Converse stream, send context, receive output.
     /// Stores stream sender for inline barge-in.
-    pub fn dispatch(
+    ///
+    /// The channel + sender are created and registered before spawning the
+    /// task, so a `barge_in()` call racing in immediately after this returns
+    /// finds the live sender instead of silently no-op'ing.
+    pub async fn dispatch(
         &self,
         ctx: proto::TalkerContext,
         output_tx: mpsc::Sender<proto::TalkerOutput>,
@@ -53,6 +57,14 @@ impl TalkerClient {
         let stream_tx_arc = Arc::clone(&self.stream_tx);
         let endpoint = self.endpoint.clone();
 
+        // Create the bidi channel and register the sender BEFORE spawning.
+        // Capacity 64 ⇒ try_send for the start payload never blocks.
+        let (tx, rx) = mpsc::channel::<proto::TalkerInput>(64);
+        let _ = tx.try_send(proto::TalkerInput {
+            payload: Some(proto::talker_input::Payload::Start(ctx)),
+        });
+        *stream_tx_arc.lock().await = Some(tx);
+
         tokio::spawn(async move {
             // Ensure client connected
             let mut guard = inner.write().await;
@@ -62,30 +74,19 @@ impl TalkerClient {
                         *guard = Some(TalkerServiceClient::new(channel));
                     } else {
                         error!("Talker reconnect failed");
+                        *stream_tx_arc.lock().await = None;
                         return;
                     }
                 } else {
                     error!("bad Talker endpoint");
+                    *stream_tx_arc.lock().await = None;
                     return;
                 }
             }
             let mut client = guard.clone().unwrap();
             drop(guard);
 
-            // Create bidi stream
-            let (tx, rx) = mpsc::channel::<proto::TalkerInput>(64);
             let outbound = ReceiverStream::new(rx);
-
-            // Send initial context
-            if tx.send(proto::TalkerInput {
-                payload: Some(proto::talker_input::Payload::Start(ctx)),
-            }).await.is_err() {
-                return;
-            }
-
-            // Store sender for barge-in
-            *stream_tx_arc.lock().await = Some(tx);
-
             let mut inbound = match client.converse(outbound).await {
                 Ok(resp) => resp.into_inner(),
                 Err(e) => {
