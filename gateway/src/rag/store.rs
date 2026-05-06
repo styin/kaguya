@@ -256,35 +256,46 @@ impl RagStore {
     }
 
     /// Render the long-term-persona memory_md document delivered via
-    /// `UpdatePersona`. `max_chars_per_entry` caps the "Recent Context"
-    /// rows at output time — the store itself always holds full content.
+    /// `UpdatePersona`. Sections are typed: preferences and projects each
+    /// get their own header; `Recent Context` is reserved for casual
+    /// conversation and incidental facts. `max_chars_per_entry` caps each
+    /// row at output time — the store itself always holds full content.
     pub async fn export_as_markdown(&self, max_chars_per_entry: Option<usize>) -> String {
         let conn = self.conn.lock().await;
-        let mut md = String::from("## User Profile\n\n");
+        let mut md = String::new();
 
-        if let Ok(mut stmt) = conn.prepare("SELECT key, value FROM user_profile") {
-            if let Ok(rows) = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }) {
-                for row in rows.flatten() {
-                    md.push_str(&format!("- {}: {}\n", row.0, row.1));
+        let cap = |s: String| -> String {
+            match max_chars_per_entry {
+                Some(n) if s.chars().count() > n => {
+                    crate::rag::truncate_chars(&s, n).to_string()
+                }
+                _ => s,
+            }
+        };
+
+        let mut append_section = |header: &str, mem_type: &str, limit: usize| {
+            md.push_str(&format!("\n## {header}\n\n"));
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT content FROM memories WHERE memory_type = ?1
+                 ORDER BY created_at DESC LIMIT ?2",
+            ) {
+                if let Ok(rows) = stmt.query_map(
+                    params![mem_type, limit as i64],
+                    |r| r.get::<_, String>(0),
+                ) {
+                    for c in rows.flatten() {
+                        md.push_str(&format!("- {}\n", cap(c)));
+                    }
                 }
             }
-        }
+        };
 
-        md.push_str("\n## Project Context\n\n");
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT name, description FROM projects ORDER BY updated_at DESC LIMIT 20",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }) {
-                for row in rows.flatten() {
-                    md.push_str(&format!("- {}: {}\n", row.0, row.1));
-                }
-            }
-        }
+        append_section("User Preferences", "preference", 20);
+        append_section("Active Projects", "project", 10);
 
+        // Recent Context covers conversation + fact rows. Combine into one
+        // ranked section so the prefix shows the freshest 30 incidental
+        // memories regardless of which type they were tagged as.
         md.push_str("\n## Recent Context\n\n");
         if let Ok(mut stmt) = conn.prepare(
             "SELECT content FROM memories WHERE memory_type IN ('conversation','fact')
@@ -292,17 +303,12 @@ impl RagStore {
         ) {
             if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
                 for c in rows.flatten() {
-                    let line = match max_chars_per_entry {
-                        Some(cap) if c.chars().count() > cap => {
-                            crate::rag::truncate_chars(&c, cap).to_string()
-                        }
-                        _ => c,
-                    };
-                    md.push_str(&format!("- {line}\n"));
+                    md.push_str(&format!("- {}\n", cap(c)));
                 }
             }
         }
-        md
+
+        md.trim_start().to_string() + "\n"
     }
 }
 
