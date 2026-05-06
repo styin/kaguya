@@ -29,6 +29,17 @@ class ListenerServiceStub(object):
     """LISTENER SERVICE — Bidi streaming
     Gateway = client, Listener = server
 
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
+
+    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
+    reuse, in case the audio path ever moves back in-band.
+
     """
 
     def __init__(self, channel):
@@ -48,10 +59,21 @@ class ListenerServiceServicer(object):
     """LISTENER SERVICE — Bidi streaming
     Gateway = client, Listener = server
 
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
+
+    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
+    reuse, in case the audio path ever moves back in-band.
+
     """
 
     def Stream(self, request_iterator, context):
-        """Bidi: Gateway pushes audio chunks, Listener pushes back ASR events
+        """Bidi: Gateway sends control signals; Listener streams ASR events.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -76,6 +98,17 @@ def add_ListenerServiceServicer_to_server(servicer, server):
 class ListenerService(object):
     """LISTENER SERVICE — Bidi streaming
     Gateway = client, Listener = server
+
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
+
+    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
+    reuse, in case the audio path ever moves back in-band.
 
     """
 

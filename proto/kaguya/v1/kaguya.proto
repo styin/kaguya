@@ -28,24 +28,28 @@ message ToolDefinition {
 
 // LISTENER SERVICE — Bidi streaming
 // Gateway = client, Listener = server
-
+//
+// Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+// audio frames over a separate TCP socket (length-prefixed framing) at
+// `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+// overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+// HTTP/2 framing adds head-of-line blocking that voice latency can't
+// afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+// `gateway/src/listener.rs`.
+//
+// Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
+// reuse, in case the audio path ever moves back in-band.
 
 service ListenerService {
-  // Bidi: Gateway pushes audio chunks, Listener pushes back ASR events
+  // Bidi: Gateway sends control signals; Listener streams ASR events.
   rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
 }
 
 message ListenerInput {
   oneof payload {
-    AudioChunk       audio  = 1;  // raw audio from endpoint
-    ListenerControl  control = 2; // runtime config / reset
+    // Tag 1 reserved (was AudioChunk). Audio flows over the raw TCP socket.
+    ListenerControl  control = 2;
   }
-}
-
-message AudioChunk {
-  bytes data        = 1;  // Opus or PCM bytes
-  int64 timestamp_ms = 2;
-  string encoding    = 3;  // "opus" | "pcm_s16le"
 }
 
 message ListenerControl {

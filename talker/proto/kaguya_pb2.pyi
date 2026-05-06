@@ -95,55 +95,25 @@ Global___ToolDefinition: _TypeAlias = ToolDefinition  # noqa: Y015
 class ListenerInput(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    AUDIO_FIELD_NUMBER: _builtins.int
     CONTROL_FIELD_NUMBER: _builtins.int
     @_builtins.property
-    def audio(self) -> Global___AudioChunk:
-        """raw audio from endpoint"""
-
-    @_builtins.property
     def control(self) -> Global___ListenerControl:
-        """runtime config / reset"""
+        """Tag 1 reserved (was AudioChunk). Audio flows over the raw TCP socket."""
 
     def __init__(
         self,
         *,
-        audio: Global___AudioChunk | None = ...,
         control: Global___ListenerControl | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["audio", b"audio", "control", b"control", "payload", b"payload"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["control", b"control", "payload", b"payload"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["audio", b"audio", "control", b"control", "payload", b"payload"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["control", b"control", "payload", b"payload"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["audio", "control"]  # noqa: Y015
+    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["control"]  # noqa: Y015
     _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
 
 Global___ListenerInput: _TypeAlias = ListenerInput  # noqa: Y015
-
-@_typing.final
-class AudioChunk(_message.Message):
-    DESCRIPTOR: _descriptor.Descriptor
-
-    DATA_FIELD_NUMBER: _builtins.int
-    TIMESTAMP_MS_FIELD_NUMBER: _builtins.int
-    ENCODING_FIELD_NUMBER: _builtins.int
-    data: _builtins.bytes
-    """Opus or PCM bytes"""
-    timestamp_ms: _builtins.int
-    encoding: _builtins.str
-    """"opus" | "pcm_s16le" """
-    def __init__(
-        self,
-        *,
-        data: _builtins.bytes = ...,
-        timestamp_ms: _builtins.int = ...,
-        encoding: _builtins.str = ...,
-    ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "encoding", b"encoding", "timestamp_ms", b"timestamp_ms"]  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-
-Global___AudioChunk: _TypeAlias = AudioChunk  # noqa: Y015
 
 @_typing.final
 class ListenerControl(_message.Message):

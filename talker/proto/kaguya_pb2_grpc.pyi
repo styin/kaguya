@@ -29,6 +29,17 @@ GRPC_VERSION: str
 class ListenerServiceStub:
     """LISTENER SERVICE — Bidi streaming
     Gateway = client, Listener = server
+
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
+
+    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
+    reuse, in case the audio path ever moves back in-band.
     """
 
     @_typing.overload
@@ -36,21 +47,43 @@ class ListenerServiceStub:
     @_typing.overload
     def __new__(cls, channel: _aio.Channel) -> ListenerServiceAsyncStub: ...
     Stream: _grpc.StreamStreamMultiCallable[_kaguya_pb2.ListenerInput, _kaguya_pb2.ListenerOutput]
-    """Bidi: Gateway pushes audio chunks, Listener pushes back ASR events"""
+    """Bidi: Gateway sends control signals; Listener streams ASR events."""
 
 @_typing.type_check_only
 class ListenerServiceAsyncStub(ListenerServiceStub):
     """LISTENER SERVICE — Bidi streaming
     Gateway = client, Listener = server
+
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
+
+    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
+    reuse, in case the audio path ever moves back in-band.
     """
 
     def __init__(self, channel: _aio.Channel) -> None: ...
     Stream: _aio.StreamStreamMultiCallable[_kaguya_pb2.ListenerInput, _kaguya_pb2.ListenerOutput]  # type: ignore[assignment]
-    """Bidi: Gateway pushes audio chunks, Listener pushes back ASR events"""
+    """Bidi: Gateway sends control signals; Listener streams ASR events."""
 
 class ListenerServiceServicer(metaclass=_abc_1.ABCMeta):
     """LISTENER SERVICE — Bidi streaming
     Gateway = client, Listener = server
+
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
+
+    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
+    reuse, in case the audio path ever moves back in-band.
     """
 
     @_abc_1.abstractmethod
@@ -59,7 +92,7 @@ class ListenerServiceServicer(metaclass=_abc_1.ABCMeta):
         request_iterator: _MaybeAsyncIterator[_kaguya_pb2.ListenerInput],
         context: _ServicerContext,
     ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.ListenerOutput], _abc.AsyncIterator[_kaguya_pb2.ListenerOutput]]:
-        """Bidi: Gateway pushes audio chunks, Listener pushes back ASR events"""
+        """Bidi: Gateway sends control signals; Listener streams ASR events."""
 
 def add_ListenerServiceServicer_to_server(servicer: ListenerServiceServicer, server: _typing.Union[_grpc.Server, _aio.Server]) -> None: ...
 

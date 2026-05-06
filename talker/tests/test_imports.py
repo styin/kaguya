@@ -116,7 +116,6 @@ def test_proto_stubs_importable():
     # Listener: bidi Stream(ListenerInput) → ListenerOutput
     assert kaguya_pb2.ListenerInput() is not None
     assert kaguya_pb2.ListenerOutput() is not None
-    assert kaguya_pb2.AudioChunk() is not None
 
     # Talker: bidi Converse — TalkerInput.start | barge_in, TalkerOutput.barge_in_ack
     assert kaguya_pb2.TalkerInput() is not None
@@ -132,6 +131,40 @@ def test_proto_stubs_importable():
     assert kaguya_pb2.DelegateInput() is not None
     assert kaguya_pb2.DelegateOutput() is not None
     assert kaguya_pb2.InterruptRequest() is not None
+
+
+# ── P0-4: AudioChunk + ListenerInput.audio removed from proto ──
+#
+# Audio flows over a separate raw TCP socket; the proto previously advertised
+# in-band audio (`ListenerInput.audio` / `AudioChunk`) which `ListenerService`
+# silently ignored. Schema must match implementation: drop the dead messages.
+
+
+def test_proto_does_not_export_audiochunk():
+    """AudioChunk message must be removed from the proto schema —
+    audio flows over the raw TCP socket, never gRPC."""
+    from proto import kaguya_pb2  # type: ignore[import]
+
+    assert not hasattr(kaguya_pb2, "AudioChunk"), (
+        "AudioChunk should not exist in the schema; "
+        "audio flows over the raw TCP socket, not gRPC"
+    )
+
+
+def test_listener_input_payload_has_no_audio_field():
+    """ListenerInput's payload oneof must only carry control signals;
+    the `audio` variant must be removed."""
+    from proto import kaguya_pb2  # type: ignore[import]
+
+    msg = kaguya_pb2.ListenerInput()
+    payload_field = msg.DESCRIPTOR.oneofs_by_name.get("payload")
+    assert payload_field is not None, "ListenerInput must have a 'payload' oneof"
+    field_names = {f.name for f in payload_field.fields}
+    assert "audio" not in field_names, (
+        f"ListenerInput.payload must not have an 'audio' variant; got {field_names}"
+    )
+    # Sanity: control should still be there.
+    assert "control" in field_names, "ListenerInput.payload.control must remain"
 
 
 def test_proto_stubs_services_exist():
