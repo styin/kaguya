@@ -20,10 +20,28 @@ logger = logging.getLogger(__name__)
 
 
 class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
-    """gRPC server: yields ASR events to Gateway, reads control signals."""
+    """gRPC server: yields ASR events to Gateway, reads control signals.
+
+    Single-active-client policy. The shared `_event_queue` is drained
+    point-to-point — `asyncio.Queue.get()` delivers each enqueued event
+    to exactly one waiting consumer, not broadcast. If two `Stream`
+    handlers run concurrently (e.g. Gateway crashed and reconnected
+    before the old TCP connection FIN'd), ASR events would be load-
+    balanced between them, splitting the transcript across two
+    connections.
+
+    Pattern B fix: when a new `Stream` arrives, signal the prior handler
+    to terminate and take ownership of the queue. The new (live) Gateway
+    wins; the stale handler exits cleanly with EOF. Combined with the
+    Gateway-side reconnect loop (planned in #17), this gives smooth
+    handoff during Gateway restarts.
+    """
 
     def __init__(self, event_queue: asyncio.Queue) -> None:
         self._event_queue = event_queue
+        # Set whenever a new Stream takes over; the prior handler watches
+        # this and exits when it fires.
+        self._active_terminate: asyncio.Event | None = None
 
     async def Stream(self, request_iterator, context):
         # Flush response headers immediately. Without this, grpcio-aio defers
@@ -31,6 +49,14 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
         # event queue is empty until ASR fires — so the client's `Stream(...)`
         # call would block on the handshake indefinitely.
         await context.send_initial_metadata(())
+
+        # Tell the prior handler (if any) to wind down. We replace the
+        # registered terminate-event with our own; if a future handler
+        # arrives, it'll signal us through this same event.
+        if self._active_terminate is not None:
+            self._active_terminate.set()
+        terminate = asyncio.Event()
+        self._active_terminate = terminate
 
         async def read_control():
             async for msg in request_iterator:
@@ -43,12 +69,48 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
         control_task = asyncio.create_task(read_control())
         try:
             while True:
-                event = await self._event_queue.get()
-                yield event
+                # Race: queue event vs. takeover-signal. Whichever fires
+                # first decides whether we yield or exit.
+                get_task = asyncio.create_task(self._event_queue.get())
+                term_task = asyncio.create_task(terminate.wait())
+                done, pending = await asyncio.wait(
+                    {get_task, term_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # Cancel the loser; if it grabbed an event from the queue
+                # before the cancel landed, requeue so the takeover handler
+                # doesn't lose it.
+                for p in pending:
+                    p.cancel()
+                if get_task in done:
+                    if term_task in done:
+                        # Tie: takeover fired and we also drained an event.
+                        # Put the event back so the new handler gets it.
+                        try:
+                            self._event_queue.put_nowait(get_task.result())
+                        except asyncio.QueueFull:
+                            pass
+                        break
+                    yield get_task.result()
+                else:
+                    # Takeover fired first. If get_task was cancelled with
+                    # an event already pulled, requeue it.
+                    try:
+                        if get_task.done() and not get_task.cancelled():
+                            self._event_queue.put_nowait(get_task.result())
+                    except (asyncio.QueueFull, asyncio.CancelledError):
+                        pass
+                    logger.info("Listener Stream replaced by newer client; exiting")
+                    break
         except asyncio.CancelledError:
             pass
         finally:
             control_task.cancel()
+            # Only clear the registry if we're still the registered one.
+            # If a takeover already replaced us, leave that handler's
+            # event in place.
+            if self._active_terminate is terminate:
+                self._active_terminate = None
 
 
 class Listener:
