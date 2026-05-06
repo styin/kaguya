@@ -6,6 +6,30 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+/// Tokenize a raw user query into an FTS5-safe MATCH expression.
+///
+/// FTS5's MATCH language treats `:`, `"`, `+`, `-`, `(`, `)`, `*`, `^` and
+/// the keywords `AND` / `OR` / `NOT` as syntax. Real user input contains
+/// these all the time (`"C++"`, `"example.com:8080"`, `"def foo()"`) and
+/// would otherwise raise parse errors that we silently convert to empty
+/// retrieval results.
+///
+/// Strategy: split on **any** non-alphanumeric character (so `"example.com"`
+/// becomes `["example", "com"]`, matching how FTS5's `unicode61` tokenizer
+/// indexed the stored content). Wrap each token in double quotes so FTS5
+/// treats it as a phrase literal — that keeps the token verbatim and
+/// avoids the chance of one of them being interpreted as `AND`/`OR`/`NOT`.
+/// Join with `OR` so partial matches still surface candidates; BM25
+/// ranking promotes docs that match many query terms to the top.
+fn sanitize_fts5_query(raw: &str) -> String {
+    let tokens: Vec<String> = raw
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    tokens.join(" OR ")
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
     pub id: String,
@@ -119,6 +143,18 @@ impl RagStore {
     }
 
     pub async fn search_bm25(&self, query: &str, limit: usize) -> Vec<BM25Result> {
+        // FTS5 MATCH has its own query mini-language layered on top of the
+        // bound parameter (column filters via `:`, phrase quoting via `"`,
+        // boolean operators `+`/`-`/`AND`/`OR`/`NOT`, prefix `*`, group `()`).
+        // Passing raw user utterances straight in raises FTS5 parse errors
+        // for many ordinary inputs (e.g. "C++", "example.com:8080",
+        // unbalanced quotes). Tokenize and quote each token so FTS5 treats
+        // them as literal terms.
+        let sanitized = sanitize_fts5_query(query);
+        if sanitized.is_empty() {
+            return vec![];
+        }
+
         let conn = self.conn.lock().await;
         let mut stmt = match conn.prepare(
             "SELECT m.id, m.content, rank
@@ -131,7 +167,7 @@ impl RagStore {
             Ok(s) => s,
             Err(_) => return vec![],
         };
-        let rows = match stmt.query_map(params![query, limit as i64], |row| {
+        let rows = match stmt.query_map(params![sanitized, limit as i64], |row| {
             Ok(BM25Result {
                 id: row.get(0)?,
                 content: row.get(1)?,
@@ -267,5 +303,252 @@ impl RagStore {
             }
         }
         md
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Allocate a fresh on-disk SQLite path under the OS temp dir.
+    /// Each test gets a unique file; deletion is best-effort on Drop via
+    /// `_TempDb`. We don't use `:memory:` because `RagStore::open` calls
+    /// `create_dir_all(parent)` which has surprising semantics on an empty
+    /// parent path on some platforms.
+    struct _TempDb(std::path::PathBuf);
+    impl _TempDb {
+        fn new() -> Self {
+            let mut p = std::env::temp_dir();
+            p.push(format!("kaguya-test-{}.db", uuid::Uuid::new_v4()));
+            Self(p)
+        }
+    }
+    impl Drop for _TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("db-wal"));
+            let _ = std::fs::remove_file(self.0.with_extension("db-shm"));
+        }
+    }
+
+    fn entry(content: &str, mem_type: MemoryType) -> MemoryEntry {
+        MemoryEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            content: content.to_string(),
+            memory_type: mem_type,
+            source: "test".to_string(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+        }
+    }
+
+    // ── P0-1: BM25 query sanitization ────────────────────────────────────
+
+    #[tokio::test]
+    async fn bm25_returns_results_for_punctuated_query() {
+        // Real-world input: a user asking about C++ build times. The raw
+        // string contains `+` chars that FTS5 MATCH parses as boolean
+        // operators, raising a parse error. The current `search_bm25`
+        // swallows the error and returns []. This test asserts retrieval
+        // SUCCEEDS — i.e. the implementation must sanitize / tokenize the
+        // query before binding it to MATCH.
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "I prefer Rust over C++ for the trading platform; build times matter",
+            MemoryType::Preference,
+        ))
+        .await
+        .unwrap();
+
+        let r = s.search_bm25("C++ build times", 10).await;
+        assert!(
+            !r.is_empty(),
+            "BM25 must not silently fail on '+' chars; \
+             expected at least one hit on 'build' / 'times'"
+        );
+    }
+
+    #[tokio::test]
+    async fn bm25_returns_results_for_colon_query() {
+        // Colon is FTS5's column-filter syntax (`title:foo`). Natural
+        // queries like "what's at example.com:8080" or "foo:bar" should
+        // not blow up retrieval.
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "User: example.com is the canonical demo domain",
+            MemoryType::Fact,
+        ))
+        .await
+        .unwrap();
+
+        let r = s.search_bm25("example.com:8080 demo", 10).await;
+        assert!(
+            !r.is_empty(),
+            "BM25 must handle ':' in user input; expected hit on 'example' / 'demo'"
+        );
+    }
+
+    #[tokio::test]
+    async fn bm25_returns_results_for_quoted_query() {
+        // Unbalanced quotes from a transcript like 'he said "hello world'
+        // currently break FTS5 parsing.
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "The greeting was hello world spoken in jest",
+            MemoryType::Conversation,
+        ))
+        .await
+        .unwrap();
+
+        let r = s.search_bm25(r#"he said "hello world"#, 10).await;
+        assert!(
+            !r.is_empty(),
+            "BM25 must tolerate unbalanced quotes in user input"
+        );
+    }
+
+    #[tokio::test]
+    async fn bm25_returns_results_for_paren_query() {
+        // Code-shaped query: parentheses, colons. Common in technical chat.
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "Function foo returns an integer in the project",
+            MemoryType::Fact,
+        ))
+        .await
+        .unwrap();
+
+        let r = s.search_bm25("def foo(): return 42", 10).await;
+        assert!(
+            !r.is_empty(),
+            "BM25 must tolerate parens and colons in user input"
+        );
+    }
+
+    #[tokio::test]
+    async fn bm25_clean_query_still_works() {
+        // Sanity: a perfectly clean ASCII query should still match. Guards
+        // against the sanitizer being so aggressive it strips everything.
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "User prefers Rust for systems work",
+            MemoryType::Preference,
+        ))
+        .await
+        .unwrap();
+
+        let r = s.search_bm25("rust systems", 10).await;
+        assert!(!r.is_empty(), "clean queries must still match");
+    }
+
+    // ── P0-2: export_as_markdown includes Preference and Project ─────────
+
+    #[tokio::test]
+    async fn export_includes_preference_rows() {
+        // Strategy B contract: the `## User Preferences` section surfaces
+        // every Preference memory. Currently `export_as_markdown` only
+        // includes ('conversation','fact'); preferences are written but
+        // dead-stored.
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "User preference: I like Rust over Python",
+            MemoryType::Preference,
+        ))
+        .await
+        .unwrap();
+
+        let md = s.export_as_markdown(None).await;
+        assert!(
+            md.contains("I like Rust"),
+            "preference row must surface in memory_md export; got:\n{md}"
+        );
+        assert!(
+            md.contains("## User Preferences"),
+            "expected '## User Preferences' section header; got:\n{md}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_includes_project_rows() {
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "Project: trading-platform v2 migration",
+            MemoryType::Project,
+        ))
+        .await
+        .unwrap();
+
+        let md = s.export_as_markdown(None).await;
+        assert!(
+            md.contains("trading-platform"),
+            "project row must surface in memory_md export; got:\n{md}"
+        );
+        assert!(
+            md.contains("## Active Projects"),
+            "expected '## Active Projects' section header; got:\n{md}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_keeps_recent_context_for_conversation_and_fact() {
+        // Don't regress the existing behavior: the ## Recent Context
+        // section should still pull conversation / fact rows.
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry(
+            "Q: what's the time → A: it's 3pm",
+            MemoryType::Conversation,
+        ))
+        .await
+        .unwrap();
+        s.insert_memory(&entry(
+            "User: my name is Sebastian → Noted",
+            MemoryType::Fact,
+        ))
+        .await
+        .unwrap();
+
+        let md = s.export_as_markdown(None).await;
+        assert!(md.contains("3pm"));
+        assert!(md.contains("Sebastian"));
+        assert!(md.contains("## Recent Context"));
+    }
+
+    #[tokio::test]
+    async fn export_does_not_mix_preferences_into_recent_context() {
+        // Section discipline: Preferences belong in their own section, not
+        // jumbled into Recent Context. (This guards against a regression
+        // where someone "fixes" P0-2 by just relaxing the WHERE clause
+        // on Recent Context — Strategy A — instead of separating sections.)
+        let db = _TempDb::new();
+        let s = RagStore::open(&db.0).unwrap();
+        s.insert_memory(&entry("User preference: dark mode", MemoryType::Preference))
+            .await
+            .unwrap();
+
+        let md = s.export_as_markdown(None).await;
+        // The preference must be UNDER the User Preferences header, not
+        // under Recent Context. Find the section boundaries and the
+        // preference row.
+        let pref_idx = md.find("dark mode").expect("pref present");
+        let pref_section_idx = md.find("## User Preferences").expect("pref header");
+        let recent_section_idx = md.find("## Recent Context").expect("recent header");
+
+        assert!(
+            pref_idx > pref_section_idx,
+            "preference must appear AFTER its own section header"
+        );
+        if pref_section_idx < recent_section_idx {
+            assert!(
+                pref_idx < recent_section_idx,
+                "preference must NOT spill into Recent Context section"
+            );
+        }
     }
 }
