@@ -212,6 +212,11 @@ async fn main() -> anyhow::Result<()> {
     let mut active_silence: Option<CancellationToken> = None;
     let mut current_response = String::new();
     let mut last_turn_id = String::new();
+    // Tracks what kind of round triggered the active dispatch. Read on
+    // `ResponseComplete` to gate `evaluate_and_store` — only `UserIntent`
+    // rounds carry a fresh user statement that pairs with the assistant
+    // response into a memory. See `DispatchKind::should_persist_memory`.
+    let mut current_dispatch_kind: Option<DispatchKind> = None;
 
     // ══════════════════════════════════════
     //  MAIN EVENT LOOP
@@ -283,8 +288,19 @@ async fn main() -> anyhow::Result<()> {
                             if !text.is_empty() {
                                 history.append_assistant(&text).await;
                             }
-                            if let Some(ui) = history.last_user_input().await {
-                                rag.evaluate_and_store(&ui, &text, &last_turn_id).await;
+                            // Only persist a memory pair if THIS round was a
+                            // direct user statement. Tool / reasoner /
+                            // narration / silence rounds run on top of an
+                            // older user turn — pairing assistant text from
+                            // these with `last_user_input()` would fabricate
+                            // a misattributed Q/A memory. See `DispatchKind`.
+                            let persist = current_dispatch_kind
+                                .map(|k| k.should_persist_memory())
+                                .unwrap_or(false);
+                            if persist {
+                                if let Some(ui) = history.last_user_input().await {
+                                    rag.evaluate_and_store(&ui, &text, &last_turn_id).await;
+                                }
                             }
 
                             // FIX #3: only push UpdatePersona when memory actually changed
@@ -309,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
                         active_silence = Some(silence.start());
                         output.unmute_audio();
                         active_gen = None;
+                        current_dispatch_kind = None;
                         current_response.clear();
                     }
                     None => {}
@@ -337,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
 
                 if let Some(t) = active_gen.take() { t.cancel(); }
                 output.unmute_audio();
+                current_dispatch_kind = Some(DispatchKind::UserIntent);
                 active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
             }
 
@@ -373,6 +391,7 @@ async fn main() -> anyhow::Result<()> {
                         ).await;
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
+                        current_dispatch_kind = Some(DispatchKind::ToolResult);
                         active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                     }
                     InputEvent::ReasonerStep { task_id: _, description } => {
@@ -383,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
                                 &description, &history, &last_memory_md,
                             ).await;
                             if active_gen.is_none() {
+                                current_dispatch_kind = Some(DispatchKind::ReasonerNarration);
                                 active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                             }
                         }
@@ -398,6 +418,7 @@ async fn main() -> anyhow::Result<()> {
                         ).await;
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
+                        current_dispatch_kind = Some(DispatchKind::ReasonerResult);
                         active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                     }
                     InputEvent::ReasonerError { task_id, message, .. } => {
@@ -417,6 +438,7 @@ async fn main() -> anyhow::Result<()> {
                             &conversation_id, &turn_id,
                             duration, &history, &last_memory_md, &tools,
                         ).await;
+                        current_dispatch_kind = Some(DispatchKind::Silence);
                         active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
                     }
                 }
