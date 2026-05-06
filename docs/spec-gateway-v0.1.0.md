@@ -25,10 +25,10 @@ The Gateway does **not**:
 ## 2. Responsibilities (Exhaustive)
 
 1. **Endpoint I/O.** Receive audio frames, text commands, and control signals from the local endpoint; forward Kaguya's audio and metadata output back to it. **Phase 1:** The endpoint is a local dev-GUI/TUI connected via a simple local interface (e.g. WebSocket or stdio). The Gateway demuxes incoming frames into the appropriate Internal paths (audio → Listener, text → Input Stream P1, control → direct handling) and muxes outgoing audio and metadata back to the dev-GUI/TUI. **Phase 2:** The endpoint interface is replaced by the OpenPod protobuf protocol. The Gateway becomes the sole component speaking OpenPod, with Channel A (metadata) and Channel D (audio) muxed into OpenPod's wire format. The dev-GUI/TUI is retired or retained as a local debug tool.
-2. **Conversation history management.** Maintain the rolling conversation log (in-memory). Append new turns (user input + Talker response) after each exchange. Perform context window compaction: keep recent N turns in full, summarize older turns via background LLM call, discard beyond the summary horizon. Single continuous thread per user — no session management. This is distinct from `MEMORY.md` — history is the short-term rolling log; `MEMORY.md` is the distilled long-term knowledge base.
-3. **Context package assembly.** Before every Talker dispatch, assemble a structured context package containing: user input, `MEMORY.md` contents (cached in memory), conversation history, active task state, current tool list, any tool/reasoner results, and metadata (current time, etc.). The Talker formats this into a prompt; the Gateway has no knowledge of prompt format.
-4. **Memory file management.** Read `MEMORY.md` from disk at startup. Include its contents in every context package. Watch for file changes (user manual edits) and re-read on update. After each exchange, evaluate whether anything memory-worthy occurred; if yes, append new facts to `MEMORY.md` on disk and send the updated config to the Talker via `UpdatePersona`. The Talker has no filesystem access — the Gateway is the sole writer and reader of all persistent memory.
-5. **Persona file delivery.** Read `SOUL.md`, `IDENTITY.md`, and `MEMORY.md` at startup; bundle and send to Talker via gRPC `UpdatePersona`. Watch for file changes on all three and re-send on any update. The Talker has no filesystem access — the Gateway is the sole source of all persona and memory configuration.
+2. **Conversation history management.** Maintain the rolling conversation log (in-memory). Append new turns (user input + Talker response) after each exchange. Perform context window compaction: keep recent N turns in full, summarize older turns via background LLM call, discard beyond the summary horizon. Single continuous thread per user — no session management. This is distinct from the RAG memory store — history is the short-term rolling log; the RAG store is the distilled long-term knowledge base.
+3. **Context package assembly.** Before every Talker dispatch, assemble a structured context package containing: user input, the synthesized `memory_md` exported from the RAG store, per-turn `retrieval_results` from the hybrid retriever, conversation history, active task state, current tool list, any tool/reasoner results, and metadata (current time, etc.). The Talker formats this into a prompt; the Gateway has no knowledge of prompt format.
+4. **RAG memory management.** Own a SQLite database (`data/kaguya.db` by default) holding semantic memories with FTS5 BM25 indexes and optional vector embeddings. Per turn, run `RagEngine::retrieve(query)` to get top-k entries (BM25 + vector fused via RRF — see REF-007/008/009). Post-turn, run `evaluate_and_store(user_input, assistant_response)` to extract preference / fact / project / conversation memories from the exchange. The synthesized `memory_md` (user profile + project context + recent semantic memories) is recomputed and pushed to the Talker via `UpdatePersona` only when its content actually changes. The Talker has no filesystem access — the Gateway is the sole owner of the RAG store.
+5. **Persona file delivery.** Read `SOUL.md` and `IDENTITY.md` at startup; bundle them with the synthesized `memory_md` from the RAG store and send to Talker via gRPC `UpdatePersona`. Watch `SOUL.md` and `IDENTITY.md` for file changes and re-send on update; `memory_md` is re-pushed when post-turn evaluation changes it. The Talker has no filesystem access — the Gateway is the sole source of all persona and memory configuration.
 6. **Privilege management.** Enforce access control on tool invocations and agent spin-ups.
 7. **Poll Input Stream.** Continuously consume events from the priority queue.
 8. **Tool registry and dispatch.** Maintain the Toolkit registry. Dispatch tool calls received from the Talker. Return results as Input Stream events (P3, non-blocking). Manage MCP server connections and expose available MCP tools through the Tool Registry.
@@ -53,7 +53,7 @@ The Input Stream is a unified priority queue internal to the Gateway process. It
 | -------- | -------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | P0       | Control              | `STOP`, `APPROVAL`, `SHUTDOWN`                                                   | Bypass Input Stream entirely. Direct to Gateway event loop. No event may delay a STOP.                                                                                              |
 | P1       | Complete user intent | `final_transcript`, `text_command`                                               | Trigger context package assembly + Talker dispatch. Highest normal priority — shortest acceptable latency, triggers barge-in, can invalidate lower-priority work.                   |
-| P2       | Partial user signals | `partial_transcript`, `vad_speech_start`, `vad_speech_end`                       | `vad_speech_start` triggers PREPARE signal to Talker immediately. Partials feed speculative prefill (Phase 2). If P1 and P2 arrive simultaneously, P1 wins.                         |
+| P2       | Partial user signals | `partial_transcript`, `vad_speech_start`, `vad_speech_end`                       | `vad_speech_start` triggers an inline barge-in (`TalkerInput.barge_in`) on the active Converse stream. Partials feed speculative prefill (Phase 2). If P1 and P2 arrive simultaneously, P1 wins. |
 | P3       | Async results        | `reasoner_intermediate_step`, `reasoner_output`, `tool_result`, `reasoner_error` | Results from work Kaguya initiated. Trigger new inference rounds. Never preempt the user — if a tool result arrives while user is mid-sentence (P1/P2 in queue), tool result waits. |
 | P4       | Timed                | `silence_exceeded(duration)`, `scheduled_reminder`, `memory_trigger`             | Self-generated. Speculative — moot if user is speaking (P1/P2 in queue) or a tool result is pending (P3). Only act when queue is otherwise quiet.                                   |
 | P5       | Ambient              | `openpod_telemetry`, `screen_context_change`, MCP triggers                       | Background context. Process when truly idle. Never trigger immediate action.                                                                                                        |
@@ -81,94 +81,90 @@ Within a priority level, events are FIFO. Across levels, higher priority preempt
 
 ## 4. Memory System
 
-### 4.1 Phase 1: File-Based Memory (MEMORY.md)
+### 4.1 Hybrid RAG (SQLite + FTS5 BM25 + optional vector)
 
-Phase 1 uses a plain-text file (`MEMORY.md`) managed entirely by the Gateway. ChromaDB is deferred to Phase 2.
+Kaguya's memory layer is implemented in [gateway/src/rag/](../gateway/src/rag) as `RagEngine`. It is a hybrid retrieval system, not a flat file.
 
-**Rationale:** ChromaDB is a full vector database — a separate Docker container, an embedding model dependency, an HTTP service process, and network latency on every query. Kaguya's Phase 1 memory needs are small: a few dozen project facts, a user profile, and recent conversational context. At that scale, vector similarity search adds complexity with no benefit. A file read takes ~1ms and gives the LLM the full memory context on every turn — including connections that similarity search might miss. It is also directly human-readable and editable.
+**Storage:** A single SQLite database (default `data/kaguya.db`, configurable via `[rag] db_path`). Schema:
+- `memories` — id, content, memory_type (`conversation` | `fact` | `preference` | `project`), source (turn id), timestamps
+- `memories_fts` — FTS5 virtual table mirroring `memories.content` for BM25 search; tokenizer `porter unicode61` (REF-009)
+- `embeddings` — optional vector blobs (one per memory) populated by an incremental background embedder
+- `user_profile`, `projects` — keyed structured tables used to synthesize the `memory_md` document
 
-**Structure:** A structured markdown file managed by the Gateway. Example:
+**Retrieval (per turn):** `RagEngine::retrieve(query)` runs:
+1. BM25 against `memories_fts` (always available)
+2. Cosine similarity over `embeddings` (only if an embedder is configured)
+3. Reciprocal Rank Fusion (RRF, k=60 — REF-007) merges the two rankings
+4. Result truncated to `top_k` (default 10 — REF-008)
 
-```markdown
-## User Profile
+The fused list is delivered to the Talker as `TalkerContext.retrieval_results` — a list of `{id, content, source ("bm25" | "vector"), score}`. The Talker prompt formatter renders these in a "Relevant context retrieved from memory" system block.
 
-- Name: Sebastian
-- Working on: Goedel pipeline, Kaguya, OpenPod
-- Prefers: concise responses, technical depth
+**Post-turn ingestion:** `RagEngine::evaluate_and_store(user_input, assistant_response, turn_id)` runs simple keyword-trigger extraction (English + Chinese) to classify each exchange as `Preference`, `Fact`, `Project`, or generic `Conversation`, and inserts the entries into `memories`. The optional embedder is woken up via `Notify` and back-fills vectors for new entries asynchronously.
 
-## Project Context
+**Synthesized `memory_md`:** `RagEngine::export_memory_md()` renders the structured tables (user profile, projects) and the most recent semantic memories (conversations + facts) as a single markdown document. This is what the Gateway sends to the Talker via `UpdatePersona`.
 
-- Goedel pipeline: runs nightly at 2am, owned by infra team
-- OpenPod: Rust-based transport layer, protobuf protocol
-- Kaguya: this project, voice-first AI Chief of Staff
-
-## Recent Context
-
-- [2026-03-09] Discussed Phase 1 architecture, finalized PREPARE signal model
-- [2026-03-08] Evaluated Airi project, adopted soul container pattern
-- [2026-03-07] Goedel pipeline had a config issue, resolved by infra team
-```
-
-**Memory ownership:** The Gateway is the sole owner of `MEMORY.md` — both reads and writes. The Talker never touches the filesystem.
+**Embedder (optional):** [gateway/src/rag/embedder.rs](../gateway/src/rag/embedder.rs) is a long-running task that polls for unembedded rows and POSTs them to a local OpenAI-compatible `/v1/embeddings` endpoint. Configurable via `[rag] embedding_url`. Disabled = BM25-only retrieval.
 
 ### 4.2 Dual Memory Structure
 
-| Memory Type                           | Contents                                                                      | Phase 1 Implementation                                                                                        |
-| ------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| **Long-term (MEMORY.md)**             | User profile, project facts, architectural rules, distilled long-term context | File read at startup; injected into every context package; appended post-turn when memory-worthy events occur |
-| **Short-term (conversation history)** | Recent turns, rolling log, compacted older turns                              | In-memory state in Gateway; included in context package                                                       |
+| Memory Type                           | Contents                                                                          | Implementation                                                                                                                          |
+| ------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **Long-term (RAG store)**             | User profile, project facts, semantic memories from past turns (conversation/fact/preference/project) | SQLite `memories` table with FTS5 BM25 + optional vector embeddings; queried per turn for top-k; synthesized to `memory_md` for Talker  |
+| **Short-term (conversation history)** | Recent turns, rolling log, compacted older turns                                  | In-memory state in Gateway (`History`); included in context package                                                                      |
 
-### 4.3 Memory Hydration Flow (Phase 1)
+### 4.3 Memory Hydration Flow
 
 ```
 Startup:
-  Gateway reads SOUL.md, IDENTITY.md, MEMORY.md from disk
-  Gateway bundles all three → sends to Talker via UpdatePersona gRPC
+  Gateway opens data/kaguya.db (creates schema if missing)
+  Gateway reads SOUL.md, IDENTITY.md from disk
+  Gateway calls RagEngine::export_memory_md() → synthesized memory_md
+  Gateway sends {soul, identity, memory_md} → Talker via UpdatePersona gRPC
 
 Every turn:
-  final_transcript arrives → Gateway assembles context package:
-    → MEMORY.md contents (already in memory, ~1ms file-read at startup)
+  final_transcript arrives → Gateway runs RagEngine::retrieve(text)
+                          → assembles context package:
+    → memory_md (cached from last UpdatePersona)
+    → retrieval_results (per-turn RAG hits)
     → Conversation history (in-memory)
     → User input, tools, metadata
-  → Gateway forwards context package to Talker
-  → Talker formats prompt with memory already included
+  → Gateway forwards context package to Talker (Converse stream)
 
-User manually edits MEMORY.md:
+User edits SOUL.md or IDENTITY.md:
   Gateway file watcher detects change
-  Gateway re-reads MEMORY.md
-  Gateway sends updated config to Talker via UpdatePersona gRPC
+  Gateway re-reads SOUL.md / IDENTITY.md
+  Gateway sends updated config (with current memory_md) to Talker via UpdatePersona
+  (memory_md is NOT a watched file — it's synthesized from the RAG store)
 ```
 
 ### 4.4 Memory Indexing (Post-Turn)
 
 ```
-Talker completes response → signals Gateway "response complete"
+Talker completes response → ResponseComplete arrives
   → Gateway appends new turn to conversation history (in-memory):
       { user: "Can you check the Goedel pipeline status",
         assistant: "The pipeline is healthy — last run 2h ago." }
-  → Gateway evaluates: did anything memory-worthy happen?
-      (new project fact, preference expressed, significant event)
-    If yes → Gateway appends to MEMORY.md on disk
-             → Gateway sends updated config to Talker via UpdatePersona gRPC
-  → Gateway performs history compaction if needed (background LLM call)
+  → Gateway calls RagEngine::evaluate_and_store(user, assistant, turn_id):
+      keyword-trigger extraction → 0..N MemoryEntry rows inserted
+      embedder.wake() → background task back-fills vectors
+  → Gateway calls export_memory_md() and compares against last sent.
+    If changed → Gateway sends updated PersonaConfig via UpdatePersona
   → Gateway sends updated context package to Talker for prefix prefill
 ```
 
-### 4.5 Phase 2: ChromaDB Vector Store
+### 4.5 Future evolution
 
-When `MEMORY.md` grows to the point where its full content consumes too many context window tokens, episodic memory migrates to ChromaDB:
-
-- **ChromaDB** handles episodic memory (past conversations, preferences, emotional context) via vector similarity search.
-- **MEMORY.md** is retained for semantic facts (user profile, project knowledge) — this stays small and fits in context indefinitely.
-- The Gateway gains an async HTTP client (`reqwest`) to ChromaDB.
-- RAG queries fire on `final_transcript`; pre-emptive queries fire on `partial_transcript`.
-- ChromaDB target: <100K entries, <50-100ms query latency under voice pipeline load.
+Phase-1 trigger-based extraction is intentionally crude. Anticipated upgrades (none of which require breaking the storage format):
+- LLM-based extraction (a small local model evaluates "is this exchange memory-worthy?" and produces a structured summary).
+- Re-ranking after RRF fusion using a cross-encoder.
+- Embedding back-end choices: local server, hosted (Voyage/OpenAI), or on-device.
+- Migration of `memories` to a dedicated vector store (sqlite-vss extension or external service) when corpus exceeds ~100k entries.
 
 ---
 
-## 5. Turn Lifecycle (Unified PREPARE Signal)
+## 5. Turn Lifecycle (Inline Barge-In on Converse Stream)
 
-Every turn begins the same way, regardless of whether the Talker is currently speaking or idle. There is no special "barge-in" mode.
+Every turn begins the same way, regardless of whether the Talker is currently speaking or idle. There is no special "barge-in" mode — barge-in is just a `TalkerInput.barge_in` message on the active Converse bidi stream.
 
 ### 5.1 Voice Input Flow
 
@@ -177,23 +173,24 @@ EVERY turn, regardless of whether Talker is speaking or idle:
 
   t=0ms    Listener: VAD speech onset → vad_speech_start [P2] → Input Stream
   t=1ms    Gateway:  Processes vad_speech_start
-                     → Sends PREPARE signal to Talker (gRPC, fire-and-forget)
-                     → Cancels active silence timers
+                     → Sends TalkerInput.barge_in on the active Converse stream
+                       (fire-and-forget; no-op if no active stream)
+                     → Mutes audio output, cancels active silence timers
 
-  t=1ms    Talker receives PREPARE:
+  t=1ms    Talker receives BargeInSignal:
                      IF speaking:
                        → Stop TTS playback (mid-word if necessary)
                        → Cancel in-flight LLM generation
-                       → Send partial_response metadata to Gateway:
-                         { spoken: "Got it. The pipeline is health",
-                           unspoken: "y — last run was two hours ago." }
-                       → Now idle, waiting for next context package
+                       → Emit BargeInAck on the same stream:
+                         { spoken_text: "Got it. The pipeline is health",
+                           unspoken_text: "y — last run was two hours ago." }
+                       → ResponseComplete { was_interrupted = true } follows
                      IF idle:
-                       → No-op (Talker already ready from prefix prefill)
+                       → No-op (no active Converse stream → barge_in finds None)
 
-  t=1ms    Gateway:  IF received partial_response from Talker:
-                       → Append truncated response (spoken portion only) to history
-                       → Discard unspoken text
+  t=1ms    Gateway:  IF BargeInAck received:
+                       → Append spoken_text to conversation history
+                       → Discard unspoken_text
                      → Stops muxing Talker audio to OpenPod Channel D
 
   t=50ms+  Listener: partial_transcript events [P2] → Input Stream
@@ -201,8 +198,9 @@ EVERY turn, regardless of whether Talker is speaking or idle:
 
   t=500ms+ Listener: final_transcript [P1] → Input Stream
   t=501ms  Gateway:  Processes final_transcript
-                     → Assembles context package (MEMORY.md contents already
-                       cached in memory, history, tools, input — no query needed)
+                     → RagEngine::retrieve(text) — BM25 (+ vector) + RRF
+                     → Assembles context package (cached memory_md, fresh
+                       retrieval_results, history, tools, input)
                      → Dispatches context package to Talker
 
   t=502ms  Talker:   Formats prompt → LLM → soul container → TTS → Channel D
@@ -307,7 +305,7 @@ The Gateway orchestrates the three phases of Deliberative Narration during slow-
 
 The Gateway triggers two phases of KV cache prefill.
 
-**Phase 1 — Always-On Prefix Prefill.** Immediately after the Talker finishes generating a response for turn N, the Gateway sends an updated context package to the Talker marked as prefill-only (`n_predict: 0`, `cache_prompt: true`). The GPU is idle between turns — this costs nothing. Cache invalidation: if memory context changes between turns (e.g., a Reasoner completes and the Gateway appends new facts to `MEMORY.md` and sends an `UpdatePersona`), the Gateway signals the Talker to re-trigger prefix prefill with the updated context.
+**Phase 1 — Always-On Prefix Prefill.** Immediately after the Talker finishes generating a response for turn N, the Gateway sends an updated context package to the Talker marked as prefill-only (`n_predict: 0`, `cache_prompt: true`). The GPU is idle between turns — this costs nothing. Cache invalidation: if memory context changes between turns (e.g., the post-turn `RagEngine::evaluate_and_store` adds entries that change the synthesized `memory_md`, or a Reasoner completes), the Gateway sends an `UpdatePersona` followed by a fresh `PrefillCache` call.
 
 **Phase 2 — Partial Transcript Prefill.** The Gateway forwards each `partial_transcript` event to the Talker as an incremental prefill request, extending the cached prefix word-by-word during user speech.
 
@@ -394,38 +392,42 @@ The Gateway enforces the workspace root and manages all Toolkit tools.
 
 ## 15. IPC Protocol
 
-gRPC with Protocol Buffers over Unix domain sockets. Schema enforcement catches cross-language breakage at compile time.
+gRPC with Protocol Buffers. Audio is the one exception — it rides a raw length-prefixed TCP socket so 50fps Opus frames never enter protobuf serialization (architecture invariant).
 
 ```protobuf
+// Listener: Gateway = client, Listener = server (role-flipped from earlier draft).
 service ListenerService {
-  rpc StreamEvents(stream ListenerEvent) returns (ListenerAck);
+  rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
 }
 
+// Talker: Gateway = client, Talker = server.
 service TalkerService {
-  // Gateway dispatches context package for LLM inference
-  rpc ProcessPrompt(TalkerContext) returns (stream TalkerOutput);
-  // Gateway signals new turn (cancel if busy, warm up if idle)
-  // PrepareAck carries partial_response when Talker was mid-speech:
-  //   { spoken_text: string, unspoken_text: string }
-  // Both fields are empty if Talker was already idle.
-  rpc Prepare(PrepareSignal) returns (PrepareAck);
-  // Gateway sends prefill-only context (no generation)
+  // Bidi: Gateway sends TalkerInput.start (context) to begin generation, then
+  // optionally TalkerInput.barge_in to interrupt mid-stream. Talker streams
+  // back TalkerOutput including BargeInAck { spoken_text, unspoken_text } when
+  // a barge-in interrupts mid-speech. Both fields are empty if Talker was
+  // already idle when the BargeIn arrived.
+  rpc Converse(stream TalkerInput) returns (stream TalkerOutput);
+  // Speculative prefix prefill (no generation).
   rpc PrefillCache(PrefillRequest) returns (PrefillAck);
-  // Gateway delivers persona config at startup and on change
+  // Persona delivery — soul_md + identity_md + RAG-synthesized memory_md.
   rpc UpdatePersona(PersonaConfig) returns (PersonaAck);
 }
 
+// Reasoner: Gateway = client, Reasoner = server.
 service ReasonerService {
-  rpc ExecuteTask(TaskRequest) returns (stream ReasonerEvent);
-  rpc CancelTask(CancelRequest) returns (CancelAck);
+  rpc Delegate(stream DelegateInput) returns (stream DelegateOutput);
+  rpc Interrupt(InterruptRequest) returns (InterruptAck);
+  rpc Telemetry(TelemetrySubscribe) returns (stream TelemetryEvent);
 }
 
+// Endpoint → Gateway control plane.
 service RouterControlService {
   rpc SendControl(ControlSignal) returns (ControlAck);
 }
 ```
 
-Audio frames use a dedicated low-overhead path (raw bytes over Unix socket or minimal-wrapping gRPC stream) to avoid protobuf overhead at 50fps.
+Audio frames flow on a dedicated raw TCP socket from Gateway to Listener at `listener_audio_addr:listener_audio_port`. The Gateway writes `[u32 BE length][bytes]` records; the Listener decodes Opus and feeds RealtimeSTT.
 
 ---
 
@@ -436,9 +438,9 @@ Audio frames use a dedicated low-overhead path (raw bytes over Unix socket or mi
 | Language                                   | Rust                                                                                                                   |
 | Async runtime                              | `tokio` single-threaded async                                                                                          |
 | gRPC server                                | `tonic`                                                                                                                |
-| File I/O (MEMORY.md, SOUL.md, IDENTITY.md) | `tokio::fs` + file watcher                                                                                             |
-| HTTP client (ChromaDB — Phase 2)           | `reqwest` (async)                                                                                                      |
-| IPC transport                              | Unix domain sockets                                                                                                    |
+| File I/O (SOUL.md, IDENTITY.md)            | `tokio::fs` + `notify` file watcher                                                                                    |
+| RAG store                                  | `rusqlite` (bundled SQLite) + FTS5 BM25 + optional embedder via `reqwest`                                              |
+| IPC transport                              | TCP for Phase 1 (cross-platform); Unix domain sockets re-evaluated when ready                                          |
 | OpenPod connection                         | TCP/local socket per OpenPod spec                                                                                      |
 | State                                      | In-memory state machine: conversation history, active tasks, pending timers, tool list, cached persona + memory config |
 
@@ -467,14 +469,14 @@ Audio frames use a dedicated low-overhead path (raw bytes over Unix socket or mi
 - Event loop, priority queue, silence timers.
 - **Local endpoint I/O via dev-GUI/TUI** (audio, text, control — simple local interface, no OpenPod protocol).
 - Context package assembly and Talker dispatch.
-- File-based memory: read `MEMORY.md`, `SOUL.md`, `IDENTITY.md` at startup; bundle and deliver to Talker via `UpdatePersona`. File watcher for all three; re-send on change.
-- Post-turn memory evaluation: append memory-worthy facts to `MEMORY.md`; send updated config to Talker.
+- RAG memory: open `data/kaguya.db` (SQLite + FTS5) at startup; per-turn retrieval via `RagEngine::retrieve`; synthesize `memory_md` via `RagEngine::export_memory_md`. Optional background embedder for vector similarity.
+- Post-turn memory evaluation: `RagEngine::evaluate_and_store` extracts preference / fact / project / conversation entries; updated `memory_md` pushed via `UpdatePersona` only when content changes.
 - Conversation history management (in-memory rolling log, compaction).
-- Persona file delivery (`SOUL.md` + `IDENTITY.md` + `MEMORY.md`) to Talker at startup and on change.
+- Persona file delivery (`SOUL.md` + `IDENTITY.md` + RAG-synthesized `memory_md`) to Talker at startup and on change. File watcher tracks `SOUL.md` and `IDENTITY.md`.
 - Tool dispatch (Toolkit registry, sandboxed TypeScript).
 - Reasoner lifecycle management (spawn, monitor, cancel).
 - Reasoner output filtering and narration dispatch.
-- PREPARE signal dispatch on `vad_speech_start` and `text_command`.
+- Inline barge-in dispatch (`TalkerInput.barge_in`) on `vad_speech_start` and `text_command`.
 - Always-on prefix prefill trigger (post-turn).
 - Silence timer management.
 - Workspace root enforcement.
@@ -483,10 +485,10 @@ Audio frames use a dedicated low-overhead path (raw bytes over Unix socket or mi
 ### Phase 2 Deliverables (Gateway scope)
 
 - **OpenPod protocol integration** — replace dev-GUI/TUI local interface with OpenPod demux/mux (Channel A metadata, Channel D audio, Control channel, telemetry P5 events).
-- ChromaDB vector store for episodic memory (when `MEMORY.md` exceeds context window budget).
-- Pre-emptive RAG on `partial_transcript` events (ChromaDB queries during user speech).
+- LLM-based memory extraction replacing the keyword-trigger heuristic in `RagEngine::extract_memories`.
+- Pre-emptive RAG retrieval on `partial_transcript` events (during user speech).
 - Partial transcript prefill forwarding to Talker.
-- Two-stage PREPARE signal (soft fade / hard stop).
+- Two-stage barge-in (soft fade / hard stop).
 - Tool Search Tool for large MCP registries.
 - Programmatic Tool Calling (multi-tool scripts in sandboxed environment).
 - User host ambient telemetry ingestion from OpenPod (P5 events).
@@ -495,8 +497,8 @@ Audio frames use a dedicated low-overhead path (raw bytes over Unix socket or mi
 
 ## 18. Open Questions (Gateway-Relevant)
 
-- **MEMORY.md growth threshold.** At what entry count does `MEMORY.md` consume enough context window tokens to justify migrating to ChromaDB? Needs empirical measurement against Qwen3-8B's context window and prompt structure.
-- **Post-turn memory evaluation heuristic.** What criteria does the Gateway use to decide if something is "memory-worthy"? Rule-based (new project name, preference expressed) vs. a lightweight LLM classification call. Needs design.
+- **RAG store growth threshold.** At what entry count does the SQLite `memories` corpus need a dedicated vector backend (sqlite-vss, external store) to keep query latency under voice-pipeline budgets? Needs empirical measurement.
+- **Post-turn memory evaluation heuristic.** Phase 1 uses keyword triggers in `RagEngine::extract_memories`. When and how to swap in a small LLM classifier without blocking the post-turn prefill window?
 - **OpenPod audio integration.** Opus frame handling within OpenPod's existing Raw channel needs implementation. Verify that protobuf wrapping overhead at 50fps (~20ms per frame) is negligible compared to frame processing time.
 - **Speculative prefill invalidation.** Strategy when user's meaning reverses at end of utterance. How to efficiently discard/rebuild KV cache state signaled to Talker.
 - **GPU contention profiling.** VRAM budget fits on paper. Actual compute contention needs empirical benchmarking (faster-whisper + llama.cpp + Kokoro concurrent on RTX 5070 Ti).
