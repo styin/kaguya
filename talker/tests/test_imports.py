@@ -137,7 +137,10 @@ def test_proto_stubs_importable():
 #
 # Audio flows over a separate raw TCP socket; the proto previously advertised
 # in-band audio (`ListenerInput.audio` / `AudioChunk`) which `ListenerService`
-# silently ignored. Schema must match implementation: drop the dead messages.
+# silently ignored. Schema must match implementation: the message and the
+# variant are both removed. This is a deliberate breaking proto change;
+# `buf breaking` will flag MESSAGE_NO_DELETE and FIELD_NO_DELETE on the
+# baseline-vs-this comparison — accepted for this PR.
 
 
 def test_proto_does_not_export_audiochunk():
@@ -153,7 +156,8 @@ def test_proto_does_not_export_audiochunk():
 
 def test_listener_input_payload_has_no_audio_field():
     """ListenerInput's payload oneof must only carry control signals;
-    the `audio` variant must be removed."""
+    the `audio` variant must be removed so clients can't send audio over
+    gRPC by mistake."""
     from proto import kaguya_pb2  # type: ignore[import]
 
     msg = kaguya_pb2.ListenerInput()

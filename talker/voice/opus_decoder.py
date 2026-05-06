@@ -23,8 +23,8 @@ elif sys.platform == "darwin":
     _existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
     _extra = [d for d in _brew_lib_dirs if d not in _existing.split(":")]
     if _extra:
-        os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = (
-            ":".join(_extra + ([_existing] if _existing else []))
+        os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(
+            _extra + ([_existing] if _existing else [])
         )
 
 import opuslib

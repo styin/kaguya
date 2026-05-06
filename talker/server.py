@@ -5,9 +5,12 @@ Gateway opens a Converse bidi stream per turn:
   Talker → Gateway: TalkerOutput stream (sentences, emotions, tools, etc.)
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, Generator
+from typing import TYPE_CHECKING
 
 import grpc
 
@@ -21,9 +24,15 @@ from inference.soul_container import (
     parse_identity_config,
     process as soul_process,
 )
-from voice.speaker import Speaker
 
 from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
+
+if TYPE_CHECKING:
+    # `Speaker` transitively imports RealtimeTTS, which the CI test environment
+    # intentionally omits (CUDA dep). Tests pass a MagicMock in its place.
+    # Type-only at module load time; real callers (main.py) construct a real
+    # Speaker and pass it in.
+    from voice.speaker import Speaker
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +83,8 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                         kaguya_pb2.TalkerOutput(
                             seq=0,
                             barge_in_ack=kaguya_pb2.BargeInAck(
-                                spoken_text=spoken, unspoken_text=unspoken,
+                                spoken_text=spoken,
+                                unspoken_text=unspoken,
                             ),
                         )
                     )
@@ -129,7 +139,9 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                 sentence = detector.feed(token)
                 if sentence is not None:
                     sentence_count += 1
-                    for out in _emit_sentence(sentence, self._identity, self._speaker, seq):
+                    for out in _emit_sentence(
+                        sentence, self._identity, self._speaker, seq
+                    ):
                         seq = out.seq
                         await output_queue.put(out)
                     if sentence_count >= self._config.max_response_sentences:
@@ -141,7 +153,9 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
             if not was_interrupted:
                 remainder = detector.flush()
                 if remainder and sentence_count < self._config.max_response_sentences:
-                    for out in _emit_sentence(remainder, self._identity, self._speaker, seq):
+                    for out in _emit_sentence(
+                        remainder, self._identity, self._speaker, seq
+                    ):
                         seq = out.seq
                         await output_queue.put(out)
 
@@ -157,7 +171,8 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
             kaguya_pb2.TalkerOutput(
                 seq=seq,
                 response_complete=kaguya_pb2.ResponseComplete(
-                    turn_id=turn_id, was_interrupted=was_interrupted,
+                    turn_id=turn_id,
+                    was_interrupted=was_interrupted,
                 ),
             )
         )
@@ -176,7 +191,9 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         self._identity = parse_identity_config(request.identity_md or "")
         logger.info(
             "Persona updated (soul=%d, identity=%d, memory=%d bytes)",
-            len(request.soul_md), len(request.identity_md), len(request.memory_md),
+            len(request.soul_md),
+            len(request.identity_md),
+            len(request.memory_md),
         )
         return kaguya_pb2.PersonaAck()
 
@@ -185,19 +202,24 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
 
 
 def _emit_sentence(
-    sentence: str, identity: IdentityConfig, speaker: Speaker, seq: int,
+    sentence: str,
+    identity: IdentityConfig,
+    speaker: Speaker,
+    seq: int,
 ) -> Generator[kaguya_pb2.TalkerOutput, None, None]:
     result: SoulContainerResult = soul_process(sentence, identity)
     if result.spoken_text:
         speaker.speak(result.spoken_text)
     seq += 1
     yield kaguya_pb2.TalkerOutput(
-        seq=seq, sentence=kaguya_pb2.SentenceEvent(text=result.spoken_text),
+        seq=seq,
+        sentence=kaguya_pb2.SentenceEvent(text=result.spoken_text),
     )
     for emotion in result.emotions:
         seq += 1
         yield kaguya_pb2.TalkerOutput(
-            seq=seq, emotion=kaguya_pb2.EmotionEvent(emotion=emotion),
+            seq=seq,
+            emotion=kaguya_pb2.EmotionEvent(emotion=emotion),
         )
     for tool_req in result.tool_requests:
         seq += 1

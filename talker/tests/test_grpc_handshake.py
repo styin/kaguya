@@ -134,8 +134,10 @@ async def test_second_stream_terminates_first():
 
     server, port = await _start_server(register)
     try:
-        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_a, \
-                   grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_b:
+        async with (
+            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_a,
+            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_b,
+        ):
             stub_a = kaguya_pb2_grpc.ListenerServiceStub(ch_a)
             stub_b = kaguya_pb2_grpc.ListenerServiceStub(ch_b)
 
@@ -181,9 +183,7 @@ async def test_second_stream_terminates_first():
                     f"client A must be terminated; instead read: {a_next}"
                 )
             except (asyncio.TimeoutError, grpc.aio.AioRpcError):
-                pytest.fail(
-                    "client A must be cleanly terminated, not left hanging"
-                )
+                pytest.fail("client A must be cleanly terminated, not left hanging")
 
             call_b.cancel()
     finally:
@@ -206,8 +206,10 @@ async def test_replaced_stream_event_goes_to_live_client_only():
 
     server, port = await _start_server(register)
     try:
-        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_a, \
-                   grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_b:
+        async with (
+            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_a,
+            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_b,
+        ):
             stub_a = kaguya_pb2_grpc.ListenerServiceStub(ch_a)
             stub_b = kaguya_pb2_grpc.ListenerServiceStub(ch_b)
 

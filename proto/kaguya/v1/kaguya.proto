@@ -36,9 +36,6 @@ message ToolDefinition {
 // HTTP/2 framing adds head-of-line blocking that voice latency can't
 // afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
 // `gateway/src/listener.rs`.
-//
-// Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
-// reuse, in case the audio path ever moves back in-band.
 
 service ListenerService {
   // Bidi: Gateway sends control signals; Listener streams ASR events.
@@ -46,8 +43,13 @@ service ListenerService {
 }
 
 message ListenerInput {
+  // Field 1 (was `AudioChunk audio`) is reserved. The audio variant was
+  // removed because the Listener server never read it — audio flows over
+  // the raw TCP socket. Do not reuse tag 1 in case the audio path ever
+  // moves back in-band.
+  reserved 1;
+  reserved "audio";
   oneof payload {
-    // Tag 1 reserved (was AudioChunk). Audio flows over the raw TCP socket.
     ListenerControl  control = 2;
   }
 }

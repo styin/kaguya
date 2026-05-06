@@ -37,9 +37,6 @@ class ListenerServiceStub:
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
     `gateway/src/listener.rs`.
-
-    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
-    reuse, in case the audio path ever moves back in-band.
     """
 
     @_typing.overload
@@ -61,9 +58,6 @@ class ListenerServiceAsyncStub(ListenerServiceStub):
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
     `gateway/src/listener.rs`.
-
-    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
-    reuse, in case the audio path ever moves back in-band.
     """
 
     def __init__(self, channel: _aio.Channel) -> None: ...
@@ -81,9 +75,6 @@ class ListenerServiceServicer(metaclass=_abc_1.ABCMeta):
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
     `gateway/src/listener.rs`.
-
-    Tag 1 in `ListenerInput.payload` is reserved (was `AudioChunk`); do not
-    reuse, in case the audio path ever moves back in-band.
     """
 
     @_abc_1.abstractmethod

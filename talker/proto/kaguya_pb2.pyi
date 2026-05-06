@@ -97,9 +97,7 @@ class ListenerInput(_message.Message):
 
     CONTROL_FIELD_NUMBER: _builtins.int
     @_builtins.property
-    def control(self) -> Global___ListenerControl:
-        """Tag 1 reserved (was AudioChunk). Audio flows over the raw TCP socket."""
-
+    def control(self) -> Global___ListenerControl: ...
     def __init__(
         self,
         *,

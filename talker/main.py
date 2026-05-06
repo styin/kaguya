@@ -5,11 +5,6 @@ import logging
 
 import grpc
 
-from config import TalkerConfig
-from server import TalkerServiceServicer
-from voice.listener import Listener, ListenerServiceImpl
-from voice.speaker import Speaker
-
 from proto import kaguya_pb2_grpc  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
@@ -36,6 +31,16 @@ def _bind_or_raise(server: grpc.aio.Server, addr: str, name: str) -> int:
 
 
 async def main() -> None:
+    # Heavy deps imported lazily so `from main import _bind_or_raise` (used
+    # by tests/test_main_bind.py) doesn't transitively pull in RealtimeTTS
+    # — the CI test environment intentionally omits RealtimeSTT/RealtimeTTS
+    # to skip CUDA setup. Real runs always reach this code path and import
+    # everything normally.
+    from config import TalkerConfig
+    from server import TalkerServiceServicer
+    from voice.listener import Listener, ListenerServiceImpl
+    from voice.speaker import Speaker
+
     config = TalkerConfig()
     logging.basicConfig(
         level=getattr(logging, config.log_level.upper(), logging.INFO),
@@ -54,16 +59,24 @@ async def main() -> None:
     kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(talker_servicer, talker_server)
     talker_port = _bind_or_raise(talker_server, config.talker_listen_addr, "Talker")
     await talker_server.start()
-    logger.info("Talker gRPC listening on %s (port=%d)", config.talker_listen_addr, talker_port)
+    logger.info(
+        "Talker gRPC listening on %s (port=%d)", config.talker_listen_addr, talker_port
+    )
 
     # ── Listener gRPC server (Gateway connects to us as client) ──
     listener_server = grpc.aio.server()
     kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
         listener_servicer, listener_server
     )
-    listener_port = _bind_or_raise(listener_server, config.listener_grpc_addr, "Listener")
+    listener_port = _bind_or_raise(
+        listener_server, config.listener_grpc_addr, "Listener"
+    )
     await listener_server.start()
-    logger.info("Listener gRPC listening on %s (port=%d)", config.listener_grpc_addr, listener_port)
+    logger.info(
+        "Listener gRPC listening on %s (port=%d)",
+        config.listener_grpc_addr,
+        listener_port,
+    )
 
     # ── Start Listener (audio socket + RealtimeSTT) ──
     listener_task = asyncio.create_task(listener.run())
