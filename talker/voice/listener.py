@@ -153,7 +153,8 @@ class Listener:
     async def _handle_audio_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        logger.info("Audio client connected")
+        codec = self._config.audio_input_codec
+        logger.info("Audio client connected (codec=%s)", codec)
         try:
             while True:
                 length_bytes = await reader.readexactly(4)
@@ -161,7 +162,11 @@ class Listener:
                 if length == 0:
                     break
                 frame = await reader.readexactly(length)
-                pcm = self._opus.decode(frame)
+                if codec == "opus":
+                    pcm = self._opus.decode(frame)
+                else:
+                    # Raw PCM int16 LE 16kHz mono — feed directly.
+                    pcm = frame
                 if pcm and self._recorder is not None:
                     self._recorder.feed_audio(pcm)
         except (asyncio.IncompleteReadError, ConnectionResetError):

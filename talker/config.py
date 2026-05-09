@@ -26,6 +26,10 @@ class TalkerConfig(BaseSettings):
     listener_grpc_addr: str = "0.0.0.0:50055"
     listener_audio_addr: str = "0.0.0.0"
     listener_audio_port: int = 50056
+    # Wire format for audio frames on the listener audio socket. The dev
+    # console sends raw PCM (int16 LE 16kHz mono); a future OpenPod /
+    # Discord-harness sender will use Opus.
+    audio_input_codec: str = "pcm"  # "pcm" | "opus"
     # Reconnect settings (for Listener→Gateway gRPC, kept for harness compat)
     gateway_reconnect_initial_s: float = 1.0
     gateway_reconnect_multiplier: float = 2.0
