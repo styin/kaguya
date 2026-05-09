@@ -367,3 +367,30 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 ---
 
 _Add new entries below this line. Format: `## REF-NNN — Short Title (component, milestone)`_
+
+## REF-011 — reqwest TLS Backend: None for Phase 1 (Gateway, RAG embedder)
+
+**Decision:** `reqwest` in `gateway/Cargo.toml` is configured with `default-features = false, features = ["json", "http2"]` — no TLS backend compiled in. The single call site (`gateway/src/rag/embedder.rs`) posts to a localhost embedding server (`http://127.0.0.1:8081/v1/embeddings` by default).
+
+**Rationale:**
+
+1. **No TLS in the actual data path.** The embedder is the only `reqwest` consumer in the gateway, and the configured endpoint is loopback HTTP. A TLS backend is dead code for the current deployment.
+
+2. **Contributor portability.** `reqwest`'s default `default-tls` enables `native-tls` → `openssl-sys`, which links against system OpenSSL via `pkg-config`. On Linux that requires `libssl-dev` (headers + `openssl.pc`); on macOS, Homebrew OpenSSL with `PKG_CONFIG_PATH` set; on Windows, vcpkg or perl-build OpenSSL. Dropping the TLS backend removes this system dependency entirely — `cargo build` works on any fresh dev machine with only the Rust toolchain. This matches the rest of the gateway: `tonic` is also on default features (no `tls` flag), so gRPC currently runs plain HTTP/2 over loopback as well.
+
+3. **Failure mode is loud, not silent.** If `embedding_url` is later set to `https://...` without re-enabling a TLS backend, `reqwest` errors immediately at request time with a "URL scheme is not allowed" / builder error — not a silent fallback. The misconfiguration surfaces on the first embedding request, in logs.
+
+4. **Reversibility is one line.** When TLS is needed (remote embedding endpoint, hosted service), swap to one of:
+
+   - `features = ["json", "http2", "rustls-tls"]` — pure-Rust, bundled Mozilla roots via `webpki-roots`. No system dep. Use `rustls-tls-native-roots` instead if corp-managed root CAs in the OS trust store must be honored.
+   - `features = ["json", "http2", "native-tls"]` — OS trust store, system OpenSSL. Requires `libssl-dev`/equivalent on each dev machine and CI image.
+
+   No source change in `embedder.rs` — `reqwest::Client::new()` and the `.post(...).json(...).send()` call sites are TLS-backend-agnostic.
+
+**Why not pick `rustls-tls` now as a hedge?** It would add `rustls`, `webpki-roots`, and ring/aws-lc-rs to the build — non-trivial compile time and binary size — to support a path nothing currently exercises. Cheaper to defer until the real requirement appears, at which point the trust-root choice (Mozilla bundle vs. OS roots) can be made with concrete context.
+
+**Sources:**
+
+- `reqwest` features documentation: https://docs.rs/reqwest/0.12/reqwest/#optional-features
+- `openssl-sys` build requirements: https://docs.rs/openssl/latest/openssl/#building
+- `rustls` vs `native-tls` trade-offs: https://github.com/rustls/rustls#project-goals (modern-only TLS, no OS keychain integration by default)
