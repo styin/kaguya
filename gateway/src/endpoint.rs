@@ -21,6 +21,7 @@ pub struct EndpointState {
     pub audio_out_rx: tokio::sync::Mutex<mpsc::Receiver<bytes::Bytes>>,
     pub metadata_rx: tokio::sync::Mutex<mpsc::Receiver<MetadataEvent>>,
     pub active_client: std::sync::Mutex<Option<CancellationToken>>,
+    pub listener_audio_tx: mpsc::Sender<bytes::Bytes>,
 }
 
 pub fn router(state: Arc<EndpointState>) -> Router {
@@ -69,8 +70,9 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
                     Some(Ok(Message::Text(json))) => {
                         handle_text_message(&json, &state).await;
                     }
-                    Some(Ok(Message::Binary(_data))) => {
-                        // G4 (v0.2): forward audio to Listener
+                    Some(Ok(Message::Binary(data))) => {
+                        // G4: forward raw audio bytes to Listener via Unix socket
+                        let _ = state.listener_audio_tx.send(bytes::Bytes::from(data)).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}

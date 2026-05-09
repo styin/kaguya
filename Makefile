@@ -1,26 +1,53 @@
-.PHONY: dev proto clean test
+# Cross-platform Make targets. Avoid GNU/BSD-specific tools (sed -i, etc.).
+# Anything non-trivial is delegated to a checked-in Python script.
 
-# Local development script
-dev:
-	./scripts/dev.sh
+PROTO_DIR  := proto
+PROTO_FILE := $(PROTO_DIR)/kaguya/v1/kaguya.proto
 
-# Generate Python protobuf bindings (dev only - stubs are committed for end users)
-# Rust stubs regenerate automatically via build.rs on next `cargo build`
-proto:
-	@echo "==> Regenerating Python proto stubs..."
+# ── Proto (Python) ──
+# Delegates to talker/scripts/gen_proto.py: generates flat-layout stubs into
+# talker/proto/, also writes mypy-protobuf .pyi stubs, and patches the gRPC
+# import to be relative. Pure Python — works on macOS, Linux, Windows.
+proto-py:
 	cd talker && uv run python scripts/gen_proto.py
-	@echo "==> Done. Rust stubs will regenerate automatically on next 'cargo build'."
 
+# ── Proto (Rust) ──
+# tonic-build in gateway/build.rs regenerates Rust stubs on every cargo build.
+proto-rs:
+	cd gateway && cargo build
+
+# ── Both ──
+proto: proto-py proto-rs
+
+# ── Tests ──
+# `npm test --if-present` silently skips when there's no test script —
+# reasoner is currently scaffolding only.
 test:
-	@echo "Running tests..."
-	cd gateway && cargo test
-	cd talker && uv run pytest
-	cd reasoner && npm test
-	cd tools && npm test
+	cd gateway  && cargo test
+	cd talker   && uv run pytest
+	cd reasoner && npm test --if-present
 
+# ── Lint ──
+# rustc/clippy strict, ruff for Python, buf for proto. Each tool only fails
+# the target if it itself is failing — install the tools you use.
+lint:
+	cd gateway && cargo build
+	cd talker  && uv run ruff check .
+	buf lint $(PROTO_DIR)
+
+# ── Format ──
+# Writes formatting changes in place. CI typically uses `--check` flavors
+# (cargo fmt --check, ruff format --check, buf format --diff) — see lint
+# semantics. This target is for local "fix it" runs.
+format:
+	cd gateway && cargo fmt
+	cd talker  && uv run ruff format .
+	buf format -w $(PROTO_DIR)
+
+# ── Clean ──
 clean:
-	@echo "Cleaning artifacts..."
 	cd gateway && cargo clean
 	rm -rf talker/.venv
 	rm -rf reasoner/node_modules
-	rm -rf tools/node_modules
+
+.PHONY: proto proto-py proto-rs test lint format clean

@@ -26,9 +26,16 @@ if _version_not_supported:
 
 
 class ListenerServiceStub(object):
-    """─────────────────────────────────────────────
-    LISTENER SERVICE  (Listener → Gateway)
-    ─────────────────────────────────────────────
+    """LISTENER SERVICE — Bidi streaming
+    Gateway = client, Listener = server
+
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
 
     """
 
@@ -38,22 +45,30 @@ class ListenerServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.StreamEvents = channel.stream_unary(
-                '/kaguya.v1.ListenerService/StreamEvents',
-                request_serializer=kaguya__pb2.ListenerEvent.SerializeToString,
-                response_deserializer=kaguya__pb2.ListenerAck.FromString,
+        self.Stream = channel.stream_stream(
+                '/kaguya.v1.ListenerService/Stream',
+                request_serializer=kaguya__pb2.ListenerInput.SerializeToString,
+                response_deserializer=kaguya__pb2.ListenerOutput.FromString,
                 _registered_method=True)
 
 
 class ListenerServiceServicer(object):
-    """─────────────────────────────────────────────
-    LISTENER SERVICE  (Listener → Gateway)
-    ─────────────────────────────────────────────
+    """LISTENER SERVICE — Bidi streaming
+    Gateway = client, Listener = server
+
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
 
     """
 
-    def StreamEvents(self, request_iterator, context):
-        """Missing associated documentation comment in .proto file."""
+    def Stream(self, request_iterator, context):
+        """Bidi: Gateway sends control signals; Listener streams ASR events.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -61,10 +76,10 @@ class ListenerServiceServicer(object):
 
 def add_ListenerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'StreamEvents': grpc.stream_unary_rpc_method_handler(
-                    servicer.StreamEvents,
-                    request_deserializer=kaguya__pb2.ListenerEvent.FromString,
-                    response_serializer=kaguya__pb2.ListenerAck.SerializeToString,
+            'Stream': grpc.stream_stream_rpc_method_handler(
+                    servicer.Stream,
+                    request_deserializer=kaguya__pb2.ListenerInput.FromString,
+                    response_serializer=kaguya__pb2.ListenerOutput.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -75,14 +90,21 @@ def add_ListenerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class ListenerService(object):
-    """─────────────────────────────────────────────
-    LISTENER SERVICE  (Listener → Gateway)
-    ─────────────────────────────────────────────
+    """LISTENER SERVICE — Bidi streaming
+    Gateway = client, Listener = server
+
+    Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
+    audio frames over a separate TCP socket (length-prefixed framing) at
+    `listener_audio_addr`. Reasoning: 50fps audio + protobuf serialization
+    overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
+    HTTP/2 framing adds head-of-line blocking that voice latency can't
+    afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
+    `gateway/src/listener.rs`.
 
     """
 
     @staticmethod
-    def StreamEvents(request_iterator,
+    def Stream(request_iterator,
             target,
             options=(),
             channel_credentials=None,
@@ -92,12 +114,12 @@ class ListenerService(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.stream_unary(
+        return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/kaguya.v1.ListenerService/StreamEvents',
-            kaguya__pb2.ListenerEvent.SerializeToString,
-            kaguya__pb2.ListenerAck.FromString,
+            '/kaguya.v1.ListenerService/Stream',
+            kaguya__pb2.ListenerInput.SerializeToString,
+            kaguya__pb2.ListenerOutput.FromString,
             options,
             channel_credentials,
             insecure,
@@ -110,9 +132,8 @@ class ListenerService(object):
 
 
 class TalkerServiceStub(object):
-    """─────────────────────────────────────────────
-    TALKER SERVICE  (Gateway → Talker)
-    ─────────────────────────────────────────────
+    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    Gateway = client, Talker = server
 
     """
 
@@ -122,15 +143,10 @@ class TalkerServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.ProcessPrompt = channel.unary_stream(
-                '/kaguya.v1.TalkerService/ProcessPrompt',
-                request_serializer=kaguya__pb2.TalkerContext.SerializeToString,
+        self.Converse = channel.stream_stream(
+                '/kaguya.v1.TalkerService/Converse',
+                request_serializer=kaguya__pb2.TalkerInput.SerializeToString,
                 response_deserializer=kaguya__pb2.TalkerOutput.FromString,
-                _registered_method=True)
-        self.Prepare = channel.unary_unary(
-                '/kaguya.v1.TalkerService/Prepare',
-                request_serializer=kaguya__pb2.PrepareSignal.SerializeToString,
-                response_deserializer=kaguya__pb2.PrepareAck.FromString,
                 _registered_method=True)
         self.PrefillCache = channel.unary_unary(
                 '/kaguya.v1.TalkerService/PrefillCache',
@@ -145,26 +161,21 @@ class TalkerServiceStub(object):
 
 
 class TalkerServiceServicer(object):
-    """─────────────────────────────────────────────
-    TALKER SERVICE  (Gateway → Talker)
-    ─────────────────────────────────────────────
+    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    Gateway = client, Talker = server
 
     """
 
-    def ProcessPrompt(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def Prepare(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+    def Converse(self, request_iterator, context):
+        """Bidi: Gateway sends context + inline barge-in; Talker streams output
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def PrefillCache(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Between-turn operations (unary, no need for bidi)
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -178,15 +189,10 @@ class TalkerServiceServicer(object):
 
 def add_TalkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'ProcessPrompt': grpc.unary_stream_rpc_method_handler(
-                    servicer.ProcessPrompt,
-                    request_deserializer=kaguya__pb2.TalkerContext.FromString,
+            'Converse': grpc.stream_stream_rpc_method_handler(
+                    servicer.Converse,
+                    request_deserializer=kaguya__pb2.TalkerInput.FromString,
                     response_serializer=kaguya__pb2.TalkerOutput.SerializeToString,
-            ),
-            'Prepare': grpc.unary_unary_rpc_method_handler(
-                    servicer.Prepare,
-                    request_deserializer=kaguya__pb2.PrepareSignal.FromString,
-                    response_serializer=kaguya__pb2.PrepareAck.SerializeToString,
             ),
             'PrefillCache': grpc.unary_unary_rpc_method_handler(
                     servicer.PrefillCache,
@@ -207,14 +213,13 @@ def add_TalkerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class TalkerService(object):
-    """─────────────────────────────────────────────
-    TALKER SERVICE  (Gateway → Talker)
-    ─────────────────────────────────────────────
+    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    Gateway = client, Talker = server
 
     """
 
     @staticmethod
-    def ProcessPrompt(request,
+    def Converse(request_iterator,
             target,
             options=(),
             channel_credentials=None,
@@ -224,39 +229,12 @@ class TalkerService(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_stream(
-            request,
+        return grpc.experimental.stream_stream(
+            request_iterator,
             target,
-            '/kaguya.v1.TalkerService/ProcessPrompt',
-            kaguya__pb2.TalkerContext.SerializeToString,
+            '/kaguya.v1.TalkerService/Converse',
+            kaguya__pb2.TalkerInput.SerializeToString,
             kaguya__pb2.TalkerOutput.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def Prepare(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/kaguya.v1.TalkerService/Prepare',
-            kaguya__pb2.PrepareSignal.SerializeToString,
-            kaguya__pb2.PrepareAck.FromString,
             options,
             channel_credentials,
             insecure,
@@ -323,9 +301,7 @@ class TalkerService(object):
 
 
 class ReasonerServiceStub(object):
-    """─────────────────────────────────────────────
-    REASONER SERVICE  (Gateway → Reasoner)
-    ─────────────────────────────────────────────
+    """REASONER SERVICE — Multi-stream design
 
     """
 
@@ -335,33 +311,45 @@ class ReasonerServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.ExecuteTask = channel.unary_stream(
-                '/kaguya.v1.ReasonerService/ExecuteTask',
-                request_serializer=kaguya__pb2.TaskRequest.SerializeToString,
-                response_deserializer=kaguya__pb2.ReasonerEvent.FromString,
+        self.Delegate = channel.stream_stream(
+                '/kaguya.v1.ReasonerService/Delegate',
+                request_serializer=kaguya__pb2.DelegateInput.SerializeToString,
+                response_deserializer=kaguya__pb2.DelegateOutput.FromString,
                 _registered_method=True)
-        self.CancelTask = channel.unary_unary(
-                '/kaguya.v1.ReasonerService/CancelTask',
-                request_serializer=kaguya__pb2.CancelRequest.SerializeToString,
-                response_deserializer=kaguya__pb2.CancelAck.FromString,
+        self.Interrupt = channel.unary_unary(
+                '/kaguya.v1.ReasonerService/Interrupt',
+                request_serializer=kaguya__pb2.InterruptRequest.SerializeToString,
+                response_deserializer=kaguya__pb2.InterruptAck.FromString,
+                _registered_method=True)
+        self.Telemetry = channel.unary_stream(
+                '/kaguya.v1.ReasonerService/Telemetry',
+                request_serializer=kaguya__pb2.TelemetrySubscribe.SerializeToString,
+                response_deserializer=kaguya__pb2.TelemetryEvent.FromString,
                 _registered_method=True)
 
 
 class ReasonerServiceServicer(object):
-    """─────────────────────────────────────────────
-    REASONER SERVICE  (Gateway → Reasoner)
-    ─────────────────────────────────────────────
+    """REASONER SERVICE — Multi-stream design
 
     """
 
-    def ExecuteTask(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+    def Delegate(self, request_iterator, context):
+        """Bidi per-task: Gateway sends task + context updates, Reasoner streams events
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def CancelTask(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+    def Interrupt(self, request, context):
+        """Unary interrupt: always available, even when no delegation in flight
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Telemetry(self, request, context):
+        """Server-streaming telemetry: continuous background context
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -369,15 +357,20 @@ class ReasonerServiceServicer(object):
 
 def add_ReasonerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'ExecuteTask': grpc.unary_stream_rpc_method_handler(
-                    servicer.ExecuteTask,
-                    request_deserializer=kaguya__pb2.TaskRequest.FromString,
-                    response_serializer=kaguya__pb2.ReasonerEvent.SerializeToString,
+            'Delegate': grpc.stream_stream_rpc_method_handler(
+                    servicer.Delegate,
+                    request_deserializer=kaguya__pb2.DelegateInput.FromString,
+                    response_serializer=kaguya__pb2.DelegateOutput.SerializeToString,
             ),
-            'CancelTask': grpc.unary_unary_rpc_method_handler(
-                    servicer.CancelTask,
-                    request_deserializer=kaguya__pb2.CancelRequest.FromString,
-                    response_serializer=kaguya__pb2.CancelAck.SerializeToString,
+            'Interrupt': grpc.unary_unary_rpc_method_handler(
+                    servicer.Interrupt,
+                    request_deserializer=kaguya__pb2.InterruptRequest.FromString,
+                    response_serializer=kaguya__pb2.InterruptAck.SerializeToString,
+            ),
+            'Telemetry': grpc.unary_stream_rpc_method_handler(
+                    servicer.Telemetry,
+                    request_deserializer=kaguya__pb2.TelemetrySubscribe.FromString,
+                    response_serializer=kaguya__pb2.TelemetryEvent.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -388,14 +381,12 @@ def add_ReasonerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class ReasonerService(object):
-    """─────────────────────────────────────────────
-    REASONER SERVICE  (Gateway → Reasoner)
-    ─────────────────────────────────────────────
+    """REASONER SERVICE — Multi-stream design
 
     """
 
     @staticmethod
-    def ExecuteTask(request,
+    def Delegate(request_iterator,
             target,
             options=(),
             channel_credentials=None,
@@ -405,12 +396,12 @@ class ReasonerService(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_stream(
-            request,
+        return grpc.experimental.stream_stream(
+            request_iterator,
             target,
-            '/kaguya.v1.ReasonerService/ExecuteTask',
-            kaguya__pb2.TaskRequest.SerializeToString,
-            kaguya__pb2.ReasonerEvent.FromString,
+            '/kaguya.v1.ReasonerService/Delegate',
+            kaguya__pb2.DelegateInput.SerializeToString,
+            kaguya__pb2.DelegateOutput.FromString,
             options,
             channel_credentials,
             insecure,
@@ -422,7 +413,7 @@ class ReasonerService(object):
             _registered_method=True)
 
     @staticmethod
-    def CancelTask(request,
+    def Interrupt(request,
             target,
             options=(),
             channel_credentials=None,
@@ -435,9 +426,36 @@ class ReasonerService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/kaguya.v1.ReasonerService/CancelTask',
-            kaguya__pb2.CancelRequest.SerializeToString,
-            kaguya__pb2.CancelAck.FromString,
+            '/kaguya.v1.ReasonerService/Interrupt',
+            kaguya__pb2.InterruptRequest.SerializeToString,
+            kaguya__pb2.InterruptAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Telemetry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/kaguya.v1.ReasonerService/Telemetry',
+            kaguya__pb2.TelemetrySubscribe.SerializeToString,
+            kaguya__pb2.TelemetryEvent.FromString,
             options,
             channel_credentials,
             insecure,
@@ -451,7 +469,7 @@ class ReasonerService(object):
 
 class RouterControlServiceStub(object):
     """─────────────────────────────────────────────
-    GATEWAY CONTROL  (Endpoint → Gateway)
+    GATEWAY CONTROL (Endpoint → Gateway)
     ─────────────────────────────────────────────
 
     """
@@ -471,7 +489,7 @@ class RouterControlServiceStub(object):
 
 class RouterControlServiceServicer(object):
     """─────────────────────────────────────────────
-    GATEWAY CONTROL  (Endpoint → Gateway)
+    GATEWAY CONTROL (Endpoint → Gateway)
     ─────────────────────────────────────────────
 
     """
@@ -500,7 +518,7 @@ def add_RouterControlServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class RouterControlService(object):
     """─────────────────────────────────────────────
-    GATEWAY CONTROL  (Endpoint → Gateway)
+    GATEWAY CONTROL (Endpoint → Gateway)
     ─────────────────────────────────────────────
 
     """

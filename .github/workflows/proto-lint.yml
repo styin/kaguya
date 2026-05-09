@@ -25,5 +25,7 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Breaking change detection
-        if: steps.has_baseline.outputs.exists == 'true'
+        if: >
+          steps.has_baseline.outputs.exists == 'true' &&
+          !contains(github.event.pull_request.labels.*.name, 'proto-breaking-change')
         run: buf breaking proto/ --against '.git#branch=main'
