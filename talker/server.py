@@ -1,16 +1,16 @@
-"""server.py — TalkerServiceServicer: wires Gateway ↔ inference ↔ voice.
+"""server.py — TalkerServiceServicer: bidi Converse + unary helpers.
 
-gRPC role: SERVER — receives ProcessPrompt, Prepare, PrefillCache, UpdatePersona
-from the Gateway.
-
-Domain role: Orchestrates the per-turn pipeline: prompt formatting → LLM streaming
-→ sentence detection → soul container → TTS + gRPC output. Handles PREPARE
-cancellation and persona updates.
+Gateway opens a Converse bidi stream per turn:
+  Gateway → Talker: TalkerInput.start (TalkerContext) | TalkerInput.barge_in
+  Talker → Gateway: TalkerOutput stream (sentences, emotions, tools, etc.)
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, Generator
+from typing import TYPE_CHECKING
 
 import grpc
 
@@ -24,182 +24,169 @@ from inference.soul_container import (
     parse_identity_config,
     process as soul_process,
 )
-from prepare import PrepareHandler
-from voice.speaker import Speaker
 
 from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
+
+if TYPE_CHECKING:
+    # `Speaker` transitively imports RealtimeTTS, which the CI test environment
+    # intentionally omits (CUDA dep). Tests pass a MagicMock in its place.
+    # Type-only at module load time; real callers (main.py) construct a real
+    # Speaker and pass it in.
+    from voice.speaker import Speaker
 
 logger = logging.getLogger(__name__)
 
 
 class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
-    """Implements all four TalkerService RPCs.
-
-    State:
-        - _persona: cached PersonaConfig (updated via UpdatePersona)
-        - _identity: parsed IdentityConfig from identity_md
-        - _cancel_event: asyncio.Event, set by Prepare to interrupt ProcessPrompt
-    """
-
     def __init__(self, config: TalkerConfig, speaker: Speaker) -> None:
-        self._config = config  # config.py
-        self._llm = LLMClient(config)  #
-        self._speaker = speaker  # voice.speaker.Speaker
-        self._persona = (
-            kaguya_pb2.PersonaConfig()
-        )  # str: SOUL.md, str: IDENTITY.md, str: MEMORY.md
-        self._identity = IdentityConfig()  # inference.soul_container.IdentityConfig
-        self._cancel_event = asyncio.Event()  #
-
-    @property
-    def cancel_event(self) -> asyncio.Event:
-        """Exposed for PrepareHandler."""
-        return self._cancel_event
+        self._config = config
+        self._llm = LLMClient(config)
+        self._speaker = speaker
+        self._persona = kaguya_pb2.PersonaConfig()
+        self._identity = IdentityConfig()
 
     # ──────────────────────────────────────────
-    # ProcessPrompt — main inference pipeline
+    # Converse — bidi streaming, replaces ProcessPrompt + Prepare
     # ──────────────────────────────────────────
 
-    async def ProcessPrompt(
+    async def Converse(
         self,
-        request: kaguya_pb2.TalkerContext,
+        request_iterator,
         context: grpc.aio.ServicerContext,
     ) -> AsyncGenerator[kaguya_pb2.TalkerOutput, None]:
-        """
-        Format prompt → stream tokens → sentences → soul container → yield TalkerOutput.
+        # Flush response headers immediately. Without this, grpcio-aio defers
+        # the HTTP/2 HEADERS frame until the first `yield`, which only happens
+        # after `start` arrives and a sentence is generated. The Gateway's
+        # `client.converse(...).await` would otherwise block indefinitely on
+        # the handshake before it can send the initial TalkerInput.start.
+        await context.send_initial_metadata(())
 
-        Args:
-            request: kaguya_pb2.TalkerContext (full turn context)
-            context: grpc.aio.ServicerContext (gRPC context)
+        output_queue: asyncio.Queue[kaguya_pb2.TalkerOutput | None] = asyncio.Queue()
+        cancel_event = asyncio.Event()
+        generation_task: asyncio.Task | None = None
 
-        Yields:
-            kaguya_pb2.TalkerOutput (one per sentence)
+        async def read_inputs():
+            nonlocal generation_task
+            async for msg in request_iterator:
+                which = msg.WhichOneof("payload")
+                if which == "start":
+                    cancel_event.clear()
+                    self._speaker.reset()
+                    generation_task = asyncio.create_task(
+                        self._run_generation(msg.start, output_queue, cancel_event)
+                    )
+                elif which == "barge_in":
+                    logger.debug("← BargeIn received")
+                    cancel_event.set()
+                    spoken, unspoken = self._speaker.stop()
+                    await output_queue.put(
+                        kaguya_pb2.TalkerOutput(
+                            seq=0,
+                            barge_in_ack=kaguya_pb2.BargeInAck(
+                                spoken_text=spoken,
+                                unspoken_text=unspoken,
+                            ),
+                        )
+                    )
 
-        Raises:
-            ConnectionError: if LLM connection fails
-            Exception: if unexpected error occurs
-        """
-        self._cancel_event.clear()  # clears from previous PREPARE event
-        self._speaker.reset()
+        input_task = asyncio.create_task(read_inputs())
 
-        seq: int = 0  # increments with each yield, used for ... TODO
-        sentence_count: int = 0  # increments with each sentence, used for ... TODO
-        turn_id = request.turn_id  # unique per ProcessPrompt call
+        try:
+            while True:
+                item = await output_queue.get()
+                if item is None:
+                    break
+                yield item
+                # Break on terminal event to avoid deadlock
+                # (Talker returns → server closes stream → Gateway detects Ok(None))
+                if item.HasField("response_complete"):
+                    return
+        except asyncio.CancelledError:
+            cancel_event.set()
+        finally:
+            input_task.cancel()
+            if generation_task and not generation_task.done():
+                generation_task.cancel()
 
-        # Yield `ResponseStarted`
-        seq += 1
-        yield kaguya_pb2.TalkerOutput(
-            seq=seq,
-            response_started=kaguya_pb2.ResponseStarted(turn_id=turn_id),
-        )
-
-        prompt = assemble_prompt(request, self._persona)
-        detector = SentenceDetector()
+    async def _run_generation(
+        self,
+        ctx: kaguya_pb2.TalkerContext,
+        output_queue: asyncio.Queue,
+        cancel_event: asyncio.Event,
+    ) -> None:
+        seq = 0
+        sentence_count = 0
+        turn_id = ctx.turn_id
         was_interrupted = False
 
-        # LLM streaming task
+        seq += 1
+        await output_queue.put(
+            kaguya_pb2.TalkerOutput(
+                seq=seq,
+                response_started=kaguya_pb2.ResponseStarted(turn_id=turn_id),
+            )
+        )
+
+        prompt = assemble_prompt(ctx, self._persona)
+        detector = SentenceDetector()
+
         try:
-            async for token in self._llm.stream_completion(
-                prompt, cancel_event=self._cancel_event
-            ):
-                # Check for PREPARE cancellation between tokens.
-                # Note: cancel_event is also checked inside stream_completion's
-                # SSE parser, so cancellation is responsive even when the LLM
-                # is slow to produce the next token.
-                if self._cancel_event.is_set():
+            async for token in self._llm.stream_completion(prompt, cancel_event):
+                if cancel_event.is_set():
                     was_interrupted = True
                     break
 
-                sentence = detector.feed(
-                    token
-                )  # Returns `None` until a sentence is detected
+                sentence = detector.feed(token)
                 if sentence is not None:
                     sentence_count += 1
-
-                    # Emit sentence for post-processing -> TalkerOutput + TTS
                     for out in _emit_sentence(
                         sentence, self._identity, self._speaker, seq
                     ):
                         seq = out.seq
-                        yield out
-
-                    # Truncation of over-long responses
+                        await output_queue.put(out)
                     if sentence_count >= self._config.max_response_sentences:
+                        break
+                    if cancel_event.is_set():
                         was_interrupted = True
                         break
 
-                    # Check cancellation between sentences.
-                    if self._cancel_event.is_set():
-                        was_interrupted = True
-                        break
-
-            # Flush remaining buffer on clean completion.
-            # Note: sentence detection boundaries only detect up to the penultimate sentence.
             if not was_interrupted:
                 remainder = detector.flush()
-                if remainder:
-                    sentence_count += 1
-                    if sentence_count <= self._config.max_response_sentences:
-                        for out in _emit_sentence(
-                            remainder, self._identity, self._speaker, seq
-                        ):
-                            seq = out.seq
-                            yield out
+                if remainder and sentence_count < self._config.max_response_sentences:
+                    for out in _emit_sentence(
+                        remainder, self._identity, self._speaker, seq
+                    ):
+                        seq = out.seq
+                        await output_queue.put(out)
 
         except ConnectionError as exc:
-            logger.error("LLM connection failed during generation: %s", exc)
+            logger.error("LLM connection failed: %s", exc)
             was_interrupted = True
         except Exception:
             logger.exception("Unexpected error during generation")
             was_interrupted = True
 
-        # Yield `ResponseComplete` as the final message.
         seq += 1
-        yield kaguya_pb2.TalkerOutput(
-            seq=seq,
-            response_complete=kaguya_pb2.ResponseComplete(
-                turn_id=turn_id,
-                was_interrupted=was_interrupted,
-            ),
+        await output_queue.put(
+            kaguya_pb2.TalkerOutput(
+                seq=seq,
+                response_complete=kaguya_pb2.ResponseComplete(
+                    turn_id=turn_id,
+                    was_interrupted=was_interrupted,
+                ),
+            )
         )
 
     # ──────────────────────────────────────────
-    # Prepare — interrupt / warm-up signal
+    # PrefillCache + UpdatePersona — unchanged unary RPCs
     # ──────────────────────────────────────────
 
-    async def Prepare(
-        self,
-        request: kaguya_pb2.PrepareSignal,
-        context: grpc.aio.ServicerContext,
-    ) -> kaguya_pb2.PrepareAck:
-        """Cancel in-flight generation and TTS; return spoken/unspoken split."""
-        handler = PrepareHandler(self._cancel_event, self._speaker)
-        return handler.handle()
-
-    # ──────────────────────────────────────────
-    # PrefillCache — KV cache warming
-    # ──────────────────────────────────────────
-
-    async def PrefillCache(
-        self,
-        request: kaguya_pb2.PrefillRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> kaguya_pb2.PrefillAck:
-        """Forward prefill request to LLM server (n_predict=0)."""
+    async def PrefillCache(self, request, context):
         prompt = assemble_prompt(request.context, self._persona)
         await self._llm.prefill(prompt)
         return kaguya_pb2.PrefillAck()
 
-    # ──────────────────────────────────────────
-    # UpdatePersona — persona config reload
-    # ──────────────────────────────────────────
-
-    async def UpdatePersona(
-        self,
-        request: kaguya_pb2.PersonaConfig,
-        context: grpc.aio.ServicerContext,
-    ) -> kaguya_pb2.PersonaAck:
-        """Update cached persona and re-parse identity config."""
+    async def UpdatePersona(self, request, context):
         self._persona = request
         self._identity = parse_identity_config(request.identity_md or "")
         logger.info(
@@ -211,7 +198,6 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         return kaguya_pb2.PersonaAck()
 
     async def close(self) -> None:
-        """Cleanup resources."""
         await self._llm.close()
 
 
@@ -221,46 +207,23 @@ def _emit_sentence(
     speaker: Speaker,
     seq: int,
 ) -> Generator[kaguya_pb2.TalkerOutput, None, None]:
-    """Process a sentence through the soul container and yield TalkerOutput messages.
-
-    Returns the updated sequence number.
-
-    Yield order per spec: SentenceEvent first, then EmotionEvent/ToolRequest/
-    DelegateRequest extracted from that sentence.
-    """
     result: SoulContainerResult = soul_process(sentence, identity)
-
-    # Feed spoken text to TTS.
     if result.spoken_text:
         speaker.speak(result.spoken_text)
-
-    # Yield SentenceEvent.
     seq += 1
     yield kaguya_pb2.TalkerOutput(
         seq=seq,
         sentence=kaguya_pb2.SentenceEvent(text=result.spoken_text),
     )
-
-    # Yield emotion events.
     for emotion in result.emotions:
         seq += 1
         yield kaguya_pb2.TalkerOutput(
             seq=seq,
             emotion=kaguya_pb2.EmotionEvent(emotion=emotion),
         )
-
-    # Yield tool requests.
     for tool_req in result.tool_requests:
         seq += 1
-        yield kaguya_pb2.TalkerOutput(
-            seq=seq,
-            tool_request=tool_req,
-        )
-
-    # Yield delegate requests.
+        yield kaguya_pb2.TalkerOutput(seq=seq, tool_request=tool_req)
     for delegate_req in result.delegate_requests:
         seq += 1
-        yield kaguya_pb2.TalkerOutput(
-            seq=seq,
-            delegate_request=delegate_req,
-        )
+        yield kaguya_pb2.TalkerOutput(seq=seq, delegate_request=delegate_req)

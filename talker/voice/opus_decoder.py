@@ -3,17 +3,29 @@ import os
 import sys
 from pathlib import Path
 
-# On Windows, make the bundled opus.dll visible to opuslib before import.
-# opuslib calls ctypes.util.find_library('opus') which scans PATH, then loads
-# the result with ctypes.CDLL. Both steps need the directory:
-#   - PATH: so find_library can locate opus.dll
-#   - add_dll_directory: so ctypes.CDLL can resolve its dependencies
+# Make libopus visible to opuslib before its import. opuslib calls
+# ctypes.util.find_library('opus') which is platform-specific:
+#   - Windows: scans PATH; we ship a bundled opus.dll under native/win32/.
+#   - macOS:   ctypes reads DYLD_FALLBACK_LIBRARY_PATH at call time. Homebrew
+#              installs libopus to /opt/homebrew/lib (Apple Silicon) or
+#              /usr/local/lib (Intel). The Intel path is in the dyld default
+#              fallback, but the Apple Silicon path is not — append it.
+#   - Linux:   the system loader resolves libopus.so via ldconfig; no
+#              bootstrap needed if opus is installed via apt/pacman/etc.
 if sys.platform == "win32":
     _dll_dir = Path(__file__).parent.parent / "native" / "win32"
     if _dll_dir.exists():
         os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(str(_dll_dir))
+elif sys.platform == "darwin":
+    _brew_lib_dirs = ["/opt/homebrew/lib", "/usr/local/lib"]
+    _existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+    _extra = [d for d in _brew_lib_dirs if d not in _existing.split(":")]
+    if _extra:
+        os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(
+            _extra + ([_existing] if _existing else [])
+        )
 
 import opuslib
 

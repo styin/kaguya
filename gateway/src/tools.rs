@@ -156,6 +156,7 @@ async fn exec_write_file(root: &Path, args: &str) -> Result<String, String> {
     Ok(serde_json::json!({ "written": path.display().to_string(), "bytes": content.len() }).to_string())
 }
 
+#[allow(dead_code)] // Disabled in registry pending allowlist sandbox; kept for re-enable.
 async fn exec_run_command(root: &Path, args: &str) -> Result<String, String> {
     let cmd = parse_arg(args, "cmd")?;
     let blocked = ["rm -rf /", "format c:", "mkfs", "dd if=", ":(){", "shutdown", "reboot"];

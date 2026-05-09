@@ -274,4 +274,96 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 
 ---
 
+## REF-007 — Hybrid Retrieval via Reciprocal Rank Fusion (Gateway RAG)
+
+**Decision:** The RAG retriever fuses BM25 (FTS5) and vector-similarity rankings using Reciprocal Rank Fusion (RRF) with `k = 60`.
+
+**Implementation:** [gateway/src/rag/ranker.rs](gateway/src/rag/ranker.rs) — `RRF_K: f64 = 60.0`. Score per item: `1 / (k + rank + 1)` summed across sources, then sorted descending. Used by [gateway/src/rag/retriever.rs](gateway/src/rag/retriever.rs) to combine the two retrieval modalities.
+
+**Rationale:**
+
+- **RRF is the canonical late-fusion method for combining heterogeneous rankers (Cormack, Clarke & Buettcher, 2009):** The original SIGIR paper showed RRF outperforming Condorcet voting and learned rank-aggregation methods on TREC tasks. It requires no per-source score normalization (BM25 ranks and cosine similarities live in different units), no training, and is robust to differing list lengths — all properties we need since the optional embedder may be absent.
+- **Choice of `k = 60`:** This is the constant used in the original paper and widely adopted as the default in production hybrid-search stacks (Elasticsearch, Vespa, Weaviate, LangChain). The constant smooths out the contribution of very high ranks; smaller `k` (e.g. 1) makes top-1 hits dominate, larger `k` (e.g. 1000) flattens the curve. Empirically `k=60` is the well-tuned middle ground for IR-style retrieval.
+- **Why RRF over linear combination:** Linear-weighted score combination requires calibrating BM25's range against cosine similarity's `[-1, 1]` range — calibration that drifts as the corpus changes. RRF only uses ordinal rank, so it's stable against any monotonic rescoring on either side.
+
+**Configurability:** The constant is currently hardcoded; promote to `RagConfig::rrf_k` if tuning becomes necessary.
+
+**Sources:**
+
+- Cormack, G.V., Clarke, C.L.A. & Buettcher, S. (2009). "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods." _Proceedings of SIGIR 2009_, pp. 758–759. https://dl.acm.org/doi/10.1145/1571941.1572114
+- Elasticsearch reference — Hybrid search with RRF: https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion
+
+---
+
+## REF-008 — Default `top_k = 10` for Hybrid Retrieval (Gateway RAG)
+
+**Decision:** [gateway/src/config.rs](gateway/src/config.rs) sets `RagConfig::top_k = 10` as the default number of memories returned per turn. The retriever requests `top_k * 2` from each source, fuses via RRF (REF-007), then truncates to `top_k`.
+
+**Rationale:**
+
+- **Standard RAG retrieval window before re-ranking (Lewis et al., 2020):** The original RAG paper for knowledge-intensive NLP used 5–10 retrieved passages as the augmentation set. Production RAG systems (Pinecone, Weaviate, LangChain) default to 5–20 for similar reasons.
+- **Token budget:** Kaguya memories are short (capped at ~200 characters by `truncate_chars` in [gateway/src/rag/mod.rs](gateway/src/rag/mod.rs)). 10 retrieved entries ≈ 2000 chars ≈ 500–700 tokens — fits inside `TalkerContext` without crowding history or persona.
+- **Why over-fetch then fuse:** Pulling `top_k * 2` from each modality before RRF gives the fusion stage signal from items that might rank low in one source but high in the other. Truncating to `top_k` post-fusion preserves the diversity benefit.
+
+**Configurability:** Adjust `[rag] top_k` in `config/gateway.toml` if context length budgets change.
+
+**Sources:**
+
+- Lewis, P. et al. (2020). "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks." _NeurIPS 2020_. https://arxiv.org/abs/2005.11401
+- Pinecone — RAG retrieval defaults: https://www.pinecone.io/learn/retrieval-augmented-generation/
+
+---
+
+## REF-009 — BM25 via SQLite FTS5 with `porter unicode61` Tokenizer (Gateway RAG)
+
+**Decision:** Memory full-text search uses SQLite's FTS5 virtual table with the tokenizer string `porter unicode61` ([gateway/src/rag/store.rs](gateway/src/rag/store.rs) — table `memories_fts`).
+
+**Rationale:**
+
+- **FTS5's BM25 ranking is the default and battle-tested:** SQLite ships Okapi BM25 (Robertson/Spärck Jones IDF) as the FTS5 default ranking function. No extension or external library needed. Identical scoring semantics to Lucene's `BM25Similarity` for English queries.
+- **`unicode61` for international text:** SQLite's default `simple` tokenizer is ASCII-only and splits non-ASCII text as a single token, which kills recall on Chinese/Japanese/Korean. `unicode61` applies Unicode-aware folding (case + diacritics) and respects character classes — matching the Chinese trigger keywords (`我喜欢`, `项目`, …) that the memory extractor itself emits.
+- **`porter` stemmer for English:** Folds `like`/`liked`/`liking` to a common stem so a memory recorded as "I like coffee" matches a query for "what does the user like". Porter stemming is the standard IR stemmer; FTS5 supports stacking it on top of `unicode61`.
+- **Why not a custom CJK tokenizer (e.g. ICU):** Adds a build-time dependency and a per-platform binary. SQLite-bundled `unicode61` covers the substring matching we need at this corpus size (memory entries are short and few). Re-evaluate when memory grows past ~100k entries or recall on multi-character CJK queries degrades.
+
+**Sources:**
+
+- SQLite FTS5 documentation — Tokenizers: https://www.sqlite.org/fts5.html#tokenizers
+- SQLite FTS5 — BM25 ranking: https://www.sqlite.org/fts5.html#the_bm25_function
+- Porter, M.F. (1980). "An algorithm for suffix stripping." _Program_ 14(3): 130–137.
+
+---
+
+## REF-010 — RAG Memory Truncation: Storage-Time vs. Output-Time (Gateway RAG)
+
+**Decision:** The RAG store keeps full-fidelity memory content. Truncation only happens at *output* time — when retrieval results or the exported `memory_md` document are assembled for the Talker prompt. The store side has only a defensive sanity bound.
+
+**Configuration ([gateway/src/config.rs](gateway/src/config.rs#L48), `[rag]` block in `config/gateway.toml`):**
+
+| Knob                       | Default     | Layer       | Purpose                                                                                                |
+| -------------------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------ |
+| `max_storage_chars`        | `Some(4096)` | Storage     | Defensive cap on the `memories.content` row. Real voice utterances never approach this. Prevents pathological pastes / adversarial inputs from poisoning the index. |
+| `max_chars_per_result`     | `None`      | Retrieval   | Cap on each `RetrievalResult.content` injected into the per-turn Talker prompt. `None` = let the model context budget govern. Set to bound per-turn prompt cost when many retrievals fire. |
+| `max_chars_per_md_entry`   | `None`      | Persona MD  | Cap on each row of the "Recent Context" section in `RagStore::export_as_markdown` (delivered via `UpdatePersona`). Independent of retrieval; affects the long-term-prefix cost. |
+
+**Rationale:**
+
+- **Truncation at storage time is information loss that cascades.** Once a row is written truncated, every future BM25 search, every vector embedding, every exported `memory_md` row gets the damaged version. The original phrasing — including the *reason* a preference exists ("...because we're migrating off Java") — is gone forever. Keep storage authoritative; let consumers decide their own budget.
+
+- **Output-time caps are reversible.** A future change to `max_chars_per_result` (or removing the cap entirely) immediately benefits all stored memories on the next retrieval. No migration, no re-extraction.
+
+- **The 4 KB storage sanity bound is defensive only.** A 60-second monologue at conversational pace is ~1000 chars (English) or ~250–400 chars (Chinese, denser). 4096 chars is ~10–15× that, so legitimate voice input never hits the cap. Its only job is to bound the worst case if a user pastes raw text into a future text-input path or if an upstream component sends pathological content.
+
+- **Why `None` (unlimited) for output caps:** The 8B fast-path Talker has an 8K–32K context window depending on the `llama.cpp` config; with `top_k=10` retrievals at typical voice-utterance length (~150–300 chars each), the retrieval section is ~1.5–3 KB. That's well within budget. Capping at the output layer is *available* for deployments that hit budget pressure (large `top_k`, long memories, smaller-context models) but isn't needed for the default Phase-1 setup.
+
+- **Asymmetry with REF-006 (`max_response_sentences = 4`):** That sets a hard cap on assistant output for voice brevity. RAG truncation defaults to unlimited because input retrieval already passes through `top_k` (count-based) and BM25 ranking (relevance-based) — those are the right knobs for budget. Adding an additional length cap by default would over-constrain.
+
+**Phase-2 work that supersedes this:** Replace keyword-trigger extraction with LLM-based extraction (see `docs/spec-gateway-v0.1.0.md` Section 4). LLM extraction will produce concise, normalized memory entries directly — at which point `max_storage_chars` becomes vestigial defense and the output caps may shift to operate on token counts rather than char counts.
+
+**Sources:**
+
+- "Retrieve and refine, don't truncate" — general RAG-pipeline practice; e.g. LlamaIndex / LangChain documentation on chunking-vs-truncation tradeoffs.
+- SQLite cell-size limits: https://www.sqlite.org/limits.html (default 1 GB; 4 KB is far below any practical concern).
+
+---
+
 _Add new entries below this line. Format: `## REF-NNN — Short Title (component, milestone)`_

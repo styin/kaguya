@@ -1,10 +1,9 @@
-//! Reasoner Manager
-//! 
-//! Manages long-running reasoning tasks executed by the Reasoner component.
+//! Reasoner Manager — adapted for new Delegate/Interrupt/Telemetry proto.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
@@ -34,27 +33,6 @@ impl ReasonerManager {
         }
     }
 
-    #[allow(dead_code)]
-    async fn get_client(&self) -> Option<ReasonerServiceClient<Channel>> {
-        let guard = self.client.read().await;
-        if guard.is_some() {
-            return guard.clone();
-        }
-        drop(guard);
-        match Channel::from_shared(self.endpoint.clone()) {
-            Ok(ch) => match ch.connect().await {
-                Ok(channel) => {
-                    let c = ReasonerServiceClient::new(channel);
-                    *self.client.write().await = Some(c.clone());
-                    info!(addr = %self.endpoint, "connected to Reasoner");
-                    Some(c)
-                }
-                Err(e) => { warn!("Reasoner not available: {e}"); None }
-            },
-            Err(e) => { warn!("bad reasoner endpoint: {e}"); None }
-        }
-    }
-
     pub async fn start(
         &self,
         task_id: String,
@@ -78,13 +56,11 @@ impl ReasonerManager {
         tokio::spawn(async move {
             info!(task_id = %tid, "Reasoner task started");
 
-            // Attempts to get cached client or connect if not available
+            // Try to get/connect client
             let maybe_client = {
                 let g = client_arc.read().await;
                 g.clone()
             };
-
-            // Attempt connection if client not cached
             let maybe_client = match maybe_client {
                 Some(c) => Some(c),
                 None => {
@@ -103,22 +79,33 @@ impl ReasonerManager {
             };
 
             if let Some(mut client) = maybe_client {
-                // ── gRPC TaskRequest ──
-                let task = proto::TaskRequest {
-                    task_id: tid.clone(),
-                    description: description.clone(),
-                    metadata: HashMap::new(),
-                };
+                // Open Delegate bidi stream
+                let (del_tx, del_rx) = mpsc::channel::<proto::DelegateInput>(16);
+                let outbound = ReceiverStream::new(del_rx);
 
-                match client.execute_task(task).await {
+                // Send TaskRequest
+                let _ = del_tx.send(proto::DelegateInput {
+                    payload: Some(proto::delegate_input::Payload::StartTask(
+                        proto::TaskRequest {
+                            task_id: tid.clone(),
+                            description: description.clone(),
+                            metadata: HashMap::new(),
+                        }
+                    )),
+                }).await;
+
+                match client.delegate(outbound).await {
                     Ok(resp) => {
-                        let mut stream: tonic::Streaming<proto::ReasonerEvent> = resp.into_inner();
+                        let mut stream = resp.into_inner();
                         loop {
                             tokio::select! {
                                 _ = child.cancelled() => {
                                     info!(task_id = %tid, "Reasoner cancelled");
-                                    let _ = client.cancel_task(proto::CancelRequest {
-                                        task_id: tid.clone(),
+                                    // Send Interrupt
+                                    let _ = client.interrupt(proto::InterruptRequest {
+                                        signal: Some(proto::interrupt_request::Signal::Cancel(
+                                            proto::TaskCancel { task_id: tid.clone() }
+                                        )),
                                     }).await;
                                     break;
                                 }
@@ -126,32 +113,29 @@ impl ReasonerManager {
                                     match result {
                                         Ok(Some(event)) => {
                                             match event.event {
-                                                Some(proto::reasoner_event::Event::Started(_s)) => {
+                                                Some(proto::delegate_output::Event::Started(_)) => {
                                                     info!(task_id = %tid, "Reasoner started");
                                                 }
-                                                Some(proto::reasoner_event::Event::Step(s)) => {
-                                                    // intermediate step update -> potential narration
+                                                Some(proto::delegate_output::Event::Step(s)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
                                                         task_id: tid.clone(),
                                                         description: s.description,
                                                     }).await;
                                                 }
-                                                Some(proto::reasoner_event::Event::Output(o)) => {
-                                                    // intermediate output -> potential narration
+                                                Some(proto::delegate_output::Event::Output(o)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
                                                         task_id: tid.clone(),
                                                         description: format!("[output] {}", o.content),
                                                     }).await;
                                                 }
-                                                Some(proto::reasoner_event::Event::Completed(c)) => {
-                                                    // final completion -> ProcessPrompt call
+                                                Some(proto::delegate_output::Event::Completed(c)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerCompleted {
                                                         task_id: tid.clone(),
                                                         summary: c.summary,
                                                     }).await;
                                                     break;
                                                 }
-                                                Some(proto::reasoner_event::Event::Error(e)) => {
+                                                Some(proto::delegate_output::Event::Error(e)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerError {
                                                         task_id: tid.clone(),
                                                         message: e.message,
@@ -166,9 +150,7 @@ impl ReasonerManager {
                                         Err(e) => {
                                             error!("Reasoner stream error: {e}");
                                             let _ = p3_tx.send(InputEvent::ReasonerError {
-                                                task_id: tid.clone(),
-                                                message: e.to_string(),
-                                                code: -1,
+                                                task_id: tid.clone(), message: e.to_string(), code: -1,
                                             }).await;
                                             break;
                                         }
@@ -178,17 +160,14 @@ impl ReasonerManager {
                         }
                     }
                     Err(e) => {
-                        error!("ExecuteTask failed: {e}");
+                        error!("Delegate failed: {e}");
                         let _ = p3_tx.send(InputEvent::ReasonerError {
-                            task_id: tid.clone(),
-                            message: e.to_string(),
-                            code: -1,
+                            task_id: tid.clone(), message: e.to_string(), code: -1,
                         }).await;
                     }
                 }
             } else {
-                // ── Reasoner unavailable - fallback ──
-                // TODO: Implement a more meaningful fallback behavior, e.g. local execution of simple tasks or retry logic.
+                // ── Stub fallback ──
                 warn!(task_id = %tid, "Reasoner unavailable, using stub");
                 tokio::select! {
                     _ = child.cancelled() => {}
