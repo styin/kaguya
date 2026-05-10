@@ -3,6 +3,8 @@ import { Toolbar, type ProcessInfo } from "./components/Toolbar";
 import { Conversation } from "./components/Conversation";
 import { LogPanel, type LogEntry } from "./components/LogPanel";
 import { createWsClient, type WsStatus } from "./ws";
+import { startCapture, type CaptureHandle } from "./audio/capture";
+import { startPlayback, type PlaybackHandle } from "./audio/playback";
 import type { ChatEntry, EgressMessage } from "./types";
 import "./App.css";
 
@@ -11,10 +13,17 @@ export default function App() {
   const [messages, setMessages] = useState<ChatEntry[]>([]);
   const [processes, setProcesses] = useState<ProcessInfo[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [micActive, setMicActive] = useState(false);
   const wsRef = useRef<ReturnType<typeof createWsClient> | null>(null);
+  const captureRef = useRef<CaptureHandle | null>(null);
+  const playbackRef = useRef<PlaybackHandle | null>(null);
 
   const pendingRef = useRef<string>("");
   const emotionRef = useRef<string | undefined>(undefined);
+
+  const handleAudio = useCallback((data: ArrayBuffer) => {
+    playbackRef.current?.feed(data);
+  }, []);
 
   const handleMessage = useCallback((msg: EgressMessage) => {
     switch (msg.event_type) {
@@ -64,11 +73,42 @@ export default function App() {
     const client = createWsClient({
       onStatus: setWsStatus,
       onMessage: handleMessage,
-      onAudio: () => {},
+      onAudio: handleAudio,
     });
     wsRef.current = client;
     return () => client.close();
-  }, [handleMessage]);
+  }, [handleMessage, handleAudio]);
+
+  // Playback — always running, feeds from WS binary frames
+  useEffect(() => {
+    let handle: PlaybackHandle | null = null;
+    startPlayback().then((h) => {
+      handle = h;
+      playbackRef.current = h;
+    });
+    return () => {
+      handle?.stop();
+      playbackRef.current = null;
+    };
+  }, []);
+
+  // Mic capture — toggled by user
+  useEffect(() => {
+    if (!micActive) return;
+    let handle: CaptureHandle | null = null;
+    startCapture((pcm16) => {
+      wsRef.current?.sendBinary(pcm16);
+    }).then((h) => {
+      handle = h;
+      captureRef.current = h;
+    }).catch(() => {
+      setMicActive(false);
+    });
+    return () => {
+      handle?.stop();
+      captureRef.current = null;
+    };
+  }, [micActive]);
 
   // SSE for real-time logs
   useEffect(() => {
@@ -107,6 +147,10 @@ export default function App() {
     wsRef.current?.reconnect();
   }
 
+  function handleMicToggle() {
+    setMicActive((prev) => !prev);
+  }
+
   async function handleProcessAction(
     name: string,
     action: "start" | "stop" | "restart"
@@ -123,7 +167,12 @@ export default function App() {
         onProcessAction={handleProcessAction}
       />
       <div className="main-content">
-        <Conversation messages={messages} onSend={handleSend} />
+        <Conversation
+          messages={messages}
+          onSend={handleSend}
+          micActive={micActive}
+          onMicToggle={handleMicToggle}
+        />
       </div>
       <LogPanel logs={logs} />
     </div>

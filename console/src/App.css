@@ -151,6 +151,25 @@ body {
   outline: none;
 }
 
+.mic-btn {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 600;
+  background: #2a2a4a;
+  color: #808090;
+  border: 1px solid #3a3a5a;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mic-btn.mic-active {
+  background: #1a3a2a;
+  color: #4ade80;
+  border-color: #4ade80;
+}
+
 .input-bar input:focus {
   border-color: #4a4a6a;
 }

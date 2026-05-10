@@ -190,8 +190,24 @@ class Listener:
             on_realtime_transcription_update=self._on_partial,
         )
         self._recorder = recorder
-        logger.info("RealtimeSTT recorder started (feed_audio mode)")
-        recorder.start()
+        # `recorder.text(cb)` drives RealtimeSTT's state machine
+        # (listen → VAD-detect → record → transcribe → callback → repeat).
+        # Calling listen()/start() once doesn't advance the pipeline — only
+        # text() in a loop does. See RealtimeSTT_server/stt_server.py:599.
+        logger.info("RealtimeSTT recorder ready (text-loop mode, feed_audio)")
+        while True:
+            try:
+                recorder.text(self._on_full_transcript)
+            except Exception:  # noqa: BLE001
+                logger.exception("recorder.text() raised")
+                # Brief pause so we don't tight-loop on a persistent failure.
+                time.sleep(0.5)
+
+    def _on_full_transcript(self, text: str) -> None:
+        """Callback from recorder.text() with a complete utterance."""
+        if not text:
+            return
+        self._emit_final(text)
 
     # ── Callbacks (from recorder thread) ──
 

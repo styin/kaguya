@@ -4,9 +4,13 @@ import type { ChatEntry } from "../types";
 export function Conversation({
   messages,
   onSend,
+  micActive,
+  onMicToggle,
 }: {
   messages: ChatEntry[];
   onSend: (text: string) => void;
+  micActive: boolean;
+  onMicToggle: () => void;
 }) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -40,6 +44,14 @@ export function Conversation({
         <div ref={bottomRef} />
       </div>
       <form className="input-bar" onSubmit={handleSubmit}>
+        <button
+          type="button"
+          className={`mic-btn ${micActive ? "mic-active" : ""}`}
+          onClick={onMicToggle}
+          title={micActive ? "Mic ON — click to mute" : "Mic OFF — click to unmute"}
+        >
+          {micActive ? "MIC" : "MIC"}
+        </button>
         <input
           type="text"
           value={input}
