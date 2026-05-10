@@ -11,7 +11,9 @@ class TalkerConfig(BaseSettings):
     syntax_silence_threshold_ms: int = 300
     silence_tick_interval_ms: int = 50
     # ── Inference / LLM ──
-    llm_base_url: str = "http://localhost:8080"
+    # Default to LM Studio's port; collides with Gateway's WS port (8080)
+    # if left at the upstream default.
+    llm_base_url: str = "http://localhost:1234"
     llm_max_tokens: int = 256
     llm_timeout: float = 30.0
     llm_max_retries: int = 3

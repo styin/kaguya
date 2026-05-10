@@ -9,9 +9,10 @@ listener_grpc_addr = "http://127.0.0.1:50055"
 listener_audio_addr = "127.0.0.1:50056"
 
 [files]
-soul_path      = "config/SOUL.md"
-identity_path  = "config/IDENTITY.md"
-workspace_root = "."
+# Paths are resolved relative to the Gateway's cwd (`<repo>/gateway`).
+soul_path      = "../config/SOUL.md"
+identity_path  = "../config/IDENTITY.md"
+workspace_root = ".."
 
 [history]
 max_recent_turns = 50

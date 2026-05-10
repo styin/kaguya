@@ -6,13 +6,13 @@
       "env": { "RUST_LOG": "kaguya_gateway=debug" }
     },
     "talker": {
-      "command": "conda run -n kaguya --no-banner python -m talker.main",
+      "command": ".venv/bin/python main.py",
       "cwd": "../talker",
       "env": {}
     },
     "llm_server": {
       "managed": false,
-      "health_url": "http://localhost:8080/health",
+      "health_url": "http://localhost:1234/v1/models",
       "poll_interval_ms": 5000
     }
   }
