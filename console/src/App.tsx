@@ -20,6 +20,7 @@ export default function App() {
 
   const pendingRef = useRef<string>("");
   const emotionRef = useRef<string | undefined>(undefined);
+  const turnIdRef = useRef<string>("");
 
   const handleAudio = useCallback((data: ArrayBuffer) => {
     playbackRef.current?.feed(data);
@@ -30,6 +31,7 @@ export default function App() {
       case "response_started":
         pendingRef.current = "";
         emotionRef.current = undefined;
+        turnIdRef.current = msg.data.turn_id;
         break;
 
       case "sentence":
@@ -37,13 +39,27 @@ export default function App() {
           (pendingRef.current ? " " : "") + msg.data.text;
         setMessages((prev) => {
           const last = prev[prev.length - 1];
-          if (last?.role === "assistant") {
+          // Fold into the existing assistant entry only if it belongs to
+          // the same turn — otherwise a silence-triggered turn (no user
+          // message in between) would overwrite the prior assistant reply.
+          if (
+            last?.role === "assistant" &&
+            last.turn_id === turnIdRef.current
+          ) {
             return [
               ...prev.slice(0, -1),
               { ...last, content: pendingRef.current, emotion: emotionRef.current },
             ];
           }
-          return [...prev, { role: "assistant", content: pendingRef.current }];
+          return [
+            ...prev,
+            {
+              role: "assistant",
+              content: pendingRef.current,
+              emotion: emotionRef.current,
+              turn_id: turnIdRef.current,
+            },
+          ];
         });
         break;
 
@@ -51,7 +67,10 @@ export default function App() {
         emotionRef.current = msg.data.emotion;
         setMessages((prev) => {
           const last = prev[prev.length - 1];
-          if (last?.role === "assistant") {
+          if (
+            last?.role === "assistant" &&
+            last.turn_id === turnIdRef.current
+          ) {
             return [
               ...prev.slice(0, -1),
               { ...last, emotion: msg.data.emotion },
@@ -59,6 +78,15 @@ export default function App() {
           }
           return prev;
         });
+        break;
+
+      case "user_input":
+        // Voice transcript echoed by the gateway. Typed prompts are added
+        // by `handleSend` directly and never arrive here.
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: msg.data.text },
+        ]);
         break;
 
       case "response_complete":

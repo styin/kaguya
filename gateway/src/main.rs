@@ -261,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(proto::talker_output::Payload::ResponseStarted(rs)) => {
                         debug!(turn = %rs.turn_id, "response started");
                         current_response.clear();
+                        output.send_response_started(&rs.turn_id).await;
                     }
                     Some(proto::talker_output::Payload::Sentence(se)) => {
                         debug!(text = %se.text, "→ [SENTENCE]");
@@ -333,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
                         active_gen = None;
                         current_dispatch_kind = None;
                         current_response.clear();
+                        output.send_response_complete(&rc.turn_id, rc.was_interrupted).await;
                     }
                     None => {}
                 }
@@ -340,9 +342,15 @@ async fn main() -> anyhow::Result<()> {
 
             // ── P1: User Intent ──
             Some(event) = input_rx.p1.recv() => {
+                // Voice transcripts get echoed to the WS as `user_input` so the
+                // dev console can render them. Typed prompts already appear
+                // locally via `handleSend`, so we don't double-emit.
                 let text = match event {
-                    InputEvent::FinalTranscript { text, .. }
-                    | InputEvent::TextCommand { text } => text,
+                    InputEvent::FinalTranscript { text, .. } => {
+                        output.send_user_input(&text).await;
+                        text
+                    }
+                    InputEvent::TextCommand { text } => text,
                     _ => continue,
                 };
                 info!(text = %text, "P1: user intent");
