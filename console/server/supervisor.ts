@@ -2,7 +2,31 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { createInterface } from "node:readline";
+
+// Split a child stream into log entries. Unlike `readline.createInterface`,
+// this also breaks on bare `\r` so TTY-style in-place updates (RealtimeSTT's
+// `⠋ recording` spinner) surface as discrete frames rather than accumulating
+// in readline's buffer or — worse — flooding as one entry per tick under a
+// single growing line. Spinner frames are then filtered downstream.
+function attachLineSplitter(
+  stream: NodeJS.ReadableStream,
+  onLine: (line: string) => void,
+) {
+  let buffer = "";
+  stream.setEncoding("utf-8");
+  stream.on("data", (chunk: string | Buffer) => {
+    buffer += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    const parts = buffer.split(/\r\n|\r|\n/);
+    buffer = parts.pop() ?? "";
+    for (const p of parts) {
+      if (p.length > 0) onLine(p);
+    }
+  });
+  stream.on("end", () => {
+    if (buffer.length > 0) onLine(buffer);
+    buffer = "";
+  });
+}
 
 // ── Types ──
 
@@ -49,6 +73,9 @@ interface SupervisorConfig {
 const MAX_LOG_ENTRIES = 10_000;
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
+// Drop TTY spinners (e.g. RealtimeSTT's `⠋ recording`) — Braille block U+2800–U+28FF
+// followed by whitespace is a near-unambiguous signature for a progress glyph.
+const SPINNER_RE = /^[⠀-⣿]\s/;
 
 interface ManagedProcess {
   config: ManagedProcessConfig;
@@ -130,12 +157,14 @@ export class Supervisor {
     this.pushLog(name, "stdout", `[supervisor] started PID ${child.pid}`);
 
     if (child.stdout) {
-      const rl = createInterface({ input: child.stdout });
-      rl.on("line", (line) => this.pushLog(name, "stdout", line));
+      attachLineSplitter(child.stdout, (line) =>
+        this.pushLog(name, "stdout", line),
+      );
     }
     if (child.stderr) {
-      const rl = createInterface({ input: child.stderr });
-      rl.on("line", (line) => this.pushLog(name, "stderr", line));
+      attachLineSplitter(child.stderr, (line) =>
+        this.pushLog(name, "stderr", line),
+      );
     }
 
     child.on("exit", (code, signal) => {
@@ -247,13 +276,15 @@ export class Supervisor {
   }
 
   private pushLog(source: string, stream: "stdout" | "stderr", line: string) {
+    const cleaned = line.replace(ANSI_RE, "");
+    if (SPINNER_RE.test(cleaned)) return;
     this.logId++;
     const entry: LogEntry = {
       id: this.logId,
       timestamp: new Date().toISOString(),
       source,
       stream,
-      line: line.replace(ANSI_RE, ""),
+      line: cleaned,
     };
     this.logs.push(entry);
     if (this.logs.length > MAX_LOG_ENTRIES) {
