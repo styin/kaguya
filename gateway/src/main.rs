@@ -274,7 +274,29 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Some(proto::talker_output::Payload::ToolRequest(tr)) => {
                         info!(tool = %tr.tool_name, "→ [TOOL]");
-                        tools.dispatch(tr.request_id, tr.tool_name, tr.args_json, input_tx.p3.clone());
+                        // B14: gate at the dispatch site to avoid the
+                        // hallucinated-tool → P3 ToolResult → re-dispatch loop.
+                        // qwen3.5 sometimes invents tool names not in the
+                        // registry; the previous path round-tripped the
+                        // "unknown tool" error through P3 and produced a
+                        // second narrated turn after a preamble sentence,
+                        // doubling the assistant response. Reject inline,
+                        // record the synthetic error in history so the next
+                        // turn shows the LLM what it did, and let the
+                        // current turn complete without firing a
+                        // continuation dispatch.
+                        if !tools.has(&tr.tool_name) {
+                            warn!(tool = %tr.tool_name, "rejecting unknown tool (likely hallucinated)");
+                            let err = serde_json::json!({
+                                "error": format!(
+                                    "Unknown tool '{}'. Available tools: {}",
+                                    tr.tool_name, tools.name_list(),
+                                ),
+                            }).to_string();
+                            history.append_tool_result(&tr.tool_name, &err).await;
+                        } else {
+                            tools.dispatch(tr.request_id, tr.tool_name, tr.args_json, input_tx.p3.clone());
+                        }
                     }
                     Some(proto::talker_output::Payload::DelegateRequest(dr)) => {
                         info!(task = %dr.task_id, "→ [DELEGATE]");
