@@ -163,9 +163,21 @@ async def _parse_sse_cancellable(
                 )
                 for task in pending:
                     task.cancel()
+                    # Drain the cancelled task. If we don't, an httpx.ReadError
+                    # raised inside the aborted aiter sits as "Task exception
+                    # was never retrieved" and pollutes the logs on every
+                    # barge-in / reasoner-result cancellation (B12).
+                    try:
+                        await task
+                    except BaseException:  # noqa: BLE001 — expected on abort
+                        pass
 
                 if cancel_task in done:
                     line_task.cancel()
+                    try:
+                        await line_task
+                    except BaseException:  # noqa: BLE001 — expected on abort
+                        pass
                     return
 
                 line = line_task.result()
