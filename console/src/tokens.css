@@ -1,0 +1,57 @@
+:root {
+  /* paper / neutrals (warm) */
+  --paper:     #F1ECE2;
+  --paper-2:   #E8E2D6;
+  --paper-3:   #DBD3C3;
+  --panel:     #F7F3EB;
+  --panel-2:   #FBF8F2;
+  --cream:     #FBF6E8;
+  --hairline:  #E2DBCC;
+  --rule:      #C8C0AE;
+
+  /* ink (cool) */
+  --ink:       #2A3645;
+  --ink-2:     #4A5567;
+  --ink-3:     #7B8696;
+  --ink-4:     #A9B2BF;
+
+  /* blues (primary accent) */
+  --blue:      #7B92AE;
+  --blue-2:    #5A7595;
+  --blue-soft: #9FB4CC;
+  --blue-pale: #C9D3E0;
+  --blue-mist: #E2E8EE;
+
+  /* support */
+  --mint:       #9CB8A6;
+  --mint-soft:  #D5E1D7;
+  --terra:      #B97862;
+  --terra-soft: #ECD8CE;
+  --plum:       #8E7A95;
+  --plum-soft:  #DAD2DF;
+  --amber:      #B58D52;
+  --amber-soft: #ECDDC2;
+
+  /* type families */
+  --font-ui:      'Inter', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, monospace;
+  --font-display: 'Newsreader', serif;
+
+  /* logs row variable height (collapsible) */
+  --logs-h: 240px;
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+@keyframes skel-shimmer {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@keyframes bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50%      { transform: scaleY(1); }
+}

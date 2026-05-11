@@ -1,0 +1,115 @@
+.inspector {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.inspector-card {
+  background: var(--panel-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.inspector-section-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 6px;
+}
+
+.inspector-empty {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  padding: 8px 0;
+}
+
+/* ─── Live monitor: streaming-turn card ─── */
+.live-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.live-pin {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.live-pin.streaming { background: var(--mint-soft); color: var(--ink); }
+.live-pin.latest    { background: var(--paper-2);  color: var(--ink-2); }
+
+.live-body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.live-body.streaming { animation: text-pulse 1.6s ease-in-out infinite; }
+
+.skel-row {
+  height: 12px;
+  margin-top: 6px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--paper-2) 0%,
+    var(--panel) 50%,
+    var(--paper-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.6s linear infinite;
+}
+
+/* ─── Turn detail ─── */
+.turn-detail-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.turn-detail-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+
+.turn-detail-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+}
+
+.sentence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sentence-row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 8px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.sentence-ts {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+}

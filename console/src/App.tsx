@@ -1,105 +1,52 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Toolbar, type ProcessInfo } from "./components/Toolbar";
-import { Conversation } from "./components/Conversation";
-import { LogPanel, type LogEntry } from "./components/LogPanel";
-import { createWsClient, type WsStatus } from "./ws";
+import { useCallback, useEffect, useRef } from "react";
+import { createWsClient } from "./ws";
 import { startCapture, type CaptureHandle } from "./audio/capture";
 import { startPlayback, type PlaybackHandle } from "./audio/playback";
-import type { ChatEntry, EgressMessage } from "./types";
+import type { EgressMessage, IngressMessage } from "./types";
+import { actions, useStore } from "./store";
+import { TurnsPanel } from "./regions/TurnsPanel/TurnsPanel";
+import { Inspector } from "./regions/Inspector/Inspector";
+import { LeftRail } from "./regions/LeftRail/LeftRail";
+import { TopBar } from "./regions/TopBar/TopBar";
+import { LogsPanel } from "./regions/LogsPanel/LogsPanel";
 import "./App.css";
 
+// All incoming WS frames, audio frames, and outgoing sends are recorded
+// into the event log in `store.ts`. UI state derives from selectors over
+// that log; nothing stores a separate `messages` mirror.
+
 export default function App() {
-  const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
-  const [messages, setMessages] = useState<ChatEntry[]>([]);
-  const [processes, setProcesses] = useState<ProcessInfo[]>([]);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [micActive, setMicActive] = useState(false);
+  const micActive = useStore((s) => s.micActive);
+  const logsCollapsed = useStore((s) => s.logsCollapsed);
+
   const wsRef = useRef<ReturnType<typeof createWsClient> | null>(null);
   const captureRef = useRef<CaptureHandle | null>(null);
   const playbackRef = useRef<PlaybackHandle | null>(null);
 
-  const pendingRef = useRef<string>("");
-  const emotionRef = useRef<string | undefined>(undefined);
-  const turnIdRef = useRef<string>("");
-
   const handleAudio = useCallback((data: ArrayBuffer) => {
+    actions.recordAudioIn(data.byteLength);
     playbackRef.current?.feed(data);
   }, []);
 
   const handleMessage = useCallback((msg: EgressMessage) => {
-    switch (msg.event_type) {
-      case "response_started":
-        pendingRef.current = "";
-        emotionRef.current = undefined;
-        turnIdRef.current = msg.data.turn_id;
-        break;
-
-      case "sentence":
-        pendingRef.current +=
-          (pendingRef.current ? " " : "") + msg.data.text;
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          // Fold into the existing assistant entry only if it belongs to
-          // the same turn — otherwise a silence-triggered turn (no user
-          // message in between) would overwrite the prior assistant reply.
-          if (
-            last?.role === "assistant" &&
-            last.turn_id === turnIdRef.current
-          ) {
-            return [
-              ...prev.slice(0, -1),
-              { ...last, content: pendingRef.current, emotion: emotionRef.current },
-            ];
-          }
-          return [
-            ...prev,
-            {
-              role: "assistant",
-              content: pendingRef.current,
-              emotion: emotionRef.current,
-              turn_id: turnIdRef.current,
-            },
-          ];
-        });
-        break;
-
-      case "emotion":
-        emotionRef.current = msg.data.emotion;
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (
-            last?.role === "assistant" &&
-            last.turn_id === turnIdRef.current
-          ) {
-            return [
-              ...prev.slice(0, -1),
-              { ...last, emotion: msg.data.emotion },
-            ];
-          }
-          return prev;
-        });
-        break;
-
-      case "user_input":
-        // Voice transcript echoed by the gateway. Typed prompts are added
-        // by `handleSend` directly and never arrive here.
-        setMessages((prev) => [
-          ...prev,
-          { role: "user", content: msg.data.text },
-        ]);
-        break;
-
-      case "response_complete":
-        pendingRef.current = "";
-        emotionRef.current = undefined;
-        break;
-    }
+    actions.recordWsIn(msg);
   }, []);
 
-  // WebSocket connection
+  // Shared send channel for region components (PromptBar in LogsPanel,
+  // TopBar Shutdown). Process control routes use POST /api/process/...
+  // directly and do not flow through here.
+  const sendIngress = useCallback((msg: IngressMessage) => {
+    actions.recordWsOut(msg);
+    wsRef.current?.send(msg);
+  }, []);
+
+  const reconnect = useCallback(() => {
+    wsRef.current?.reconnect();
+  }, []);
+
   useEffect(() => {
     const client = createWsClient({
-      onStatus: setWsStatus,
+      onStatus: actions.setWsStatus,
       onMessage: handleMessage,
       onAudio: handleAudio,
     });
@@ -107,102 +54,63 @@ export default function App() {
     return () => client.close();
   }, [handleMessage, handleAudio]);
 
-  // Playback — always running, feeds from WS binary frames
   useEffect(() => {
+    // StrictMode double-mounts in dev: cancel the pending startPlayback
+    // so a stale handle from mount-1 doesn't survive past mount-2's
+    // cleanup. Without this, two audio graphs run concurrently and the
+    // meter can latch onto the discarded one.
+    let cancelled = false;
     let handle: PlaybackHandle | null = null;
     startPlayback().then((h) => {
+      if (cancelled) { h.stop(); return; }
       handle = h;
       playbackRef.current = h;
     });
     return () => {
+      cancelled = true;
       handle?.stop();
       playbackRef.current = null;
     };
   }, []);
 
-  // Mic capture — toggled by user
   useEffect(() => {
     if (!micActive) return;
+    let cancelled = false;
     let handle: CaptureHandle | null = null;
     startCapture((pcm16) => {
+      actions.recordAudioOut(pcm16.byteLength);
       wsRef.current?.sendBinary(pcm16);
-    }).then((h) => {
-      handle = h;
-      captureRef.current = h;
-    }).catch(() => {
-      setMicActive(false);
-    });
+    })
+      .then((h) => {
+        if (cancelled) { h.stop(); return; }
+        handle = h;
+        captureRef.current = h;
+      })
+      .catch(() => actions.setMicActive(false));
     return () => {
+      cancelled = true;
       handle?.stop();
       captureRef.current = null;
     };
   }, [micActive]);
 
-  // SSE for real-time logs
-  useEffect(() => {
-    const es = new EventSource("/api/logs/stream");
-    es.onmessage = (ev) => {
-      const entry: LogEntry = JSON.parse(ev.data);
-      setLogs((prev) => {
-        const next = [...prev, entry];
-        return next.length > 10_000 ? next.slice(-10_000) : next;
-      });
-    };
-    return () => es.close();
-  }, []);
-
-  // Poll process status
-  useEffect(() => {
-    let active = true;
-    async function poll() {
-      if (!active) return;
-      try {
-        const res = await fetch("/api/process/status");
-        if (res.ok) setProcesses(await res.json());
-      } catch { /* supervisor not ready */ }
-    }
-    poll();
-    const interval = setInterval(poll, 1000);
-    return () => { active = false; clearInterval(interval); };
-  }, []);
-
-  function handleSend(text: string) {
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
-    wsRef.current?.send({ type: "text", content: text });
-  }
-
-  function handleReconnect() {
-    wsRef.current?.reconnect();
-  }
-
-  function handleMicToggle() {
-    setMicActive((prev) => !prev);
-  }
-
-  async function handleProcessAction(
-    name: string,
-    action: "start" | "stop" | "restart"
-  ) {
-    await fetch(`/api/process/${name}/${action}`, { method: "POST" });
-  }
-
   return (
-    <div className="app">
-      <Toolbar
-        wsStatus={wsStatus}
-        onReconnect={handleReconnect}
-        processes={processes}
-        onProcessAction={handleProcessAction}
-      />
-      <div className="main-content">
-        <Conversation
-          messages={messages}
-          onSend={handleSend}
-          micActive={micActive}
-          onMicToggle={handleMicToggle}
-        />
-      </div>
-      <LogPanel logs={logs} />
+    <div className={"app" + (logsCollapsed ? " logs-collapsed" : "")}>
+      <header className="region-topbar">
+        <TopBar onSend={sendIngress} onReconnect={reconnect} />
+      </header>
+      <aside className="region-leftrail">
+        <LeftRail />
+      </aside>
+      <main className="region-turns">
+        <TurnsPanel />
+      </main>
+      <aside className="region-inspector">
+        <Inspector />
+      </aside>
+      <footer className="region-logs">
+        <LogsPanel onSend={sendIngress} />
+      </footer>
     </div>
   );
 }

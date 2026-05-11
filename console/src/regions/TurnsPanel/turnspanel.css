@@ -1,0 +1,281 @@
+.turnspanel {
+  display: grid;
+  /* timeline (auto, content-driven) · search bar (auto) · turn rows (1fr) */
+  grid-template-rows: auto auto 1fr;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+/* ─── Timeline strip wrapper ─── */
+.timeline-wrap {
+  padding: 10px 14px 14px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* ─── Rounded-card network timeline ─── */
+.net-tl {
+  background: #fff;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.net-axis-row {
+  display: flex;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--hairline);
+}
+.lane-gutter {
+  width: 72px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  align-items: center;
+}
+.net-axis {
+  flex: 1;
+  display: flex;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-4);
+  justify-content: space-between;
+}
+
+.net-lanes { display: flex; flex-direction: column; }
+.net-lane {
+  display: flex;
+  height: 18px;
+  border-bottom: 1px solid var(--hairline);
+}
+.net-lane:last-child { border-bottom: none; }
+.net-lane .net-track {
+  flex: 1;
+  position: relative;
+  height: 100%;
+  background: var(--paper-2);
+}
+
+.net-block {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.net-block.user      { background: var(--ink-3);    border-left: 1.5px solid var(--ink-2); }
+.net-block.talker    { background: var(--blue);     border-left: 1.5px solid var(--blue-2); }
+.net-block.talker.live {
+  background: linear-gradient(90deg, var(--mint), var(--blue));
+  border-left-color: var(--mint);
+}
+.net-block.interrupted {
+  background: var(--terra);
+  border-left: 1.5px solid #8C5847;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.18) 0 4px,
+    transparent 4px 8px
+  );
+}
+.net-block.selected { outline: 1.5px solid var(--blue-2); outline-offset: 1px; }
+.net-block .bl {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: #FBF8F2;
+  padding: 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 12px;
+}
+
+/* ─── Search + summary bar ─── */
+.turns-toolbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--panel);
+}
+.turns-toolbar-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.turns-search {
+  height: 26px;
+  padding: 2px 10px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  outline: none;
+}
+.turns-search:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(123, 146, 174, 0.15);
+}
+.turns-summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.turns-summary b { color: var(--ink); font-weight: 500; }
+.turns-export {
+  padding: 3px 10px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: var(--panel-2);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ─── Turn rows ─── */
+.turns-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.turn-row {
+  display: grid;
+  grid-template-columns: 4px 76px 1fr 90px;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--hairline);
+  cursor: pointer;
+  background: var(--panel-2);
+  position: relative;
+  transition: background 100ms ease, opacity 120ms ease;
+}
+.turn-row:hover { background: var(--paper-2); }
+.turn-row.selected,
+.turn-row.selected:hover { background: var(--blue-mist); }
+.turn-row.dim { opacity: 0.28; }
+
+.stripes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  height: 100%;
+}
+.stripe {
+  flex: 1;
+  background: var(--ink-4);
+  border-radius: 2px;
+  min-height: 6px;
+}
+.stripe.quiet { background: transparent; }
+.stripe.interrupted { background: var(--terra); }
+.stripe.live {
+  background: var(--mint);
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+.turn-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+.turn-time .abs { color: var(--ink); font-weight: 500; }
+.turn-time .rel { font-size: 10px; }
+
+.turn-body { min-width: 0; }
+.turn-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.turn-who .who-name { color: var(--ink); letter-spacing: 0.05em; }
+.turn-who .turn-id {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-4);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.turn-tags { display: inline-flex; gap: 4px; }
+.tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tag.interrupted { color: var(--terra); background: var(--terra-soft); }
+.tag.live {
+  color: var(--mint);
+  background: var(--mint-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tag.live::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--mint);
+  animation: live-pulse 1.4s ease-out infinite;
+}
+
+.turn-text {
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.55;
+  word-break: break-word;
+}
+.turn-text.user { color: var(--ink-2); font-weight: 500; }
+.turn-text.streaming { animation: turn-text-pulse 1.6s ease-in-out infinite; }
+.ellipsis-fade { color: var(--ink-4); }
+
+@keyframes turn-text-pulse {
+  0%, 100% { color: var(--ink-3); }
+  50%      { color: var(--ink); }
+}
+
+.turn-meta-mini {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+.turn-meta-mini b { color: var(--ink); font-weight: 500; }

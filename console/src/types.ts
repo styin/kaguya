@@ -28,13 +28,70 @@ export type EgressMessage =
   | ResponseCompleteEvent
   | UserInputEvent;
 
-// Conversation state
-export type ChatEntry = {
-  role: "user" | "assistant";
-  content: string;
+// ─── Event log envelope ──────────────────────────────────────────────
+//
+// Direction is named relative to the browser (where this code runs):
+//   `ws_in`    / `audio_in`  — browser RECEIVES
+//   `ws_out`   / `audio_out` — browser SENDS
+//
+// All UI state derives from this log via pure selectors in `store.ts`.
+// Audio frames carry only byte counts, never PCM payloads — we don't
+// want unbounded buffers shadowing the audio path.
+
+export type WsEvent =
+  | { kind: "ws_in";     ts: number; msg: EgressMessage }
+  | { kind: "ws_out";    ts: number; msg: IngressMessage }
+  | { kind: "audio_in";  ts: number; bytes: number }
+  | { kind: "audio_out"; ts: number; bytes: number };
+
+// ─── Turn projection (derived) ───────────────────────────────────────
+//
+// Computed by `selectTurns()` over the event log; never stored directly.
+// Each `response_started` opens an assistant turn; `sentence`/`emotion`
+// append; `response_complete` closes it. User turns come from
+// `user_input` (voice) or `ws_out` text sends (typed prompts).
+
+export type Sentence = { text: string; ts: number };
+
+export type AssistantTurn = {
+  kind: "assistant";
+  turn_id: string;
+  started_at: number;
+  complete_at: number | null;
+  interrupted: boolean;
+  sentences: Sentence[];
   emotion?: string;
-  // Assistant entries carry the turn_id from `response_started` so subsequent
-  // sentence events fold into the same entry; a new turn (e.g. silence-
-  // triggered) gets a fresh entry instead of overwriting the prior one.
-  turn_id?: string;
 };
+
+export type UserTurn = {
+  kind: "user";
+  ts: number;
+  text: string;
+  source: "voice" | "typed";
+};
+
+export type Turn = AssistantTurn | UserTurn;
+
+// ─── Supervisor HTTP types ───────────────────────────────────────────
+//
+// Mirror of `console/server/supervisor.ts` shapes. Duplicated here
+// because tsconfig.json scopes `include` to `src/` only.
+
+export type ProcessStatus = "stopped" | "starting" | "running" | "errored";
+
+export interface ProcessInfo {
+  name: string;
+  managed: boolean;
+  status: ProcessStatus;
+  pid?: number;
+  uptimeSecs?: number;
+  exitCode?: number | null;
+}
+
+export interface LogEntry {
+  id: number;
+  timestamp: string;
+  source: string;
+  stream: "stdout" | "stderr";
+  line: string;
+}

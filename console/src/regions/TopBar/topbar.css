@@ -1,0 +1,145 @@
+.topbar {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0 14px;
+  gap: 14px;
+  font-family: var(--font-ui);
+}
+
+.topbar-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--hairline);
+  margin: 6px 0;
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--ink);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.brand-moon {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 35%,
+    #FBF8F2 0 35%,
+    #E8E2D6 36% 60%,
+    #DBD3C3 61% 100%
+  );
+  box-shadow: inset 0 0 0 1px rgba(42, 54, 69, 0.1);
+}
+
+.version-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.uptime-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.uptime-chip-label {
+  font-size: 10px;
+  color: var(--ink-4);
+  margin-right: 4px;
+}
+
+/* ─── WS pill (replaces flat dot + word) ─── */
+.ws-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ws-pill.connected {
+  background: var(--mint-soft);
+  border: 1px solid var(--mint);
+  color: #4F6B57;
+}
+.ws-pill.connecting {
+  background: var(--amber-soft);
+  border: 1px solid var(--amber);
+  color: #886A3D;
+}
+.ws-pill.disconnected {
+  background: var(--terra-soft);
+  border: 1px solid var(--terra);
+  color: var(--terra);
+}
+
+.ws-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.ws-pill.connected .ws-pill-dot {
+  background: var(--mint);
+  animation: ws-live-pulse 2s ease-out infinite;
+}
+.ws-pill.connecting .ws-pill-dot { background: var(--amber); }
+.ws-pill.disconnected .ws-pill-dot { background: var(--terra); }
+
+@keyframes ws-live-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(156, 184, 166, 0.7); }
+  70%  { box-shadow: 0 0 0 6px rgba(156, 184, 166, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(156, 184, 166, 0); }
+}
+
+.msg-counters {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.msg-counters b { color: var(--ink); font-weight: 500; }
+
+.top-spacer { flex: 1; }
+
+.top-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.top-btn:hover { background: rgba(255, 255, 255, 0.7); border-color: var(--ink-4); }
+
+.top-btn.danger {
+  color: var(--terra);
+  border-color: var(--terra);
+}
+.top-btn.danger:hover { background: var(--terra-soft); }
