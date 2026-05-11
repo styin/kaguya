@@ -446,7 +446,12 @@ async fn main() -> anyhow::Result<()> {
             Some(event) = input_rx.p4.recv() => {
                 if let InputEvent::SilenceExceeded { duration } = event {
                     debug!(secs = duration.as_secs(), "P4: silence");
-                    if active_gen.is_none() {
+                    // B9: tier timers keep ticking for telemetry, but the
+                    // proactive LLM call is gated. Re-enable once B10 reworks
+                    // the silence prompt to let the LLM stay quiet.
+                    if !config.silence.enabled {
+                        debug!(secs = duration.as_secs(), "P4: silence dispatch suppressed (silence.enabled=false)");
+                    } else if active_gen.is_none() {
                         let turn_id = Uuid::new_v4().to_string();
                         let ctx = context::for_silence(
                             &conversation_id, &turn_id,
