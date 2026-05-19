@@ -14,6 +14,8 @@ npm run dev     # http://localhost:3000
 
 The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (gateway) and mounts an in-process supervisor at `/api/*` for managing/observing child processes. The supervisor's process definitions live in `console/supervisor.json`.
 
+On Windows, managed process entries can provide `command_win32`; the supervisor uses that command with the platform shell instead of the Unix `/bin/bash` command.
+
 ## Layout
 
 ```

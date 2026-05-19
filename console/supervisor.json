@@ -2,11 +2,13 @@
   "processes": {
     "gateway": {
       "command": "source $HOME/.cargo/env && cargo run --features dev-console",
+      "command_win32": "cargo run --features dev-console",
       "cwd": "../gateway",
       "env": { "RUST_LOG": "kaguya_gateway=debug" }
     },
     "talker": {
       "command": ".venv/bin/python main.py",
+      "command_win32": ".venv\\Scripts\\python.exe main.py",
       "cwd": "../talker",
       "env": {}
     },

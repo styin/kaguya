@@ -50,6 +50,7 @@ export interface LogEntry {
 
 interface ManagedProcessConfig {
   command: string;
+  command_win32?: string;
   cwd: string;
   env?: Record<string, string>;
   managed?: true;
@@ -71,10 +72,16 @@ interface SupervisorConfig {
 
 const MAX_LOG_ENTRIES = 10_000;
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 // Drop TTY spinners (e.g. RealtimeSTT's `⠋ recording`) — Braille block U+2800–U+28FF
 // followed by whitespace is a near-unambiguous signature for a progress glyph.
 const SPINNER_RE = /^[⠀-⣿]\s/;
+const VOICE_STATUS_SPINNER_RE = /^(?:[\\|/-]\s*)?(?:recording|speak now)\s*$/i;
+
+function isTransientStatusLine(line: string): boolean {
+  const trimmed = line.trim();
+  return SPINNER_RE.test(trimmed) || VOICE_STATUS_SPINNER_RE.test(trimmed);
+}
 
 interface ManagedProcess {
   config: ManagedProcessConfig;
@@ -143,10 +150,11 @@ export class Supervisor {
     proc.exitCode = null;
     proc.startedAt = Date.now();
 
-    const child = spawn(proc.config.command, {
+    const command = this.commandForPlatform(proc.config);
+    const child = spawn(command, {
       cwd,
       env,
-      shell: "/bin/bash",
+      shell: process.platform === "win32" ? true : "/bin/bash",
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -192,13 +200,13 @@ export class Supervisor {
     if (!proc.child) return { ok: false, error: `${name} not running` };
 
     this.pushLog(name, "stdout", `[supervisor] stopping PID ${proc.child.pid}`);
-    proc.child.kill("SIGTERM");
+    this.stopChild(proc.child);
 
     // Force kill after 5s if still alive
     const pid = proc.child.pid;
     setTimeout(() => {
       if (proc.child && proc.child.pid === pid) {
-        proc.child.kill("SIGKILL");
+        this.forceKillChild(proc.child);
         this.pushLog(name, "stderr", `[supervisor] force-killed PID ${pid}`);
       }
     }, 5000);
@@ -211,7 +219,7 @@ export class Supervisor {
     if (!proc) return { ok: false, error: `unknown process: ${name}` };
 
     if (proc.child) {
-      proc.child.kill("SIGTERM");
+      this.stopChild(proc.child);
       // Wait for exit, then start
       proc.child.once("exit", () => {
         setTimeout(() => this.start(name), 200);
@@ -220,7 +228,7 @@ export class Supervisor {
       const pid = proc.child.pid;
       setTimeout(() => {
         if (proc.child && proc.child.pid === pid) {
-          proc.child.kill("SIGKILL");
+          this.forceKillChild(proc.child);
         }
       }, 5000);
     } else {
@@ -276,7 +284,7 @@ export class Supervisor {
 
   private pushLog(source: string, stream: "stdout" | "stderr", line: string) {
     const cleaned = line.replace(ANSI_RE, "");
-    if (SPINNER_RE.test(cleaned)) return;
+    if (isTransientStatusLine(cleaned)) return;
     this.logId++;
     const entry: LogEntry = {
       id: this.logId,
@@ -311,9 +319,43 @@ export class Supervisor {
 
   // ── Cleanup ──
 
+  private commandForPlatform(config: ManagedProcessConfig): string {
+    if (process.platform === "win32" && config.command_win32) {
+      return config.command_win32;
+    }
+    return config.command;
+  }
+
+  private stopChild(child: ChildProcess): void {
+    if (process.platform === "win32") {
+      this.killWindowsProcessTree(child);
+      return;
+    }
+    child.kill("SIGTERM");
+  }
+
+  private forceKillChild(child: ChildProcess): void {
+    if (process.platform === "win32") {
+      this.killWindowsProcessTree(child);
+      return;
+    }
+    child.kill("SIGKILL");
+  }
+
+  private killWindowsProcessTree(child: ChildProcess): void {
+    if (child.pid === undefined) return;
+    const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.on("error", () => {
+      child.kill();
+    });
+  }
+
   shutdown() {
     for (const [, proc] of this.managed) {
-      if (proc.child) proc.child.kill("SIGTERM");
+      if (proc.child) this.stopChild(proc.child);
     }
     for (const [, proc] of this.unmanaged) {
       if (proc.pollTimer) clearInterval(proc.pollTimer);

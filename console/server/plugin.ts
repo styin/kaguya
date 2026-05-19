@@ -1,4 +1,5 @@
 import type { Plugin } from "vite";
+import { fileURLToPath } from "node:url";
 import { Supervisor } from "./supervisor.js";
 
 export function supervisorPlugin(): Plugin {
@@ -8,7 +9,7 @@ export function supervisorPlugin(): Plugin {
     name: "kaguya-supervisor",
     configureServer(server) {
       supervisor = new Supervisor(
-        new URL("../supervisor.json", import.meta.url).pathname
+        fileURLToPath(new URL("../supervisor.json", import.meta.url))
       );
       supervisor.init().catch((err) => {
         console.error("[supervisor] init failed:", err);
