@@ -4,7 +4,7 @@
 
 **A voice-first AI Chief of Staff that runs on your hardware.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/Gateway-Rust-orange.svg)](gateway/)
 [![Python](https://img.shields.io/badge/Talker-Python-blue.svg)](talker/)
 [![TypeScript](https://img.shields.io/badge/Reasoner-TypeScript-blue.svg)](reasoner/)
@@ -277,4 +277,4 @@ We're building Phase 1 in the open. Once M1-M3 land and the core pipeline is run
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+GNU Affero General Public License v3.0 only (AGPL-3.0-only) — see [LICENSE](LICENSE) for details.

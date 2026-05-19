@@ -1,6 +1,7 @@
 [project]
 name = "kaguya-talker"
 version = "0.1.0"
+license = "AGPL-3.0-only"
 description = "Kaguya Talker Agent — voice listener, LLM pipeline, TTS speaker"
 requires-python = ">=3.11"
 dependencies = [
