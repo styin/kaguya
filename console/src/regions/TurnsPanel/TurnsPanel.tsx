@@ -11,6 +11,7 @@ import "./turnspanel.css";
 
 export function TurnsPanel() {
   const events = useStore((s) => s.events);
+  const audioEvents = useStore((s) => s.audioEvents);
   const selTurn = useStore((s) => s.selTurn);
   const searchQuery = useStore((s) => s.searchQuery);
 
@@ -67,8 +68,8 @@ export function TurnsPanel() {
             turn={t}
             selectedKey={selTurn}
             onSelect={actions.setSelTurn}
-            events={events}
-            audioInBytes={t.kind === "assistant" ? audioInBytesForTurn(events, t) : 0}
+            audioEvents={audioEvents}
+            audioInBytes={t.kind === "assistant" ? audioInBytesForTurn(audioEvents, t) : 0}
           />
         ))}
       </div>

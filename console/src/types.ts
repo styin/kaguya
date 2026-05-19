@@ -34,13 +34,15 @@ export type EgressMessage =
 //   `ws_in`    / `audio_in`  — browser RECEIVES
 //   `ws_out`   / `audio_out` — browser SENDS
 //
-// All UI state derives from this log via pure selectors in `store.ts`.
-// Audio frames carry only byte counts, never PCM payloads — we don't
-// want unbounded buffers shadowing the audio path.
+// Semantic UI state derives from the WS event log via pure selectors in `store.ts`.
+// Audio byte counts live in a separate ring so they cannot evict turn events.
+// Audio frames carry only byte counts, never PCM payloads.
 
 export type WsEvent =
   | { kind: "ws_in";     ts: number; msg: EgressMessage }
-  | { kind: "ws_out";    ts: number; msg: IngressMessage }
+  | { kind: "ws_out";    ts: number; msg: IngressMessage };
+
+export type AudioEvent =
   | { kind: "audio_in";  ts: number; bytes: number }
   | { kind: "audio_out"; ts: number; bytes: number };
 

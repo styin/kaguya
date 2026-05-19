@@ -3,10 +3,8 @@ export const config = {
   reconnectDelays: [0, 300, 1200, 2700, 4800, 7000],
   reconnectJitterMs: 1000,
 
-  // Cap on the event ring buffer — bounded memory for long sessions.
-  // Turn list and counters render off this buffer; older events fall off
-  // the back. Sized for ~30 min of active conversation at typical event
-  // rates (sentences + emotion + lifecycle per turn).
+  // Cap on each in-memory event ring. Semantic WS frames and audio byte
+  // counts use separate rings so high-frequency audio cannot evict turns.
   eventBufferCap: 2000,
 
   // Cap on the log buffer. Terminal scrollback feel is the priority,

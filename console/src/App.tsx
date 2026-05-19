@@ -11,9 +11,10 @@ import { TopBar } from "./regions/TopBar/TopBar";
 import { LogsPanel } from "./regions/LogsPanel/LogsPanel";
 import "./App.css";
 
-// All incoming WS frames, audio frames, and outgoing sends are recorded
-// into the event log in `store.ts`. UI state derives from selectors over
-// that log; nothing stores a separate `messages` mirror.
+// WS frames and outgoing sends are recorded into the semantic event log in
+// `store.ts`; audio frames use a separate byte-count ring so an open mic
+// cannot evict turn lifecycle events. UI state derives from selectors over
+// those logs; nothing stores a separate `messages` mirror.
 
 export default function App() {
   const micActive = useStore((s) => s.micActive);

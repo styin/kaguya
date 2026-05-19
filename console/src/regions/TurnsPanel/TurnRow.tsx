@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AssistantTurn, Turn, WsEvent } from "../../types";
+import type { AssistantTurn, AudioEvent, Turn } from "../../types";
 import { firstAudioLatencyMs, turnDurationMs } from "../../store";
 
 export function turnKey(t: Turn): string {
@@ -14,13 +14,13 @@ export function TurnRow({
   turn,
   selectedKey,
   onSelect,
-  events,
+  audioEvents,
   audioInBytes,
 }: {
   turn: Turn;
   selectedKey: string | null;
   onSelect: (key: string | null) => void;
-  events: WsEvent[];
+  audioEvents: AudioEvent[];
   audioInBytes: number;
 }) {
   const k = turnKey(turn);
@@ -72,7 +72,7 @@ export function TurnRow({
           <AssistantMeta
             turn={turn as AssistantTurn}
             audioInBytes={audioInBytes}
-            events={events}
+            audioEvents={audioEvents}
           />
         )}
         {isUser && (
@@ -81,7 +81,7 @@ export function TurnRow({
       </div>
       {/*
         Design has an audio-mini waveform in this slot. Skipped: we keep
-        only byte counts in the event log (`audio_in` events have `bytes`
+        only byte counts in the audio event ring (`audio_in` events have `bytes`
         but no PCM payload), so a real waveform would require either
         keeping audio in memory or new server-side metadata. The audio
         KB in the meta-mini line above already gives a magnitude.
@@ -93,13 +93,13 @@ export function TurnRow({
 function AssistantMeta({
   turn,
   audioInBytes,
-  events,
+  audioEvents,
 }: {
   turn: AssistantTurn;
   audioInBytes: number;
-  events: WsEvent[];
+  audioEvents: AudioEvent[];
 }) {
-  const ttfs = firstAudioLatencyMs(events, turn);
+  const ttfs = firstAudioLatencyMs(audioEvents, turn);
   const dur = turnDurationMs(turn);
   return (
     <div className="turn-meta-mini">

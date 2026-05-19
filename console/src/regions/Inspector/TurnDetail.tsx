@@ -1,4 +1,4 @@
-import type { Turn, WsEvent } from "../../types";
+import type { AudioEvent, Turn } from "../../types";
 import { firstAudioLatencyMs, turnDurationMs } from "../../store";
 
 /**
@@ -7,7 +7,7 @@ import { firstAudioLatencyMs, turnDurationMs } from "../../store";
  * sound). Tool / Reasoner sections are intentionally absent — those
  * events aren't on the wire yet (see console/README.md → Future work).
  */
-export function TurnDetail({ turn, events }: { turn: Turn; events: WsEvent[] }) {
+export function TurnDetail({ turn, audioEvents }: { turn: Turn; audioEvents: AudioEvent[] }) {
   if (turn.kind === "user") {
     return (
       <div className="inspector">
@@ -23,7 +23,7 @@ export function TurnDetail({ turn, events }: { turn: Turn; events: WsEvent[] }) 
   }
 
   const duration = turnDurationMs(turn);
-  const ttfs = firstAudioLatencyMs(events, turn);
+  const ttfs = firstAudioLatencyMs(audioEvents, turn);
 
   return (
     <div className="inspector">

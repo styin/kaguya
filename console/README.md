@@ -35,19 +35,21 @@ CSS grid: `44px 1fr var(--logs-h, 240px)` × `248px 1fr 360px`. When the logs pa
 
 ## State model
 
-All UI state derives from a single append-only event log in `src/store.ts`. Every WS frame (in or out), every audio frame (byte counts only — not PCM payloads), and every outbound send is recorded with a timestamp:
+Semantic UI state derives from an append-only WS event log in `src/store.ts`. Audio frames are recorded as timestamped byte counts in a separate ring so high-frequency mic/TTS frames cannot evict turn lifecycle events:
 
 ```ts
 type WsEvent =
   | { kind: "ws_in";     ts: number; msg: EgressMessage }
-  | { kind: "ws_out";    ts: number; msg: IngressMessage }
+  | { kind: "ws_out";    ts: number; msg: IngressMessage };
+
+type AudioEvent =
   | { kind: "audio_in";  ts: number; bytes: number }
   | { kind: "audio_out"; ts: number; bytes: number };
 ```
 
-Direction is browser-relative (`in` = browser RECEIVES, `out` = browser SENDS). The log is a capped ring buffer (`config.eventBufferCap`, default 2000).
+Direction is browser-relative (`in` = browser RECEIVES, `out` = browser SENDS). Both logs are capped ring buffers (`config.eventBufferCap`, default 2000).
 
-Derived shapes — turn lists, streaming-turn lookups, message counters — are pure selectors over the log (`selectTurns`, `selectStreamingTurn`, etc.). No mirror state, no counters held alongside the log; the log is the single source of truth.
+Derived shapes — turn lists, streaming-turn lookups, message counters, TTFS, and audio byte totals — are pure selectors over these logs (`selectTurns`, `selectStreamingTurn`, etc.). No mirror message state or per-turn counters sit alongside them.
 
 **Inference policy.** Anything that can be accurately and computationally derived from the log is derived (turn durations, first-sentence latencies, ingress/egress counters, streaming state). Anything that the gateway knows but doesn't send (tool calls, reasoner steps, session id) is *not* faked — the regions where those would render are left empty (see "Future work" below).
 

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { config } from "./config";
 import type {
+  AudioEvent,
   AssistantTurn,
   EgressMessage,
   IngressMessage,
@@ -13,6 +14,7 @@ import type { WsStatus } from "./ws";
 
 export interface AppState {
   events: WsEvent[];
+  audioEvents: AudioEvent[];
   wsStatus: WsStatus;
   wsOpenedAt: number | null;
 
@@ -26,6 +28,7 @@ export interface AppState {
 
 const initial: AppState = {
   events: [],
+  audioEvents: [],
   wsStatus: "disconnected",
   wsOpenedAt: null,
   selTurn: null,
@@ -40,8 +43,8 @@ const initial: AppState = {
 //
 // Single mutable snapshot reference behind a getter. Listeners fire on
 // every mutation. Mutations always produce a new top-level reference so
-// React's referential comparison detects the change. The `events` array
-// is replaced on append (no in-place mutation) for the same reason.
+// React's referential comparison detects the change. Ring arrays are
+// replaced on append (no in-place mutation) for the same reason.
 
 let state: AppState = initial;
 const listeners = new Set<() => void>();
@@ -70,11 +73,18 @@ export function useStore<T>(selector: (s: AppState) => T): T {
 
 // ─── Actions ─────────────────────────────────────────────────────────
 
+function pushRing<T>(items: T[], item: T): T[] {
+  return items.length >= config.eventBufferCap
+    ? [...items.slice(items.length - config.eventBufferCap + 1), item]
+    : [...items, item];
+}
+
 function pushEvent(ev: WsEvent): void {
-  const next = state.events.length >= config.eventBufferCap
-    ? [...state.events.slice(state.events.length - config.eventBufferCap + 1), ev]
-    : [...state.events, ev];
-  setState({ events: next });
+  setState({ events: pushRing(state.events, ev) });
+}
+
+function pushAudioEvent(ev: AudioEvent): void {
+  setState({ audioEvents: pushRing(state.audioEvents, ev) });
 }
 
 export const actions = {
@@ -85,10 +95,10 @@ export const actions = {
     pushEvent({ kind: "ws_out", ts: Date.now(), msg });
   },
   recordAudioIn(bytes: number): void {
-    pushEvent({ kind: "audio_in", ts: Date.now(), bytes });
+    pushAudioEvent({ kind: "audio_in", ts: Date.now(), bytes });
   },
   recordAudioOut(bytes: number): void {
-    pushEvent({ kind: "audio_out", ts: Date.now(), bytes });
+    pushAudioEvent({ kind: "audio_out", ts: Date.now(), bytes });
   },
   setWsStatus(status: WsStatus): void {
     if (status === "connected" && state.wsOpenedAt === null) {
@@ -194,11 +204,11 @@ export function turnDurationMs(t: AssistantTurn): number | null {
  * sentence boundaries before TTS had finished rendering.
  */
 export function firstAudioLatencyMs(
-  events: WsEvent[],
+  audioEvents: AudioEvent[],
   t: AssistantTurn,
 ): number | null {
   const end = t.complete_at ?? Number.POSITIVE_INFINITY;
-  for (const ev of events) {
+  for (const ev of audioEvents) {
     if (ev.kind === "audio_in" && ev.ts >= t.started_at && ev.ts < end) {
       return ev.ts - t.started_at;
     }
@@ -214,23 +224,23 @@ export function selectWsOutCount(events: WsEvent[]): number {
   return events.reduce((n, e) => n + (e.kind === "ws_out" ? 1 : 0), 0);
 }
 
-export function selectAudioInBytes(events: WsEvent[]): number {
-  return events.reduce((n, e) => n + (e.kind === "audio_in" ? e.bytes : 0), 0);
+export function selectAudioInBytes(audioEvents: AudioEvent[]): number {
+  return audioEvents.reduce((n, e) => n + (e.kind === "audio_in" ? e.bytes : 0), 0);
 }
 
-export function selectAudioOutBytes(events: WsEvent[]): number {
-  return events.reduce((n, e) => n + (e.kind === "audio_out" ? e.bytes : 0), 0);
+export function selectAudioOutBytes(audioEvents: AudioEvent[]): number {
+  return audioEvents.reduce((n, e) => n + (e.kind === "audio_out" ? e.bytes : 0), 0);
 }
 
 /**
  * Bytes of TTS audio received during a given assistant turn — sum of
  * `audio_in` event byte counts with `ts ∈ [started_at, complete_at ?? +∞)`.
- * Derived purely from the log; no per-turn counter sits alongside it.
+ * Derived purely from the audio event ring; no per-turn counter sits alongside it.
  */
-export function audioInBytesForTurn(events: WsEvent[], t: AssistantTurn): number {
+export function audioInBytesForTurn(audioEvents: AudioEvent[], t: AssistantTurn): number {
   const end = t.complete_at ?? Number.POSITIVE_INFINITY;
   let total = 0;
-  for (const ev of events) {
+  for (const ev of audioEvents) {
     if (ev.kind === "audio_in" && ev.ts >= t.started_at && ev.ts < end) {
       total += ev.bytes;
     }
