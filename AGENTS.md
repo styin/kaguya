@@ -29,6 +29,14 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 - Gateway does not inspect or decode audio content.
 - P0 control signals bypass the Input Stream entirely.
 
+## Cross-Platform Support
+
+Kaguya is intended to run across multiple desktop platforms, especially Windows and macOS. When writing or testing code, keep cross-OS behavior in scope:
+
+- Treat paths as structured data, never as plain strings. Prefer `PathBuf` / `Path` in Rust, `pathlib.Path` in Python, and `path` / URL helpers in Node.js.
+- Use platform abstraction layers for OS-specific behavior, such as `#[cfg(windows)]` / `#[cfg(unix)]` in Rust and `sys.platform` / `os.name` in Python.
+- Review transports and process management for cross-OS tolerance: Unix sockets vs TCP/named pipes, signal semantics, process-tree termination, shell invocation, executable suffixes, and environment activation all differ by platform.
+
 ## Language per Component
 
 | Component    | Language                            |
