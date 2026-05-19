@@ -42,7 +42,9 @@ impl RouterControlService for ControlServiceImpl {
             None => return Err(Status::invalid_argument("empty signal")),
         };
 
-        self.control_tx.send(internal).await
+        self.control_tx
+            .send(internal)
+            .await
             .map_err(|_| Status::internal("control channel closed"))?;
 
         Ok(Response::new(proto::ControlAck {}))

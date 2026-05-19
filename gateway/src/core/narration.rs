@@ -19,9 +19,13 @@ impl NarrationFilter {
 
     pub fn should_narrate(&mut self, description: &str) -> bool {
         if let Some(t) = self.last_time {
-            if t.elapsed() < self.min_interval { return false; }
+            if t.elapsed() < self.min_interval {
+                return false;
+            }
         }
-        if description == self.last_desc { return false; }
+        if description == self.last_desc {
+            return false;
+        }
         self.last_time = Some(Instant::now());
         self.last_desc = description.to_string();
         true

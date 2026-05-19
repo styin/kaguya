@@ -124,10 +124,12 @@ impl RagStore {
             CREATE TABLE IF NOT EXISTS projects (
                 name TEXT PRIMARY KEY, description TEXT DEFAULT '',
                 metadata TEXT DEFAULT '{}', updated_at INTEGER NOT NULL
-            );"
+            );",
         )?;
         info!("RAG store opened: {}", p.display());
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub async fn insert_memory(&self, entry: &MemoryEntry) -> anyhow::Result<()> {
@@ -162,7 +164,7 @@ impl RagStore {
              JOIN memories m ON m.rowid = fts.rowid
              WHERE memories_fts MATCH ?1
              ORDER BY rank
-             LIMIT ?2"
+             LIMIT ?2",
         ) {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -191,7 +193,12 @@ impl RagStore {
         conn.execute(
             "INSERT OR REPLACE INTO embeddings (memory_id, vector, model, created_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![memory_id, blob, model, chrono::Utc::now().timestamp_millis()],
+            params![
+                memory_id,
+                blob,
+                model,
+                chrono::Utc::now().timestamp_millis()
+            ],
         )?;
         Ok(())
     }
@@ -241,7 +248,7 @@ impl RagStore {
             "SELECT m.id, m.content FROM memories m
              LEFT JOIN embeddings e ON m.id = e.memory_id
              WHERE e.memory_id IS NULL
-             ORDER BY m.created_at DESC LIMIT 100"
+             ORDER BY m.created_at DESC LIMIT 100",
         ) {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -266,9 +273,7 @@ impl RagStore {
 
         let cap = |s: String| -> String {
             match max_chars_per_entry {
-                Some(n) if s.chars().count() > n => {
-                    crate::rag::truncate_chars(&s, n).to_string()
-                }
+                Some(n) if s.chars().count() > n => crate::rag::truncate_chars(&s, n).to_string(),
                 _ => s,
             }
         };
@@ -279,10 +284,9 @@ impl RagStore {
                 "SELECT content FROM memories WHERE memory_type = ?1
                  ORDER BY created_at DESC LIMIT ?2",
             ) {
-                if let Ok(rows) = stmt.query_map(
-                    params![mem_type, limit as i64],
-                    |r| r.get::<_, String>(0),
-                ) {
+                if let Ok(rows) =
+                    stmt.query_map(params![mem_type, limit as i64], |r| r.get::<_, String>(0))
+                {
                     for c in rows.flatten() {
                         md.push_str(&format!("- {}\n", cap(c)));
                     }

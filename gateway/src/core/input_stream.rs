@@ -4,8 +4,8 @@
 //! Note that priority is enforced by the biased select in the event loop, not by the data structure itself.
 //! This module defines the data structures and channel setup.
 
-use tokio::sync::mpsc;
 use crate::types::InputEvent;
+use tokio::sync::mpsc;
 
 pub struct InputSenders {
     pub p1: mpsc::Sender<InputEvent>,
@@ -31,7 +31,19 @@ pub fn create(buffer: usize) -> (InputSenders, InputReceivers) {
     let (p5_tx, p5_rx) = mpsc::channel(buffer);
 
     (
-        InputSenders { p1: p1_tx, p2: p2_tx, p3: p3_tx, p4: p4_tx, p5: p5_tx },
-        InputReceivers { p1: p1_rx, p2: p2_rx, p3: p3_rx, p4: p4_rx, p5: p5_rx },
+        InputSenders {
+            p1: p1_tx,
+            p2: p2_tx,
+            p3: p3_tx,
+            p4: p4_tx,
+            p5: p5_tx,
+        },
+        InputReceivers {
+            p1: p1_rx,
+            p2: p2_rx,
+            p3: p3_rx,
+            p4: p4_rx,
+            p5: p5_rx,
+        },
     )
 }

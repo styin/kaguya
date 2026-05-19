@@ -121,7 +121,9 @@ impl Default for GatewayConfig {
                 identity_path: "config/IDENTITY.md".into(),
                 workspace_root: ".".into(),
             },
-            history: HistoryConfig { max_recent_turns: 50 },
+            history: HistoryConfig {
+                max_recent_turns: 50,
+            },
             silence: SilenceConfig {
                 soft_prompt_secs: 3,
                 follow_up_secs: 8,

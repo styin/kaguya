@@ -23,7 +23,9 @@ pub struct LspClient {
 
 impl LspClient {
     pub fn new(workspace_root: PathBuf) -> Self {
-        Self { _workspace_root: workspace_root }
+        Self {
+            _workspace_root: workspace_root,
+        }
     }
 
     /// Stub — returns empty results. See module docs.

@@ -1,10 +1,10 @@
 //! Conversation History Management
-//! 
+//!
 //! In-memory storage of recent conversation turns, including user inputs, assistant responses, and tool results.
 
+use crate::proto;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::proto;
 
 #[derive(Clone)]
 pub struct History {

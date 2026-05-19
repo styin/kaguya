@@ -98,40 +98,41 @@ impl RagEngine {
         let lower = user.to_lowercase();
 
         let pref = [
-            "i like", "i prefer", "i hate", "i want",
-            "我喜欢", "我讨厌", "我偏好", "我习惯",
+            "i like",
+            "i prefer",
+            "i hate",
+            "i want",
+            "我喜欢",
+            "我讨厌",
+            "我偏好",
+            "我习惯",
         ];
         if pref.iter().any(|t| lower.contains(t)) {
-            results.push((
-                format!("User preference: {user}"),
-                MemoryType::Preference,
-            ));
+            results.push((format!("User preference: {user}"), MemoryType::Preference));
         }
 
         let fact = [
-            "my name is", "i work on", "i'm working on", "remember that",
-            "我叫", "我在做", "记住", "别忘了", "don't forget",
+            "my name is",
+            "i work on",
+            "i'm working on",
+            "remember that",
+            "我叫",
+            "我在做",
+            "记住",
+            "别忘了",
+            "don't forget",
         ];
         if fact.iter().any(|t| lower.contains(t)) {
-            results.push((
-                format!("User: {user} → Noted: {resp}"),
-                MemoryType::Fact,
-            ));
+            results.push((format!("User: {user} → Noted: {resp}"), MemoryType::Fact));
         }
 
         let proj = ["project", "repo", "codebase", "pipeline", "项目", "仓库"];
         if proj.iter().any(|t| lower.contains(t)) {
-            results.push((
-                format!("Project: {user}"),
-                MemoryType::Project,
-            ));
+            results.push((format!("Project: {user}"), MemoryType::Project));
         }
 
         if user.chars().count() > 20 && resp.chars().count() > 20 {
-            results.push((
-                format!("Q: {user} → A: {resp}"),
-                MemoryType::Conversation,
-            ));
+            results.push((format!("Q: {user} → A: {resp}"), MemoryType::Conversation));
         }
 
         results

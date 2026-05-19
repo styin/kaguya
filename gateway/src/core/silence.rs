@@ -5,10 +5,10 @@
 //! 30s → context shift
 //! Cancelled on speech start (vad_speech_start) or new dispatch
 
+use crate::types::InputEvent;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use crate::types::InputEvent;
 
 pub struct SilenceTimers {
     soft_secs: u64,
@@ -18,8 +18,18 @@ pub struct SilenceTimers {
 }
 
 impl SilenceTimers {
-    pub fn new(soft: u64, follow_up: u64, context_shift: u64, p4_tx: mpsc::Sender<InputEvent>) -> Self {
-        Self { soft_secs: soft, follow_up_secs: follow_up, context_shift_secs: context_shift, p4_tx }
+    pub fn new(
+        soft: u64,
+        follow_up: u64,
+        context_shift: u64,
+        p4_tx: mpsc::Sender<InputEvent>,
+    ) -> Self {
+        Self {
+            soft_secs: soft,
+            follow_up_secs: follow_up,
+            context_shift_secs: context_shift,
+            p4_tx,
+        }
     }
 
     /// three tier silence timers, returning a CancellationToken that can be used to cancel all timers

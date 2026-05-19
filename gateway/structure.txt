@@ -1,106 +1,44 @@
 gateway/
-├── Cargo.toml
-├── build.rs
-└── src/
-    ├── main.rs          # 入口
-    ├── lib.rs           # 模块声明
-    ├── config.rs        # 配置
-    ├── error.rs         # 错误类型
-    ├── session.rs       # 会话状态
-    ├── router.rs        # 核心路由器
-    ├── demux.rs         # 解复用器 (Ingress 拆流)
-    ├── mux.rs           # 复用器   (Egress 合流)
-    ├── filter.rs        # 输入过滤
-    ├── context.rs       # 上下文管理 (Ctx)
-    ├── memory.rs        # 记忆管理 (Memory)
-    ├── dispatch.rs      # 任务分发 (Reasoner / Tools)
-    ├── stream.rs        # 内部流类型定义
-    ├── telemetry.rs     # 遥测
-    └── endpoint.rs      # OpenPod WebSocket 端点
+|-- Cargo.toml
+|-- build.rs
+`-- src/
+    |-- main.rs
+    |-- lib.rs
+    |-- config.rs
+    |-- error.rs
+    |-- tools.rs
+    |-- clients/
+    |   |-- listener.rs
+    |   |-- reasoner.rs
+    |   `-- talker.rs
+    |-- core/
+    |   |-- context.rs
+    |   |-- history.rs
+    |   |-- input_stream.rs
+    |   |-- narration.rs
+    |   |-- output.rs
+    |   |-- persona.rs
+    |   |-- silence.rs
+    |   `-- types.rs
+    |-- services/
+    |   |-- control.rs
+    |   `-- endpoint.rs
+    `-- rag/
+        |-- embedder.rs
+        |-- lsp.rs
+        |-- mod.rs
+        |-- ranker.rs
+        |-- retriever.rs
+        `-- store.rs
 
+Module grouping:
 
+- `clients/`: outbound clients for adjacent services owned by other processes.
+- `core/`: orchestration state, event types, context assembly, history, persona,
+  output, and timing primitives used by the gateway runtime.
+- `services/`: inbound server surfaces exposed by the gateway.
+- `rag/`: retrieval, ranking, embedding, and persistence.
 
-用户 ←──WebSocket──→ [OpenPod Endpoint]
-                          │
-                    ┌──────┴──────┐
-                    │   Ingress   │  (Text / Audio / Control)
-                    └──────┬──────┘
-                           │
-                     ┌─────▼─────┐
-                     │   Demux   │  拆流
-                     └──┬──┬──┬──┘
-                        │  │  │
-           ┌────────────┘  │  └──────────────┐
-           ▼               ▼                  ▼
-    ┌──────────┐    ┌──────────┐      ┌────────────┐
-    │ Listener │    │  Filter  │      │  Control   │
-    │ (Python) │    └────┬─────┘      │  Handler   │
-    │ VAD→STT  │         │            └────┬───────┘
-    │ →Turn    │         │                 │
-    └────┬─────┘         │                 │
-         │               │                 │
-         └───────┬───────┘                 │
-                 ▼                         │
-          ┌──────────────┐                 │
-          │    Router    │ ◄───────────────┘
-          │  (核心路由)   │
-          └──┬──┬──┬─────┘
-             │  │  │
-     ┌───────┘  │  └───────┐
-     ▼          ▼          ▼
-  Talker    Reasoner    Tools
- (Python)   (TS)       (TS)
- LLM+TTS   深度思考    工具调用
-     │          │          │
-     └────┬─────┴──────────┘
-          ▼
-    ┌──────────┐
-    │   Mux    │  合流
-    └────┬─────┘
-         │
-   ┌─────▼─────┐
-   │  Egress   │  (Text + Audio + Telemetry)
-   └─────┬─────┘
-         │
-       用户
-
-
-
-用户
- │
- │  WebSocket
- ▼
-endpoint.rs ──────────────── 建连、收发帧、管理生命周期
- │
- │  ingress_tx
- ▼
-demux.rs ─────────────────── 拆流: Audio / Text / Control
- │         │
- │         │ audio_tx
- │         ▼
- │    [Listener gRPC] ───── TODO: 连 Python STT
- │         │
- │         │ router_tx (UserUtterance)
- │         ▼
- ├──────► router.rs ──────── 意图分类 → 路由决策
- │         │  │  │
- │         │  │  ├─ context.rs ── 组装上下文
- │         │  │  ├─ memory.rs ─── 检索记忆
- │         │  │  │
- │         │  │  ├─► [Talker gRPC]   ── TODO: 连 Python LLM+TTS
- │         │  │  ├─► dispatch.rs     ── 异步: Reasoner / Tools
- │         │  │  │     └─ [Reasoner gRPC] ── TODO
- │         │  │  │     └─ [Tools gRPC]    ── TODO
- │         │  │  │
- │         │  ◄──┘  结果回来后再次进入 router
- │         │
- │         │ egress_tx
- │         ▼
- │      mux.rs ──────────── 合流 + 遥测附加
- │         │
- │         │ WebSocket sink
- ▼         ▼
-endpoint.rs ──────────────── 写回 WebSocket
- │
- ▼
-用户
+`lib.rs` re-exports the nested modules at their previous public paths, so code
+can continue to use paths like `crate::types` and `kaguya_gateway::talker`
+while the physical source tree stays organized by responsibility.
