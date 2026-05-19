@@ -12,6 +12,7 @@ use uuid::Uuid;
 use kaguya_gateway::config::GatewayConfig;
 use kaguya_gateway::context;
 use kaguya_gateway::control::ControlServiceImpl;
+#[cfg(feature = "dev-console")]
 use kaguya_gateway::endpoint;
 use kaguya_gateway::history::History;
 use kaguya_gateway::input_stream;
@@ -96,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         config.clients.listener_grpc_addr.clone(),
         config.clients.listener_audio_addr.clone(),
     );
+    #[cfg_attr(not(feature = "dev-console"), allow(unused_variables))]
     let listener_audio_tx = match listener_client
         .start(input_tx.p1.clone(), input_tx.p2.clone())
         .await
@@ -121,30 +123,34 @@ async fn main() -> anyhow::Result<()> {
         memory_md: last_memory_md.clone(),
     }).await;
 
-    // ── WebSocket endpoint ──
-    // FIX #1: listener_audio_tx comes from ListenerClient, not a disconnected channel
-    let endpoint_state = Arc::new(endpoint::EndpointState {
-        control_tx: control_tx.clone(),
-        p1_tx: input_tx.p1.clone(),
-        audio_out_rx: tokio::sync::Mutex::new(audio_out_rx),
-        metadata_rx: tokio::sync::Mutex::new(metadata_out_rx),
-        listener_audio_tx,
-    });
-    let ws_addr = config.server.ws_addr.clone();
-    tokio::spawn(async move {
-        let app = endpoint::router(endpoint_state);
-        let listener = match tokio::net::TcpListener::bind(&ws_addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                error!(addr = %ws_addr, "WebSocket bind failed: {e}");
-                return;
+    // ── WebSocket endpoint (dev-console feature) ──
+    // listener_audio_tx comes from ListenerClient (raw audio socket).
+    #[cfg(feature = "dev-console")]
+    {
+        let endpoint_state = Arc::new(endpoint::EndpointState {
+            control_tx: control_tx.clone(),
+            p1_tx: input_tx.p1.clone(),
+            audio_out_rx: tokio::sync::Mutex::new(audio_out_rx),
+            metadata_rx: tokio::sync::Mutex::new(metadata_out_rx),
+            active_client: std::sync::Mutex::new(None),
+            listener_audio_tx,
+        });
+        let ws_addr = config.server.ws_addr.clone();
+        tokio::spawn(async move {
+            let app = endpoint::router(endpoint_state);
+            let listener = match tokio::net::TcpListener::bind(&ws_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(addr = %ws_addr, "WebSocket bind failed: {e}");
+                    return;
+                }
+            };
+            info!(addr = %ws_addr, "WebSocket endpoint listening");
+            if let Err(e) = axum::serve(listener, app).await {
+                error!(addr = %ws_addr, "WebSocket endpoint failed: {e}");
             }
-        };
-        info!(addr = %ws_addr, "WebSocket endpoint listening");
-        if let Err(e) = axum::serve(listener, app).await {
-            error!(addr = %ws_addr, "WebSocket endpoint failed: {e}");
-        }
-    });
+        });
+    }
 
     // ── File watcher (SOUL.md + IDENTITY.md only — memory is in SQLite) ──
     {
@@ -255,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(proto::talker_output::Payload::ResponseStarted(rs)) => {
                         debug!(turn = %rs.turn_id, "response started");
                         current_response.clear();
+                        output.send_response_started(&rs.turn_id).await;
                     }
                     Some(proto::talker_output::Payload::Sentence(se)) => {
                         debug!(text = %se.text, "→ [SENTENCE]");
@@ -267,7 +274,29 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Some(proto::talker_output::Payload::ToolRequest(tr)) => {
                         info!(tool = %tr.tool_name, "→ [TOOL]");
-                        tools.dispatch(tr.request_id, tr.tool_name, tr.args_json, input_tx.p3.clone());
+                        // B14: gate at the dispatch site to avoid the
+                        // hallucinated-tool → P3 ToolResult → re-dispatch loop.
+                        // qwen3.5 sometimes invents tool names not in the
+                        // registry; the previous path round-tripped the
+                        // "unknown tool" error through P3 and produced a
+                        // second narrated turn after a preamble sentence,
+                        // doubling the assistant response. Reject inline,
+                        // record the synthetic error in history so the next
+                        // turn shows the LLM what it did, and let the
+                        // current turn complete without firing a
+                        // continuation dispatch.
+                        if !tools.has(&tr.tool_name) {
+                            warn!(tool = %tr.tool_name, "rejecting unknown tool (likely hallucinated)");
+                            let err = serde_json::json!({
+                                "error": format!(
+                                    "Unknown tool '{}'. Available tools: {}",
+                                    tr.tool_name, tools.name_list(),
+                                ),
+                            }).to_string();
+                            history.append_tool_result(&tr.tool_name, &err).await;
+                        } else {
+                            tools.dispatch(tr.request_id, tr.tool_name, tr.args_json, input_tx.p3.clone());
+                        }
                     }
                     Some(proto::talker_output::Payload::DelegateRequest(dr)) => {
                         info!(task = %dr.task_id, "→ [DELEGATE]");
@@ -327,6 +356,7 @@ async fn main() -> anyhow::Result<()> {
                         active_gen = None;
                         current_dispatch_kind = None;
                         current_response.clear();
+                        output.send_response_complete(&rc.turn_id, rc.was_interrupted).await;
                     }
                     None => {}
                 }
@@ -334,9 +364,15 @@ async fn main() -> anyhow::Result<()> {
 
             // ── P1: User Intent ──
             Some(event) = input_rx.p1.recv() => {
+                // Voice transcripts get echoed to the WS as `user_input` so the
+                // dev console can render them. Typed prompts already appear
+                // locally via `handleSend`, so we don't double-emit.
                 let text = match event {
-                    InputEvent::FinalTranscript { text, .. }
-                    | InputEvent::TextCommand { text } => text,
+                    InputEvent::FinalTranscript { text, .. } => {
+                        output.send_user_input(&text).await;
+                        text
+                    }
+                    InputEvent::TextCommand { text } => text,
                     _ => continue,
                 };
                 info!(text = %text, "P1: user intent");
@@ -432,7 +468,12 @@ async fn main() -> anyhow::Result<()> {
             Some(event) = input_rx.p4.recv() => {
                 if let InputEvent::SilenceExceeded { duration } = event {
                     debug!(secs = duration.as_secs(), "P4: silence");
-                    if active_gen.is_none() {
+                    // B9: tier timers keep ticking for telemetry, but the
+                    // proactive LLM call is gated. Re-enable once B10 reworks
+                    // the silence prompt to let the LLM stay quiet.
+                    if !config.silence.enabled {
+                        debug!(secs = duration.as_secs(), "P4: silence dispatch suppressed (silence.enabled=false)");
+                    } else if active_gen.is_none() {
                         let turn_id = Uuid::new_v4().to_string();
                         let ctx = context::for_silence(
                             &conversation_id, &turn_id,

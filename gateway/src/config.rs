@@ -43,6 +43,17 @@ pub struct SilenceConfig {
     pub soft_prompt_secs: u64,
     pub follow_up_secs: u64,
     pub context_shift_secs: u64,
+    /// Gate the proactive silence-triggered LLM dispatch (P4 SilenceExceeded).
+    /// Timers themselves keep running — tiers still tick and emit events for
+    /// telemetry — but the dispatch is suppressed when this is `false`. See
+    /// B10 in TODO.md for the eventual prompt-engineering fix that will make
+    /// the LLM optionally silent and let this flag flip back to `true`.
+    #[serde(default = "default_silence_enabled")]
+    pub enabled: bool,
+}
+
+fn default_silence_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +126,7 @@ impl Default for GatewayConfig {
                 soft_prompt_secs: 3,
                 follow_up_secs: 8,
                 context_shift_secs: 30,
+                enabled: true,
             },
             rag: RagConfig::default(),
         }

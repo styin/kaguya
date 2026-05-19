@@ -1,0 +1,222 @@
+.leftrail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+}
+
+.leftrail-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.leftrail-count {
+  font-weight: 400;
+  color: var(--ink-4);
+}
+
+/* ─── Audio card (mic + tts) ─── */
+.audio-card {
+  background: var(--panel-2);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.audio-strip {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  padding: 8px;
+  gap: 6px;
+  align-items: stretch;
+}
+.audio-strip + .audio-strip { border-top: 1px solid var(--hairline); }
+
+.audio-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+.audio-arrow.mic-arrow { color: var(--mint); }
+.audio-arrow.tts-arrow { color: var(--blue-2); }
+
+.audio-strip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.audio-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ink);
+  gap: 8px;
+}
+.audio-meta-name { font-weight: 500; }
+.audio-meta-detail {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.audio-bars {
+  height: 22px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent 0 3px,
+      var(--paper-2) 3px 4px
+    ),
+    var(--panel-2);
+  padding: 2px;
+  border-radius: 3px;
+}
+
+.audio-bar {
+  flex: 1;
+  height: 100%;
+  transform-origin: bottom;
+  transform: scaleY(0.05);
+  transition: transform 80ms ease-out;
+}
+.audio-bars.mic .audio-bar { background: var(--mint); }
+.audio-bars.tts .audio-bar { background: var(--blue-2); }
+
+/* ─── Open-mic toggle ─── */
+.mic-toggle {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mic-toggle-btn {
+  flex: 1;
+  padding: 6px 10px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.mic-toggle-btn:hover { background: var(--paper-2); }
+.mic-toggle-btn.active {
+  background: var(--mint-soft);
+  border-color: var(--mint);
+  color: var(--ink);
+}
+
+.mic-live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mint);
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+/* ─── Processes ─── */
+.process-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.process-card {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+}
+
+.process-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-4);
+}
+.process-dot.running  { background: var(--mint); }
+.process-dot.starting { background: var(--amber); animation: live-pulse 1.6s ease-in-out infinite; }
+.process-dot.exited   { background: var(--terra); }
+
+.process-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.process-name-row {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.process-unmanaged {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--ink-4);
+  background: var(--paper-2);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.process-status-row {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.process-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+.process-action {
+  padding: 2px 8px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.process-action:hover:not(:disabled) {
+  background: var(--paper-2);
+  border-color: var(--ink-4);
+}
+.process-action:disabled { opacity: 0.4; cursor: not-allowed; }

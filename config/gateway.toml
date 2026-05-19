@@ -9,9 +9,10 @@ listener_grpc_addr = "http://127.0.0.1:50055"
 listener_audio_addr = "127.0.0.1:50056"
 
 [files]
-soul_path      = "config/SOUL.md"
-identity_path  = "config/IDENTITY.md"
-workspace_root = "."
+# Paths are resolved relative to the Gateway's cwd (`<repo>/gateway`).
+soul_path      = "../config/SOUL.md"
+identity_path  = "../config/IDENTITY.md"
+workspace_root = ".."
 
 [history]
 max_recent_turns = 50
@@ -20,6 +21,10 @@ max_recent_turns = 50
 soft_prompt_secs   = 3
 follow_up_secs     = 8
 context_shift_secs = 30
+# Disabled until B10 reworks the silence prompt to let the LLM stay silent.
+# The timers still tick (tier semantics preserved) — only the proactive
+# LLM dispatch is suppressed.
+enabled            = false
 
 [rag]
 db_path = "data/kaguya.db"

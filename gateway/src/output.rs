@@ -43,4 +43,25 @@ impl OutputManager {
             data: serde_json::json!({ "emotion": emotion }),
         }).await;
     }
+
+    pub async fn send_response_started(&self, turn_id: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "response_started".into(),
+            data: serde_json::json!({ "turn_id": turn_id }),
+        }).await;
+    }
+
+    pub async fn send_response_complete(&self, turn_id: &str, interrupted: bool) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "response_complete".into(),
+            data: serde_json::json!({ "turn_id": turn_id, "interrupted": interrupted }),
+        }).await;
+    }
+
+    pub async fn send_user_input(&self, text: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "user_input".into(),
+            data: serde_json::json!({ "text": text }),
+        }).await;
+    }
 }

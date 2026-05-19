@@ -153,7 +153,8 @@ class Listener:
     async def _handle_audio_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        logger.info("Audio client connected")
+        codec = self._config.audio_input_codec
+        logger.info("Audio client connected (codec=%s)", codec)
         try:
             while True:
                 length_bytes = await reader.readexactly(4)
@@ -161,7 +162,11 @@ class Listener:
                 if length == 0:
                     break
                 frame = await reader.readexactly(length)
-                pcm = self._opus.decode(frame)
+                if codec == "opus":
+                    pcm = self._opus.decode(frame)
+                else:
+                    # Raw PCM int16 LE 16kHz mono — feed directly.
+                    pcm = frame
                 if pcm and self._recorder is not None:
                     self._recorder.feed_audio(pcm)
         except (asyncio.IncompleteReadError, ConnectionResetError):
@@ -180,13 +185,39 @@ class Listener:
             compute_type=self._config.whisper_compute_type,
             language=self._config.whisper_language,
             use_microphone=False,
-            on_vad_detect_start=self._on_vad_start,
-            on_vad_detect_stop=self._on_vad_stop,
+            # `on_vad_start` / `on_vad_stop` are the actual voice-activity edge
+            # callbacks. `on_vad_detect_start` / `on_vad_detect_stop` (despite
+            # the name) fire on state-machine transitions in/out of the
+            # "listening" state — i.e. when the recorder is ready to listen,
+            # not when speech actually starts. Wiring those to the gateway
+            # inverts the semantics and produces a deterministic phantom
+            # `vad_speech_start` ~1ms after every final_transcript that
+            # cancels the just-dispatched turn (B7). See RealtimeSTT
+            # audio_recorder.py:457-464 for the docstring and 2076/2218 for
+            # the real call sites.
+            on_vad_start=self._on_vad_start,
+            on_vad_stop=self._on_vad_stop,
             on_realtime_transcription_update=self._on_partial,
         )
         self._recorder = recorder
-        logger.info("RealtimeSTT recorder started (feed_audio mode)")
-        recorder.start()
+        # `recorder.text(cb)` drives RealtimeSTT's state machine
+        # (listen → VAD-detect → record → transcribe → callback → repeat).
+        # Calling listen()/start() once doesn't advance the pipeline — only
+        # text() in a loop does. See RealtimeSTT_server/stt_server.py:599.
+        logger.info("RealtimeSTT recorder ready (text-loop mode, feed_audio)")
+        while True:
+            try:
+                recorder.text(self._on_full_transcript)
+            except Exception:  # noqa: BLE001
+                logger.exception("recorder.text() raised")
+                # Brief pause so we don't tight-loop on a persistent failure.
+                time.sleep(0.5)
+
+    def _on_full_transcript(self, text: str) -> None:
+        """Callback from recorder.text() with a complete utterance."""
+        if not text:
+            return
+        self._emit_final(text)
 
     # ── Callbacks (from recorder thread) ──
 

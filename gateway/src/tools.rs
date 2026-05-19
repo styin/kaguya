@@ -60,6 +60,15 @@ impl ToolRegistry {
         }).collect()
     }
 
+    pub fn has(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t.name == name)
+    }
+
+    /// Comma-separated list of registered tool names, for error messages.
+    pub fn name_list(&self) -> String {
+        self.tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")
+    }
+
     pub fn dispatch(
         &self,
         request_id: String,

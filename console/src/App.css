@@ -1,0 +1,73 @@
+@import "./tokens.css";
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #root { height: 100vh; }
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  background: var(--paper);
+  color: var(--ink);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: grid;
+  height: 100vh;
+  grid-template-rows:    44px 1fr var(--logs-h, 240px);
+  grid-template-columns: 248px 1fr 360px;
+  background: var(--paper);
+}
+
+.app.logs-collapsed { --logs-h: min-content; }
+
+/* Row 1: top bar (spans 3 cols) */
+.region-topbar {
+  grid-row: 1;
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+  display: flex;
+  align-items: center;
+}
+
+/* Row 2: left rail / center / right inspector */
+.region-leftrail {
+  grid-row: 2;
+  grid-column: 1;
+  border-right: 1px solid var(--hairline);
+  background: var(--panel);
+  overflow-y: auto;
+}
+
+.region-turns {
+  grid-row: 2;
+  grid-column: 2;
+  background: var(--paper);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.region-inspector {
+  grid-row: 2;
+  grid-column: 3;
+  border-left: 1px solid var(--hairline);
+  background: var(--panel);
+  overflow-y: auto;
+}
+
+/* Row 3: logs (spans 3 cols) */
+.region-logs {
+  grid-row: 3;
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--rule);
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+

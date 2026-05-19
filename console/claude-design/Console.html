@@ -1,0 +1,2017 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kaguya Console — Turns</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    /* paper / neutrals (warm) */
+    --paper:        #F1ECE2;
+    --paper-2:      #E8E2D6;
+    --paper-3:      #DBD3C3;
+    --panel:        #F7F3EB;
+    --panel-2:      #FBF8F2;
+    --hairline:     #E2DBCC;
+    --rule:         #C8C0AE;
+
+    /* ink */
+    --ink:          #2A3645;
+    --ink-2:        #4A5567;
+    --ink-3:        #7B8696;
+    --ink-4:        #A9B2BF;
+
+    /* dusty pastel blues (from palette) */
+    --blue:         #7B92AE;   /* primary */
+    --blue-2:       #5A7595;   /* deep, for selected/active */
+    --blue-soft:    #9FB4CC;
+    --blue-pale:    #C9D3E0;
+    --blue-mist:    #E2E8EE;
+
+    /* accents */
+    --mint:         #9CB8A6;   /* ok / healthy */
+    --mint-soft:    #D5E1D7;
+    --amber:        #C9A56B;   /* warn */
+    --amber-soft:   #E9DBC3;
+    --terra:        #B97862;   /* danger */
+    --terra-soft:   #E8C9C0;
+    --plum:         #8E7A95;   /* tool / reasoner accent */
+    --plum-soft:    #DAD2DF;
+
+    /* shadow */
+    --shadow-1: 0 1px 0 rgba(42,54,69,0.04), 0 1px 2px rgba(42,54,69,0.05);
+    --shadow-2: 0 1px 0 rgba(42,54,69,0.04), 0 2px 6px rgba(42,54,69,0.07);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+  /* ============================================================
+     SHELL
+  ============================================================ */
+  .app {
+    display: grid;
+    grid-template-rows: 44px 1fr var(--logs-h, 240px);
+    grid-template-columns: 248px 1fr 360px;
+    height: 100vh;
+    background: var(--paper);
+  }
+  .topbar {
+    grid-column: 1 / -1;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--rule);
+    display: flex; align-items: center;
+    padding: 0 14px;
+    gap: 14px;
+  }
+  .left {
+    grid-row: 2 / 3;
+    border-right: 1px solid var(--rule);
+    background: var(--panel);
+    overflow-y: auto;
+    padding: 14px 12px;
+  }
+  .center {
+    grid-row: 2 / 3;
+    background: var(--paper);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .right {
+    grid-row: 2 / 3;
+    border-left: 1px solid var(--rule);
+    background: var(--panel-2);
+    overflow-y: auto;
+  }
+  .logs {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--rule);
+    background: #FBF8F2;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .app.logs-collapsed { grid-template-rows: 44px 1fr min-content; }
+  .app.logs-collapsed .logs > :not(.log-toolbar):not(.prompt-bar) { display: none; }
+  .logs-toggle {
+    margin-left: auto;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: transparent; border: 1px solid transparent;
+    color: var(--ink-3); font: 11px 'JetBrains Mono';
+    padding: 2px 7px; border-radius: 4px;
+    cursor: pointer;
+  }
+  .logs-toggle:hover { background: var(--paper-2); color: var(--ink); }
+  .logs-toggle kbd {
+    font: 10px 'JetBrains Mono';
+    background: var(--paper-2); border: 1px solid var(--hairline);
+    border-radius: 3px; padding: 0 4px; color: var(--ink-3);
+  }
+  .logs-toggle .caret { transition: transform .15s ease; }
+  .app.logs-collapsed .logs-toggle .caret { transform: rotate(180deg); }
+
+  /* ============================================================
+     TOPBAR
+  ============================================================ */
+  .brand {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600; font-size: 13px; letter-spacing: -0.01em;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .brand .moon {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 35% 35%, #FBF8F2 0 35%, #E8E2D6 36% 60%, #DBD3C3 61% 100%);
+    box-shadow: inset 0 0 0 1px rgba(42,54,69,0.1);
+  }
+  .session-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--blue-mist);
+    border: 1px solid var(--blue-pale);
+    color: var(--ink-2);
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .session-chip .mono { color: var(--ink); font-weight: 500; }
+  .ws-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--mint-soft);
+    border: 1px solid var(--mint);
+    color: #4F6B57;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .ws-pill .live {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mint);
+    box-shadow: 0 0 0 0 rgba(156,184,166,0.7);
+    animation: live-pulse 2s ease-out infinite;
+  }
+  @keyframes live-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(156,184,166,0.7); }
+    70%  { box-shadow: 0 0 0 6px rgba(156,184,166,0); }
+    100% { box-shadow: 0 0 0 0 rgba(156,184,166,0); }
+  }
+  .counter {
+    font-family: 'JetBrains Mono';
+    font-size: 11px;
+    color: var(--ink-3);
+    display: inline-flex; align-items: baseline; gap: 6px;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .counter b { color: var(--ink); font-weight: 500; }
+  .top-actions { margin-left: auto; display: flex; gap: 8px; flex-shrink: 0; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--panel-2);
+    color: var(--ink);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 5px 11px;
+    font: 500 12px 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--paper-2); border-color: var(--ink-4); }
+  .btn.primary {
+    background: var(--blue-2); color: #FBF8F2; border-color: var(--blue-2);
+  }
+  .btn.primary:hover { background: #4A6585; border-color: #4A6585; }
+  .btn.danger {
+    background: var(--paper-2); color: var(--terra); border-color: var(--terra);
+  }
+  .btn.danger:hover { background: var(--terra); color: #FBF8F2; }
+  .btn.ghost { background: transparent; border-color: transparent; }
+  .topbar .btn:hover { background: rgba(255,255,255,0.7); border-color: rgba(31,54,80,0.32); }
+  .topbar .btn.primary { background: #1F3650; border-color: #1F3650; color: #F5F0E4; }
+  .topbar .btn.primary:hover { background: #0F2438; border-color: #0F2438; }
+  .topbar .btn.danger { background: rgba(255,255,255,0.45); color: var(--terra); border-color: var(--terra); }
+  .btn.ghost:hover { background: var(--paper-2); }
+  .btn.tiny { padding: 3px 8px; font-size: 11px; border-radius: 5px; }
+  .btn.icon { padding: 4px 6px; }
+  .btn[disabled] { opacity: 0.4; pointer-events: none; }
+
+  /* ============================================================
+     LEFT — PROCESSES
+  ============================================================ */
+  .lbl {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-bottom: 8px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .proc {
+    background: var(--panel-2);
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    padding: 10px 11px;
+    margin-bottom: 8px;
+    transition: border-color .12s, box-shadow .12s;
+  }
+  .proc:hover { border-color: var(--blue-pale); box-shadow: var(--shadow-1); }
+  .proc.selected { border-color: var(--blue); box-shadow: var(--shadow-2); }
+  .proc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
+  .proc-name { font-weight: 600; font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .proc-tag {
+    font-size: 9px; font-weight: 600; letter-spacing: 0.06em;
+    padding: 1px 5px; border-radius: 3px;
+    text-transform: uppercase;
+    background: var(--paper-2); color: var(--ink-3); border: 1px solid var(--hairline);
+  }
+  .proc-tag.unmanaged { background: var(--blue-mist); color: var(--blue-2); border-color: var(--blue-pale); }
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    background: var(--ink-4);
+    margin-left: auto;
+  }
+  .proc-tag { flex-shrink: 0; }
+  .status-dot.running { background: var(--mint); box-shadow: 0 0 0 2px rgba(156,184,166,0.25); }
+  .status-dot.starting { background: var(--amber); }
+  .status-dot.errored { background: var(--terra); }
+  .proc-meta {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 2px 10px;
+    font-family: 'JetBrains Mono';
+    font-size: 10px;
+    color: var(--ink-3);
+  }
+  .proc-meta b { color: var(--ink); font-weight: 500; }
+  .proc-actions {
+    display: flex; gap: 4px; margin-top: 8px;
+  }
+
+  /* ============================================================
+     TABS
+  ============================================================ */
+  .tabs {
+    display: flex; align-items: stretch;
+    border-bottom: 1px solid var(--rule);
+    background: var(--panel-2);
+    padding: 0 12px;
+    flex-shrink: 0;
+  }
+  .tab {
+    border: none; background: transparent;
+    color: var(--ink-3);
+    font: 500 13px 'Inter', sans-serif;
+    padding: 12px 14px;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab.active {
+    color: var(--ink);
+    border-bottom-color: var(--blue-2);
+  }
+  .tab .badge {
+    background: var(--blue-mist);
+    color: var(--blue-2);
+    font: 600 10px 'JetBrains Mono';
+    padding: 1px 6px; border-radius: 999px;
+  }
+  .tab.active .badge { background: var(--blue-2); color: var(--panel-2); }
+
+  /* ============================================================
+     TURNS TAB
+  ============================================================ */
+  .turns-wrap { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+  .turns-toolbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--hairline);
+    flex-wrap: wrap;
+  }
+  .highlight-chips { display: flex; align-items: center; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px 3px 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--hairline);
+    border-radius: 999px;
+    font-size: 11px; color: var(--ink-3);
+    cursor: pointer;
+    user-select: none;
+    transition: all .12s;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .chip:hover { border-color: var(--ink-4); color: var(--ink); }
+  .chip .swatch {
+    width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0;
+    background: var(--ink-4);
+  }
+  .chip.on {
+    background: #fff;
+    border-color: currentColor;
+    color: var(--ink);
+    box-shadow: var(--shadow-1);
+  }
+  .chip.on.interrupted { color: var(--terra); }
+  .chip.on.interrupted .swatch { background: var(--terra); }
+  .chip.interrupted .swatch { background: var(--terra); }
+  .chip.on.tool { color: var(--plum); }
+  .chip.on.tool .swatch { background: var(--plum); }
+  .chip.tool .swatch { background: var(--plum); }
+  .chip.on.delegated { color: var(--blue-2); }
+  .chip.on.delegated .swatch { background: var(--blue-2); }
+  .chip.delegated .swatch { background: var(--blue-2); }
+  .chip.on.bargein { color: var(--amber); }
+  .chip.on.bargein .swatch { background: var(--amber); }
+  .chip.bargein .swatch { background: var(--amber); }
+
+  .search {
+    flex: 1; min-width: 180px; max-width: 320px;
+    border: 1px solid var(--hairline);
+    background: #fff;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font: 12px 'Inter';
+    color: var(--ink);
+    outline: none;
+  }
+  .search:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(123,146,174,0.15); }
+
+  .seg {
+    display: inline-flex;
+    background: var(--panel-2);
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 11px;
+  }
+  .seg button {
+    border: none; background: transparent;
+    color: var(--ink-3);
+    padding: 4px 10px;
+    cursor: pointer;
+    border-right: 1px solid var(--hairline);
+  }
+  .seg button:last-child { border-right: none; }
+  .seg button.on {
+    background: #fff;
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  /* turns list */
+  .turn-list { flex: 1; overflow-y: auto; padding: 4px 0 60px; }
+  .turn-row {
+    display: grid;
+    grid-template-columns: 4px 76px 1fr 90px;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--hairline);
+    cursor: pointer;
+    position: relative;
+    transition: background .1s;
+  }
+  .turn-row { background: #FBF8F2; }
+  .turn-row:hover { background: var(--paper-2); }
+  .turn-row.dim { opacity: 0.28; }
+  .turn-row.selected {
+    background: var(--blue-mist);
+  }
+  .turn-row.selected:hover { background: var(--blue-mist); }
+  .turn-row.user { background: #FBF8F2; }
+  .turn-row.user:hover { background: var(--paper-2); }
+
+  .stripes { display: flex; flex-direction: column; gap: 2px; height: 100%; }
+  .stripe {
+    flex: 1;
+    background: var(--ink-4);
+    border-radius: 2px;
+    min-height: 6px;
+  }
+  .stripe.interrupted { background: var(--terra); }
+  .stripe.tool { background: var(--plum); }
+  .stripe.delegated { background: var(--blue-2); }
+  .stripe.bargein { background: var(--amber); }
+
+  .turn-time {
+    font-family: 'JetBrains Mono';
+    font-size: 11px;
+    color: var(--ink-3);
+    line-height: 1.4;
+  }
+  .turn-time .abs { color: var(--ink); font-weight: 500; }
+  .turn-time .rel { font-size: 10px; }
+
+  .turn-body { min-width: 0; }
+  .turn-who {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-3); font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .turn-who .who-name { color: var(--ink); letter-spacing: 0.05em; }
+  .turn-who .turn-id { font-family: 'JetBrains Mono'; font-size: 9px; color: var(--ink-4); text-transform: none; letter-spacing: 0; }
+  .turn-tags { display: inline-flex; gap: 4px; }
+  .tag {
+    font: 600 9px 'JetBrains Mono';
+    padding: 1px 5px; border-radius: 3px;
+    border: 1px solid currentColor;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .tag.interrupted { color: var(--terra); background: var(--terra-soft); }
+  .tag.tool { color: var(--plum); background: var(--plum-soft); }
+  .tag.delegated { color: var(--blue-2); background: var(--blue-mist); }
+  .tag.bargein { color: var(--amber); background: var(--amber-soft); }
+  .tag.live {
+    color: var(--mint); background: var(--mint-soft);
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .tag.live::before {
+    content: ''; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--mint);
+    animation: live-pulse 1.4s ease-out infinite;
+  }
+  .turn-text {
+    font-size: 13px;
+    color: var(--ink);
+    line-height: 1.55;
+    text-wrap: pretty;
+  }
+  .turn-text.user { color: var(--ink-2); font-weight: 500; }
+  .turn-meta-mini {
+    margin-top: 6px;
+    display: flex; flex-wrap: wrap; gap: 12px;
+    font-family: 'JetBrains Mono'; font-size: 10px; color: var(--ink-3);
+  }
+  .turn-meta-mini b { color: var(--ink); font-weight: 500; }
+
+  .turn-marks { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .audio-mini {
+    width: 80px; height: 24px;
+    background: var(--panel-2);
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* in-flight pulse */
+  .turn-row.live { background: #FBF8F2; }
+  .turn-row.live:hover { background: var(--paper-2); }
+  .turn-row.live::before {
+    content: none;
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: var(--mint);
+    animation: breath 1.6s ease-in-out infinite;
+  }
+  @keyframes breath {
+    0%, 100% { opacity: 0.45; }
+    50%      { opacity: 1; }
+  }
+  .turn-row.live .turn-text { animation: text-breath 1.6s ease-in-out infinite; }
+  @keyframes text-breath {
+    0%, 100% { color: var(--ink-3); }
+    50%      { color: var(--ink); }
+  }
+  .sentence-flash {
+    animation: flash 0.9s ease-out;
+  }
+  @keyframes flash {
+    0%   { background: rgba(156,184,166,0.35); }
+    100% { background: transparent; }
+  }
+
+  /* ============================================================
+     INSPECTOR
+  ============================================================ */
+  .insp-head {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--hairline);
+    background: var(--panel-2);
+  }
+  .insp-eyebrow {
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .insp-title {
+    font-family: 'JetBrains Mono';
+    font-size: 13px; color: var(--ink); font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .insp-title .pin {
+    font-size: 9px; padding: 2px 6px;
+    background: var(--blue-mist); color: var(--blue-2);
+    border-radius: 3px; font-family: 'Inter'; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+
+  .insp-section { padding: 14px 16px; border-bottom: 1px solid var(--hairline); }
+  .insp-section h4 {
+    margin: 0 0 10px;
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .insp-section h4 .meta-r { font-family: 'JetBrains Mono'; font-size: 10px; color: var(--ink-4); text-transform: none; letter-spacing: 0; }
+
+  .stats {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  }
+  .stat {
+    background: #fff;
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .stat .k {
+    font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; margin-bottom: 2px;
+  }
+  .stat .v {
+    font-family: 'JetBrains Mono';
+    font-size: 16px; color: var(--ink); font-weight: 500;
+  }
+  .stat .v small {
+    font-size: 11px; color: var(--ink-3); margin-left: 3px;
+  }
+
+  /* emotion track */
+  .emo-track {
+    height: 36px;
+    background: #fff;
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+  }
+  .emo-band {
+    height: 100%;
+    border-right: 1px solid #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    color: var(--ink-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 6px;
+  }
+  .emo-band:last-child { border-right: none; }
+  .emo-cheerful { background: #F4E4D2; color: #8B6F4D; }
+  .emo-warm     { background: #EFD8C8; color: #8C5F47; }
+  .emo-neutral  { background: var(--blue-mist); color: var(--blue-2); }
+  .emo-thoughtful { background: var(--plum-soft); color: #5E4D6A; }
+  .emo-curious  { background: var(--mint-soft); color: #4F6B57; }
+
+  .track-axis {
+    display: flex; justify-content: space-between;
+    font-family: 'JetBrains Mono'; font-size: 9px;
+    color: var(--ink-4);
+    margin-top: 4px;
+  }
+
+  /* event timeline */
+  .events { display: flex; flex-direction: column; }
+  .event {
+    display: grid;
+    grid-template-columns: 56px 18px 1fr;
+    column-gap: 10px;
+    padding: 6px 0;
+    position: relative;
+  }
+  .event:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 64px; top: 16px; bottom: -6px;
+    width: 1px;
+    background: var(--hairline);
+  }
+  .event .t {
+    font-family: 'JetBrains Mono'; font-size: 10px;
+    color: var(--ink-3); padding-top: 2px;
+  }
+  .event .icon {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--blue-mist);
+    color: var(--blue-2);
+    border: 1px solid var(--blue-pale);
+    display: inline-flex; align-items: center; justify-content: center;
+    font: 600 10px 'JetBrains Mono';
+    flex-shrink: 0;
+    z-index: 1;
+  }
+  .event.sentence .icon { background: var(--blue-mist); color: var(--blue-2); border-color: var(--blue-pale); }
+  .event.emotion  .icon { background: #F4E4D2; color: #8B6F4D; border-color: #E2C8AE; }
+  .event.tool     .icon { background: var(--plum-soft); color: var(--plum); border-color: #C8BCD0; }
+  .event.delegate .icon { background: var(--blue-mist); color: var(--blue-2); border-color: var(--blue-pale); }
+  .event.reasoner .icon { background: var(--blue-mist); color: var(--blue-2); border-color: var(--blue-pale); }
+  .event.bargein  .icon { background: var(--amber-soft); color: var(--amber); border-color: #D8C29A; }
+  .event.complete .icon { background: var(--mint-soft); color: #4F6B57; border-color: var(--mint); }
+  .event .body { min-width: 0; padding-top: 1px; }
+  .event .head {
+    display: flex; align-items: baseline; gap: 8px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-3); font-weight: 600;
+    margin-bottom: 2px;
+  }
+  .event .text { font-size: 12px; color: var(--ink); line-height: 1.45; }
+  .event .text.mono { font-family: 'JetBrains Mono'; font-size: 11px; }
+
+  /* reasoner nested block */
+  .reasoner-block {
+    margin-top: 6px;
+    background: var(--blue-mist);
+    border: 1px solid var(--blue-pale);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .reasoner-block .rh {
+    font: 600 10px 'JetBrains Mono';
+    color: var(--blue-2);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .reasoner-step {
+    font-size: 11px; color: var(--ink-2);
+    padding: 3px 0;
+    display: grid; grid-template-columns: 36px 1fr; gap: 8px;
+  }
+  .reasoner-step .ts { font-family: 'JetBrains Mono'; font-size: 9px; color: var(--ink-4); }
+
+  /* waveform */
+  .wave-card {
+    background: #fff;
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .wave-canvas {
+    height: 56px; width: 100%;
+    background: #FBF8F2;
+    position: relative;
+    cursor: pointer;
+  }
+  .wave-bars {
+    position: absolute; inset: 6px 0;
+    display: flex; align-items: center; gap: 1px;
+    padding: 0 4px;
+  }
+  .wave-bars .b {
+    flex: 1;
+    background: var(--blue);
+    border-radius: 1px;
+    opacity: 0.85;
+  }
+  .wave-playhead {
+    position: absolute; top: 0; bottom: 0;
+    width: 1.5px; background: var(--terra);
+    pointer-events: none;
+  }
+  .wave-controls {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px;
+    border-top: 1px solid var(--hairline);
+    background: var(--panel-2);
+  }
+  .wave-time { font: 11px 'JetBrains Mono'; color: var(--ink-3); margin-left: auto; }
+  .play-btn {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    background: var(--blue-2); color: #FBF8F2;
+    border: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+
+  /* live io card (no-turn-selected state) */
+  .live-card {
+    background: #fff;
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  .live-card .lh {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .live-card .lh .who {
+    font: 600 10px 'JetBrains Mono';
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-3);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .live-card .lh .who .arrow { color: var(--ink); font-size: 12px; }
+  .live-card .lh .meta { font: 10px 'JetBrains Mono'; color: var(--ink-4); }
+  .live-meter {
+    height: 44px;
+    background: #FBF8F2;
+    border-radius: 4px;
+    border: 1px solid var(--hairline);
+    position: relative;
+    overflow: hidden;
+    display: flex; align-items: center; gap: 1px;
+    padding: 4px 6px;
+  }
+  .live-meter .b {
+    flex: 1;
+    background: var(--blue);
+    border-radius: 1px;
+    min-width: 0;
+  }
+  .live-meter.input .b { background: var(--mint); }
+  .live-meter.idle .b { opacity: 0.25; }
+  .ptt-card {
+    background: var(--blue-mist);
+    border: 1px solid var(--blue-pale);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 4px;
+  }
+  .ptt-btn {
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    background: var(--blue-2);
+    color: #FBF8F2;
+    border: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    font-size: 22px;
+    box-shadow: 0 2px 0 #3F5775, 0 4px 10px rgba(90,117,149,0.3);
+    transition: transform .06s, box-shadow .06s;
+    flex-shrink: 0;
+  }
+  .ptt-btn:hover { background: #4A6585; }
+  .ptt-btn:active, .ptt-btn.held {
+    transform: translateY(2px);
+    box-shadow: 0 0 0 #3F5775, 0 1px 4px rgba(90,117,149,0.2);
+    background: var(--terra);
+  }
+  .ptt-card .ptt-text { min-width: 0; }
+  .ptt-card .ptt-text .l1 { font-weight: 600; font-size: 13px; color: var(--ink); }
+  .ptt-card .ptt-text .l2 { font: 11px 'JetBrains Mono'; color: var(--ink-3); margin-top: 2px; }
+  .ptt-card .ptt-text .l2 .kbd { margin: 0 2px; }
+
+  /* prompt input bar above log toolbar */
+  .prompt-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--hairline);
+    background: var(--panel-2);
+  }
+  .prompt-bar .prompt-pre {
+    font: 600 11px 'JetBrains Mono';
+    color: var(--blue-2);
+    flex-shrink: 0;
+  }
+  .prompt-bar input.prompt-input {
+    flex: 1;
+    background: #fff;
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font: 13px 'Inter', system-ui, sans-serif;
+    color: var(--ink);
+    outline: none;
+    min-width: 0;
+  }
+  .prompt-bar input.prompt-input:focus { border-color: var(--blue-2); }
+  .prompt-bar input.prompt-input::placeholder { color: var(--ink-4); }
+  .prompt-bar .prompt-hint {
+    font: 10px 'JetBrains Mono'; color: var(--ink-4);
+    flex-shrink: 0;
+  }
+  .prompt-bar .send-btn {
+    background: var(--blue-2); color: #fff;
+    border: none; border-radius: 6px;
+    padding: 6px 14px;
+    font: 500 12px 'Inter'; cursor: pointer;
+    flex-shrink: 0;
+  }
+  .prompt-bar .send-btn:hover { background: var(--ink); }
+  .prompt-bar .send-btn:disabled { background: var(--ink-4); cursor: not-allowed; }
+  .app.logs-collapsed .logs > .prompt-bar { display: flex; }
+
+  /* network-style transcript timeline */
+  .net-tl {
+    background: #fff;
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .net-axis-row { display: flex; background: var(--panel-2); border-bottom: 1px solid var(--hairline); }
+  .lane-gutter {
+    width: 64px; flex-shrink: 0;
+    font: 9px 'JetBrains Mono';
+    color: var(--ink-3);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 4px 8px;
+    border-right: 1px solid var(--hairline);
+    display: flex; align-items: center;
+  }
+  .net-lanes { display: flex; flex-direction: column; }
+  .net-lane {
+    display: flex;
+    height: 24px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .net-lane:last-child { border-bottom: none; }
+  .net-lane .net-track {
+    flex: 1; position: relative; height: 100%;
+    background: var(--paper-2);
+  }
+  .net-block.user        { background: var(--ink-3); border-left: 1.5px solid var(--ink-2); }
+  .net-block.talker      { background: var(--blue); border-left: 1.5px solid var(--blue-2); }
+  .net-block.talker.live { background: linear-gradient(90deg, var(--mint), var(--blue)); border-left-color: var(--mint); }
+  .net-block.interrupted { background: var(--terra); border-left: 1.5px solid #8C5847;
+    background-image: repeating-linear-gradient(45deg, rgba(255,255,255,0.18) 0 4px, transparent 4px 8px); }
+  .net-block.tool        { background: var(--plum); border-left: 1.5px solid #6B5973; }
+  .net-block.reasoner    { background: var(--blue-soft); border-left: 1.5px solid var(--blue-2); }
+  .net-block .bl {
+    font: 9px 'JetBrains Mono';
+    color: #FBF8F2;
+    padding: 0 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 12px;
+    display: block;
+  }
+  .net-axis {
+    flex: 1;
+    display: flex;
+    padding: 4px 8px;
+    font: 9px 'JetBrains Mono';
+    color: var(--ink-4);
+    justify-content: space-between;
+  }
+  .net-block {
+    position: absolute;
+    top: 3px; bottom: 3px;
+    display: flex; align-items: center;
+    overflow: hidden;
+    cursor: pointer;
+  }
+
+  .now-line {
+    position: absolute; top: 0; bottom: 0;
+    width: 1px; background: var(--terra);
+    pointer-events: none;
+  }
+  .now-line::after {
+    content: 'now';
+    position: absolute; top: -1px; left: 3px;
+    font: 600 8px 'JetBrains Mono';
+    color: var(--terra);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+
+  /* timeline strip atop turns panel */
+  .timeline-strip {
+    display: flex; align-items: stretch;
+    border-bottom: 1px solid var(--rule);
+    background: var(--panel-2);
+    min-height: 48px;
+  }
+  .strip-label {
+    width: 64px; flex-shrink: 0;
+    padding: 8px 10px;
+    font: 10px 'JetBrains Mono'; color: var(--ink-3);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    border-right: 1px solid var(--hairline);
+    display: flex; align-items: flex-start;
+  }
+  .strip-tl { flex: 1; padding: 4px 10px 4px 12px; min-width: 0; }
+  .strip-tl .net-tl { border: none; background: transparent; }
+  .strip-tl .net-axis-row { background: transparent; }
+  .strip-tl .lane-gutter { width: 72px; padding-left: 6px; }
+  .strip-tl .net-lane { height: 16px; }
+  .strip-tl .net-axis { font-size: 9px; }
+
+  .live-card.compact { padding: 6px; }
+  .live-card.compact .live-meter { height: 28px; }
+  .live-card.compact .lh { padding: 0 2px 4px; font-size: 11px; }
+  .live-card.compact .lh .meta { font-size: 9px; }
+
+  /* Stacked envelope audio module (left rail) */
+  .env-stack {
+    background: #fff; border: 1px solid var(--hairline);
+    border-radius: 6px; overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .env-strip { display: flex; align-items: stretch; }
+  .env-strip + .env-strip { border-top: 1px solid var(--hairline); }
+  .env-arrow {
+    width: 26px; flex-shrink: 0;
+    background: var(--paper-2); border-right: 1px solid var(--hairline);
+    display: flex; align-items: center; justify-content: center;
+    font: 600 13px 'Inter';
+  }
+  .env-in .env-arrow { color: var(--mint); }
+  .env-out .env-arrow { color: var(--blue-2); }
+  .env-body { flex: 1; padding: 6px 8px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .env-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; min-width: 0; }
+  .env-name { font: 500 11px 'Inter'; color: var(--ink); text-transform: lowercase; }
+  .env-dev { font: 9px 'JetBrains Mono'; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .env-body .live-meter {
+    height: 22px;
+    background: #FBF8F2;
+    background-image: repeating-linear-gradient(90deg, rgba(0,0,0,0.04) 0 1px, transparent 1px 8px);
+    border-radius: 2px;
+    border: none;
+    padding: 0 3px;
+  }
+
+  .ptt-stack { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .ptt-mode {
+    display: flex; background: var(--paper-2);
+    border: 1px solid var(--hairline); border-radius: 6px; overflow: hidden;
+    font-size: 11px;
+  }
+  .ptt-mode button {
+    flex: 1; border: none; background: transparent;
+    color: var(--ink-3); padding: 4px 6px;
+    cursor: pointer; font: 500 11px 'Inter';
+    border-right: 1px solid var(--hairline);
+  }
+  .ptt-mode button:last-child { border-right: none; }
+  .ptt-mode button.on { background: #fff; color: var(--ink); }
+  .ptt-bar {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--blue-mist); border: 1px solid var(--blue-pale);
+    border-radius: 6px; padding: 8px 10px;
+    font: 500 12px 'Inter'; color: var(--ink);
+    cursor: pointer; user-select: none;
+  }
+  .ptt-bar:hover { background: #fff; }
+  .ptt-bar.held { background: var(--terra-soft); border-color: var(--terra); color: var(--terra); }
+  .ptt-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--blue-2); }
+  .ptt-bar.held .dot { background: var(--terra); animation: live-pulse 1.4s ease-out infinite; }
+  .open-mic {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--mint-soft); border: 1px solid var(--mint);
+    border-radius: 6px; padding: 8px 10px;
+    font: 500 12px 'Inter'; color: #4F6B57;
+  }
+  .open-mic .dot.live {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--mint);
+    animation: live-pulse 2s ease-out infinite;
+  }
+
+  .skel {
+    display: inline-block; color: transparent;
+    background: linear-gradient(90deg, var(--paper-2) 0%, #E2DDD0 50%, var(--paper-2) 100%);
+    background-size: 200% 100%;
+    animation: skel-shimmer 1.6s ease-in-out infinite;
+    border-radius: 3px; min-width: 24px;
+  }
+  @keyframes skel-shimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+  }
+  .skel-row {
+    padding: 6px 10px;
+    font: 11px 'JetBrains Mono';
+    color: var(--ink-4);
+    background: var(--paper-2);
+    border-radius: 4px;
+  }
+  .pin.streaming { background: var(--mint-soft); color: #4F6B57; }
+  .pin.latest { background: var(--paper-2); color: var(--ink-3); }
+
+  /* sentences list */
+  .sent-list { display: flex; flex-direction: column; gap: 1px; }
+  .sent {
+    display: grid; grid-template-columns: 50px 1fr;
+    column-gap: 10px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px; color: var(--ink-2); line-height: 1.5;
+  }
+  .sent:hover { background: var(--panel-2); }
+  .sent .ts { font: 10px 'JetBrains Mono'; color: var(--ink-3); padding-top: 2px; }
+
+  /* ============================================================
+     LOG PANEL
+  ============================================================ */
+  .log-toolbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--hairline);
+    background: var(--panel);
+    flex-wrap: wrap;
+  }
+  .log-rows {
+    flex: 1;
+    overflow-y: auto;
+    font-family: 'JetBrains Mono';
+    font-size: 11px;
+    line-height: 1.55;
+  }
+  .log-row {
+    display: grid;
+    grid-template-columns: 96px 80px 56px 1fr;
+    gap: 12px;
+    padding: 1px 14px;
+    color: var(--ink-2);
+  }
+  .log-row:hover { background: var(--panel-2); }
+  .log-row .ts { color: var(--ink-3); }
+  .log-row .src {
+    font-size: 10px;
+    align-self: start;
+    border: 1px solid var(--hairline);
+    border-radius: 3px;
+    text-align: center;
+    padding: 0 4px;
+    background: #fff;
+    color: var(--ink-3);
+    line-height: 1.4;
+    margin-top: 2px;
+    width: fit-content;
+  }
+  .log-row .src.gateway { color: var(--blue-2); border-color: var(--blue-pale); background: var(--blue-mist); }
+  .log-row .src.talker  { color: #8C5F47; border-color: #E2C8AE; background: #F4E4D2; }
+  .log-row .src.llm     { color: var(--plum); border-color: #C8BCD0; background: var(--plum-soft); }
+  .log-row .lvl { font-size: 10px; color: var(--ink-4); padding-top: 1px; }
+  .log-row.error  { color: var(--terra); }
+  .log-row.error  .lvl { color: var(--terra); font-weight: 600; }
+  .log-row.warn   .lvl { color: var(--amber); font-weight: 600; }
+  .log-row.warn   { color: #886A3D; }
+  .log-row .line { white-space: pre-wrap; word-break: break-word; }
+
+  /* small bits */
+  .kbd {
+    font: 500 10px 'JetBrains Mono';
+    background: var(--panel-2);
+    border: 1px solid var(--hairline);
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 1px 5px;
+    color: var(--ink-3);
+  }
+  .divider { width: 1px; height: 18px; background: var(--hairline); flex-shrink: 0; }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--paper-3); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--ink-4); background-clip: padding-box; border: 2px solid transparent; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* ============================================================
+   MOCK DATA
+============================================================ */
+const PROCESSES = [
+  { name: 'gateway',    managed: true,  status: 'running', pid: 48201, uptime: '11m 04s', cpu: '2.1', mem: '38',  rs: 0 },
+  { name: 'talker',     managed: true,  status: 'running', pid: 48314, uptime: '10m 58s', cpu: '14',  mem: '412', rs: 2 },
+  { name: 'llm_server', managed: false, status: 'running', healthCode: 200, rtt: 42, lastPoll: '2s ago' },
+];
+
+// timestamps relative to a fixed "now" of 14:02:18.220
+const TURNS = [
+  {
+    id: '4f9e1a-08', role: 'assistant', live: true,
+    abs: '14:02:18.011', rel: '+0.0s',
+    text: 'Sure thing — let me check the calendar for you. One moment while I look that',
+    sentenceCount: 2, sentenceTotal: null,
+    ttfs: 287, dur: null, audioKb: 38,
+    emotions: [{ at: 0.0, label: 'neutral' }, { at: 0.7, label: 'curious' }],
+    tags: [],
+    sentences: [
+      { t: 0.29, text: 'Sure thing — let me check the calendar for you.' },
+      { t: 1.55, text: 'One moment while I look that…' },
+    ],
+    events: [
+      { t: '+0.000s', type: 'started', text: 'Turn 4f9e1a-08 started' },
+      { t: '+0.287s', type: 'sentence', text: 'Sure thing — let me check the calendar for you.' },
+      { t: '+0.700s', type: 'emotion', text: 'curious' },
+      { t: '+1.550s', type: 'sentence', text: 'One moment while I look that…' },
+    ],
+  },
+  {
+    id: 'user-08', role: 'user',
+    abs: '14:02:17.984', rel: '+0.0s',
+    text: 'do i have anything on my calendar tomorrow afternoon',
+    chars: 50,
+  },
+  {
+    id: '4f9e1a-07', role: 'assistant',
+    abs: '14:02:11.408', rel: '−6.6s',
+    text: "It's a clear afternoon in Tokyo, around 22 degrees. A nice walking-weather kind of day, if you ask me.",
+    sentenceCount: 4, sentenceTotal: 4,
+    ttfs: 312, dur: 3813, audioKb: 187,
+    emotions: [
+      { at: 0.0, label: 'cheerful' },
+      { at: 0.34, label: 'warm' },
+      { at: 0.78, label: 'neutral' },
+    ],
+    tags: ['tool'],
+    sentences: [
+      { t: 0.31, text: "It's a clear afternoon in Tokyo," },
+      { t: 1.04, text: 'around 22 degrees.' },
+      { t: 2.18, text: 'A nice walking-weather kind of day,' },
+      { t: 3.41, text: 'if you ask me.' },
+    ],
+    events: [
+      { t: '+0.000s', type: 'started', text: 'Turn 4f9e1a-07 started' },
+      { t: '+0.108s', type: 'tool', text: 'get_weather(city="Tokyo", date="today")', subtle: 'req=t-22a · 412ms' },
+      { t: '+0.312s', type: 'sentence', text: "It's a clear afternoon in Tokyo," },
+      { t: '+0.520s', type: 'emotion', text: 'cheerful' },
+      { t: '+1.040s', type: 'sentence', text: 'around 22 degrees.' },
+      { t: '+1.350s', type: 'emotion', text: 'warm' },
+      { t: '+2.180s', type: 'sentence', text: 'A nice walking-weather kind of day,' },
+      { t: '+3.020s', type: 'emotion', text: 'neutral' },
+      { t: '+3.410s', type: 'sentence', text: 'if you ask me.' },
+      { t: '+3.813s', type: 'complete', text: 'response_complete · interrupted=false' },
+    ],
+  },
+  {
+    id: 'user-07', role: 'user',
+    abs: '14:02:11.082', rel: '−7.0s',
+    text: "hey kaguya, what's the weather looking like in tokyo today",
+    chars: 52,
+  },
+  {
+    id: '4f9e1a-06', role: 'assistant',
+    abs: '14:01:48.118', rel: '−30.1s',
+    text: "Why don't scientists trust atoms? Because they make up everything. — wait, you've heard that one—",
+    sentenceCount: 2, sentenceTotal: 2,
+    ttfs: 289, dur: 2104, audioKb: 94,
+    emotions: [{ at: 0.0, label: 'cheerful' }],
+    tags: ['interrupted', 'bargein'],
+    bargeIn: { spoken: "Why don't scientists trust atoms? Because they make up everything.", unspoken: " — wait, you've heard that one—" },
+    sentences: [
+      { t: 0.29, text: "Why don't scientists trust atoms?" },
+      { t: 1.18, text: 'Because they make up everything.' },
+    ],
+    events: [
+      { t: '+0.000s', type: 'started', text: 'Turn 4f9e1a-06 started' },
+      { t: '+0.289s', type: 'sentence', text: "Why don't scientists trust atoms?" },
+      { t: '+1.180s', type: 'sentence', text: 'Because they make up everything.' },
+      { t: '+2.045s', type: 'bargein', text: 'barge-in detected', subtle: 'spoken=66 · unspoken=33' },
+      { t: '+2.104s', type: 'complete', text: 'response_complete · interrupted=true' },
+    ],
+  },
+  {
+    id: 'user-06', role: 'user',
+    abs: '14:01:47.829', rel: '−30.4s',
+    text: 'tell me a joke',
+    chars: 14,
+  },
+  {
+    id: '4f9e1a-05', role: 'assistant',
+    abs: '14:00:32.447', rel: '−1m 45.8s',
+    text: "Let me think on that one. I want to give you a thoughtful answer, not just a fast one.",
+    sentenceCount: 3, sentenceTotal: 3,
+    ttfs: 1240, dur: 5982, audioKb: 268,
+    emotions: [{ at: 0.0, label: 'thoughtful' }, { at: 0.6, label: 'warm' }],
+    tags: ['delegated'],
+    delegate: {
+      taskId: 't-12c', framework: 'openclaw',
+      steps: [
+        { ts: '+0.04s', d: 'plan: outline answer structure' },
+        { ts: '+0.91s', d: 'recall: no prior conversation about meditation routines' },
+        { ts: '+1.18s', d: 'compose: draft with thoughtful tone' },
+      ],
+      summary: 'Generated 3-sentence reflective response with thoughtful → warm arc.',
+    },
+    sentences: [
+      { t: 1.24, text: 'Let me think on that one.' },
+      { t: 3.10, text: 'I want to give you a thoughtful answer,' },
+      { t: 4.65, text: 'not just a fast one.' },
+    ],
+    events: [
+      { t: '+0.000s', type: 'started', text: 'Turn 4f9e1a-05 started' },
+      { t: '+0.022s', type: 'delegate', text: 'delegate to reasoner · t-12c' },
+      { t: '+1.240s', type: 'sentence', text: 'Let me think on that one.' },
+      { t: '+1.620s', type: 'emotion', text: 'thoughtful' },
+      { t: '+3.100s', type: 'sentence', text: 'I want to give you a thoughtful answer,' },
+      { t: '+3.580s', type: 'emotion', text: 'warm' },
+      { t: '+4.650s', type: 'sentence', text: 'not just a fast one.' },
+      { t: '+5.982s', type: 'complete', text: 'response_complete · interrupted=false' },
+    ],
+  },
+  {
+    id: 'user-05', role: 'user',
+    abs: '14:00:31.207', rel: '−1m 47.0s',
+    text: 'what do you think about starting a meditation routine',
+    chars: 49,
+  },
+];
+
+const LOGS = [
+  { ts: '14:02:18.224', src: 'gateway', lvl: 'INFO',  line: 'response_started turn=4f9e1a-08' },
+  { ts: '14:02:18.011', src: 'gateway', lvl: 'INFO',  line: 'ingress text len=50 → talker' },
+  { ts: '14:02:17.984', src: 'talker',  lvl: 'INFO',  line: 'asr: final_transcript "do i have anything on my calendar tomorrow afternoon" conf=0.94' },
+  { ts: '14:02:15.224', src: 'gateway', lvl: 'INFO',  line: 'response_complete turn=4f9e1a-07 interrupted=false dur=3813ms' },
+  { ts: '14:02:15.219', src: 'talker',  lvl: 'INFO',  line: 'tts: stream end (94 frames, 187200 bytes)' },
+  { ts: '14:02:14.012', src: 'talker',  lvl: 'INFO',  line: 'emotion: neutral (conf=0.74)' },
+  { ts: '14:02:13.871', src: 'talker',  lvl: 'WARN',  line: 'tts: backpressure 142ms — frame queue depth 6' },
+  { ts: '14:02:13.350', src: 'talker',  lvl: 'INFO',  line: 'emotion: warm (conf=0.81)' },
+  { ts: '14:02:11.732', src: 'gateway', lvl: 'INFO',  line: 'egress: sentence #1 → ws (47B)' },
+  { ts: '14:02:11.520', src: 'talker',  lvl: 'INFO',  line: 'emotion: cheerful (conf=0.83)' },
+  { ts: '14:02:11.516', src: 'talker',  lvl: 'INFO',  line: 'tool_result: get_weather → "clear, 22°C"' },
+  { ts: '14:02:11.408', src: 'gateway', lvl: 'INFO',  line: 'response_started turn=4f9e1a-07' },
+  { ts: '14:02:11.108', src: 'talker',  lvl: 'INFO',  line: 'tool_request: get_weather(city="Tokyo", date="today")' },
+  { ts: '14:02:11.082', src: 'gateway', lvl: 'INFO',  line: 'ingress text len=52 → talker' },
+  { ts: '14:01:50.119', src: 'gateway', lvl: 'ERROR', line: 'turn 4f9e1a-06 interrupted by ingress text — flushing TTS queue' },
+  { ts: '14:01:48.218', src: 'talker',  lvl: 'INFO',  line: 'llm: 412 tokens in 1.41s (292 tok/s)' },
+  { ts: '14:01:48.118', src: 'gateway', lvl: 'INFO',  line: 'response_started turn=4f9e1a-06' },
+  { ts: '14:01:47.829', src: 'gateway', lvl: 'INFO',  line: 'ingress text len=14 → talker' },
+  { ts: '14:01:42.001', src: 'llm_server', lvl: 'INFO', line: 'health 200 · 41ms' },
+];
+
+/* ============================================================
+   COMPONENTS
+============================================================ */
+
+function Topbar() {
+  return (
+    <div className="topbar">
+      <div className="brand"><span className="moon" /> Kaguya · dev console</div>
+      <div className="divider" />
+      <div className="session-chip">session <span className="mono">4f9e1a</span></div>
+      <div className="counter mono">ws://localhost:7474</div>
+      <div className="divider" />
+      <div className="ws-pill"><span className="live" /> WS connected · 12m</div>
+      <div className="counter">↓ <b>1.4 MB</b> / 312 ev</div>
+      <div className="counter">↑ <b>41 KB</b> / 18 ev</div>
+      <div className="top-actions">
+        <button className="btn danger">Shutdown</button>
+      </div>
+    </div>
+  );
+}
+
+function ProcCard({ p, selected, onClick }) {
+  const isUnmanaged = !p.managed;
+  return (
+    <div className={'proc' + (selected ? ' selected' : '')} onClick={onClick}>
+      <div className="proc-head">
+        <span className="proc-name">{p.name}</span>
+        {isUnmanaged && <span className="proc-tag unmanaged">unmanaged</span>}
+        <span className={'status-dot ' + p.status} />
+      </div>
+      {p.managed ? (
+        <>
+          <div className="proc-meta">
+            <span>pid <b>{p.pid}</b></span>
+            <span>up <b>{p.uptime}</b></span>
+            <span>cpu <b>{p.cpu}%</b></span>
+            <span>mem <b>{p.mem} MB</b></span>
+          </div>
+          <div className="proc-actions">
+            <button className="btn tiny">Restart</button>
+            <button className="btn tiny">Stop</button>
+            <button className="btn tiny ghost">Logs →</button>
+          </div>
+        </>
+      ) : (
+        <div className="proc-meta">
+          <span>health <b>{p.healthCode}</b></span>
+          <span>rtt <b>{p.rtt}ms</b></span>
+          <span>poll <b>5s</b></span>
+          <span>last <b>{p.lastPoll}</b></span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeftRail({ selProc, setSelProc }) {
+  return (
+    <div className="left">
+      <div className="lbl">Audio</div>
+      <div className="env-stack">
+        <div className="env-strip env-in">
+          <span className="env-arrow">↑</span>
+          <div className="env-body">
+            <div className="env-top"><span className="env-name">mic</span><span className="env-dev">MacBook Pro Mic</span></div>
+            <LiveMeter kind="input" scope />
+          </div>
+        </div>
+        <div className="env-strip env-out">
+          <span className="env-arrow">↓</span>
+          <div className="env-body">
+            <div className="env-top"><span className="env-name">tts</span><span className="env-dev">Headphones · −12 dBFS</span></div>
+            <LiveMeter kind="output" scope />
+          </div>
+        </div>
+      </div>
+      <PTTControl />
+
+      <div className="lbl" style={{ marginTop: 14 }}>Processes <span className="counter mono" style={{ marginLeft: 'auto' }}><b>3</b></span></div>
+      {PROCESSES.map(p => (
+        <ProcCard
+          key={p.name} p={p}
+          selected={selProc === p.name}
+          onClick={() => setSelProc(p.name)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function PTTControl() {
+  const [mode, setMode] = useState('ptt'); // 'ptt' | 'open'
+  const [held, setHeld] = useState(false);
+  return (
+    <div className="ptt-stack">
+      <div className="ptt-mode">
+        <button className={mode === 'ptt' ? 'on' : ''} onClick={() => setMode('ptt')}>Push-to-talk</button>
+        <button className={mode === 'open' ? 'on' : ''} onClick={() => setMode('open')}>Open mic</button>
+      </div>
+      {mode === 'ptt' ? (
+        <button
+          className={'ptt-bar' + (held ? ' held' : '')}
+          onMouseDown={() => setHeld(true)}
+          onMouseUp={() => setHeld(false)}
+          onMouseLeave={() => setHeld(false)}
+          title="Hold to talk (Space)"
+        >
+          <span className="dot" />
+          {held ? 'Listening…' : 'Hold Space to talk'}
+        </button>
+      ) : (
+        <div className="open-mic">
+          <span className="dot live" /> Always listening · VAD
+        </div>
+      )}
+    </div>
+  );
+}
+
+const HIGHLIGHT_TAGS = [
+  { id: 'interrupted', label: 'Interrupted' },
+  { id: 'tool',        label: 'Tool use' },
+  { id: 'delegated',   label: 'Delegated' },
+  { id: 'bargein',     label: 'Barge-in' },
+];
+
+function TurnsToolbar({ active, setActive, query, setQuery }) {
+  function toggle(id) {
+    setActive(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  }
+  return (
+    <div className="turns-toolbar">
+      <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-3)' }}>Highlight</span>
+      <div className="highlight-chips">
+        {HIGHLIGHT_TAGS.map(t => (
+          <span key={t.id}
+            className={'chip ' + t.id + (active.includes(t.id) ? ' on' : '')}
+            onClick={() => toggle(t.id)}>
+            <span className="swatch" />
+            {t.label}
+          </span>
+        ))}
+      </div>
+      <div className="divider" />
+      <input
+        className="search"
+        placeholder="Search transcript…"
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+      />
+      <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+        <span className="counter mono"><b>7</b> turns · 4 assistant · 3 user</span>
+        <button className="btn tiny">Export</button>
+      </div>
+    </div>
+  );
+}
+
+function MiniWaveform({ kb }) {
+  const n = 30;
+  const seed = (kb || 50) * 7;
+  return (
+    <div className="audio-mini">
+      <div className="wave-bars" style={{ inset: 4 }}>
+        {Array.from({ length: n }).map((_, i) => {
+          const h = 20 + Math.abs(Math.sin((i + seed) * 1.7)) * 60 + Math.abs(Math.cos((i + seed) * 0.6)) * 20;
+          return <div key={i} className="b" style={{ height: `${Math.min(95, h)}%`, opacity: 0.7 }} />;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TurnRow({ turn, selected, onClick, dim, anyHighlight }) {
+  const isUser = turn.role === 'user';
+  const stripes = turn.live ? [] : (turn.tags || []);
+  return (
+    <div
+      className={
+        'turn-row '
+        + (isUser ? 'user ' : '')
+        + (selected ? 'selected ' : '')
+        + (turn.live ? 'live ' : '')
+        + (dim ? 'dim ' : '')
+      }
+      onClick={onClick}
+    >
+      <div className="stripes">
+        {stripes.length === 0
+          ? <div className="stripe" style={{ background: 'transparent' }} />
+          : stripes.map(s => <div key={s} className={'stripe ' + s} />)
+        }
+      </div>
+      <div className="turn-time">
+        <div className="abs">{turn.abs.slice(0, 8)}</div>
+        <div className="rel">{turn.rel}</div>
+      </div>
+      <div className="turn-body">
+        <div className="turn-who">
+          <span className="who-name">{isUser ? 'User' : 'Kaguya'}</span>
+          {!isUser && <span className="turn-id mono">{turn.id}</span>}
+          <span className="turn-tags">
+            {(turn.tags || []).includes('interrupted') && <span className="tag interrupted">interrupted</span>}
+            {(turn.tags || []).includes('tool') && <span className="tag tool">tool</span>}
+            {(turn.tags || []).includes('delegated') && <span className="tag delegated">delegated</span>}
+            {(turn.tags || []).includes('bargein') && <span className="tag bargein">barge-in</span>}
+          </span>
+        </div>
+        <div className={'turn-text' + (isUser ? ' user' : '')}>{turn.text}{turn.live && <span style={{ color: 'var(--ink-4)' }}>…</span>}</div>
+        {!isUser && (
+          <div className="turn-meta-mini">
+            <span>TTFS <b>{turn.ttfs}ms</b></span>
+            <span>dur <b>{turn.live ? '—' : (turn.dur / 1000).toFixed(2) + 's'}</b></span>
+            <span>sent <b>{turn.live ? `${turn.sentenceCount}…` : turn.sentenceTotal}</b></span>
+            <span>audio <b>{turn.audioKb} KB</b></span>
+            {turn.emotions && (
+              <span>emo <b>{turn.emotions.map(e => e.label).join(' → ')}</b></span>
+            )}
+          </div>
+        )}
+        {isUser && (
+          <div className="turn-meta-mini"><span>{turn.chars} chars</span></div>
+        )}
+      </div>
+      <div className="turn-marks">
+        {!isUser && <MiniWaveform kb={turn.audioKb} />}
+      </div>
+    </div>
+  );
+}
+
+function TurnList({ turns, selectedId, onSelect, highlights, query }) {
+  const filtered = useMemo(() => turns.filter(t =>
+    !query || t.text.toLowerCase().includes(query.toLowerCase())
+  ), [turns, query]);
+
+  const anyHighlight = highlights.length > 0;
+  return (
+    <div className="turn-list">
+      {filtered.map(t => {
+        const matches = anyHighlight && (t.tags || []).some(tag => highlights.includes(tag));
+        const dim = anyHighlight && !matches && t.role !== 'user';
+        return (
+          <TurnRow
+            key={t.id}
+            turn={t}
+            selected={t.id === selectedId}
+            onClick={() => onSelect(t.id)}
+            dim={dim}
+            anyHighlight={anyHighlight}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/* ============================================================
+   INSPECTOR
+============================================================ */
+
+function Stats({ turn }) {
+  return (
+    <div className="stats">
+      <div className="stat">
+        <div className="k">TTFS</div>
+        <div className="v">{turn.ttfs}<small>ms</small></div>
+      </div>
+      <div className="stat">
+        <div className="k">Duration</div>
+        <div className="v">{turn.live ? '—' : (turn.dur / 1000).toFixed(2)}<small>s</small></div>
+      </div>
+      <div className="stat">
+        <div className="k">Sentences</div>
+        <div className="v">{turn.live ? turn.sentenceCount : turn.sentenceTotal}</div>
+      </div>
+      <div className="stat">
+        <div className="k">Audio</div>
+        <div className="v">{turn.audioKb}<small>KB</small></div>
+      </div>
+    </div>
+  );
+}
+
+function EmotionTrack({ turn }) {
+  const total = turn.live ? Math.max(1, turn.sentenceCount) : (turn.dur / 1000);
+  const items = turn.emotions || [];
+  if (!items.length) return null;
+  // compute widths from `at` (fraction of duration)
+  const ends = items.map((e, i) => i + 1 < items.length ? items[i + 1].at : 1.0);
+  return (
+    <>
+      <div className="emo-track">
+        {items.map((e, i) => {
+          const w = (ends[i] - e.at) * 100;
+          return (
+            <div key={i}
+              className={'emo-band emo-' + e.label}
+              style={{ width: `${w}%` }}
+              title={e.label}>{e.label}</div>
+          );
+        })}
+      </div>
+      <div className="track-axis">
+        <span>0.0s</span>
+        <span>{total.toFixed(1)}s</span>
+      </div>
+    </>
+  );
+}
+
+function ReasonerBlock({ d }) {
+  return (
+    <div className="reasoner-block">
+      <div className="rh">
+        <span>reasoner</span>
+        <span style={{ color: 'var(--ink-4)' }}>task {d.taskId}</span>
+      </div>
+      {d.steps.map((s, i) => (
+        <div className="reasoner-step" key={i}>
+          <span className="ts">{s.ts}</span>
+          <span>{s.d}</span>
+        </div>
+      ))}
+      <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--blue-pale)', fontSize: 11, color: 'var(--ink-2)', fontStyle: 'italic' }}>
+        {d.summary}
+      </div>
+    </div>
+  );
+}
+
+const EVENT_ICON = {
+  started: '▶',
+  sentence: 'T',
+  emotion: '♥',
+  tool: '⚙',
+  delegate: '⤳',
+  reasoner: '✦',
+  bargein: '!',
+  complete: '◆',
+};
+
+function EventTimeline({ turn }) {
+  return (
+    <div className="events">
+      {(turn.events || []).map((e, i) => (
+        <div key={i} className={'event ' + e.type}>
+          <span className="t">{e.t}</span>
+          <span className="icon">{EVENT_ICON[e.type] || '·'}</span>
+          <div className="body">
+            <div className="head">
+              <span>{e.type === 'complete' ? 'response_complete' : e.type}</span>
+              {e.subtle && <span style={{ color: 'var(--ink-4)', fontFamily: 'JetBrains Mono', textTransform: 'none', letterSpacing: 0 }}>{e.subtle}</span>}
+            </div>
+            <div className={'text' + (e.type === 'tool' ? ' mono' : '')}>{e.text}</div>
+            {e.type === 'delegate' && turn.delegate && <ReasonerBlock d={turn.delegate} />}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Waveform({ turn }) {
+  const n = 80;
+  const seed = (turn.audioKb || 50) * 3 + turn.id.charCodeAt(turn.id.length - 1);
+  const bars = Array.from({ length: n }).map((_, i) => {
+    const h = 12 + Math.abs(Math.sin((i + seed) * 0.6)) * 70 + Math.abs(Math.cos((i + seed) * 0.31)) * 18;
+    return Math.min(96, h);
+  });
+  const playFrac = turn.live ? Math.min(0.9, (turn.sentenceCount * 0.4)) : 0.42;
+  const dur = turn.live ? '—' : (turn.dur / 1000).toFixed(2) + 's';
+  return (
+    <div className="wave-card">
+      <div className="wave-canvas">
+        <div className="wave-bars">
+          {bars.map((h, i) => (
+            <div key={i} className="b"
+              style={{ height: `${h}%`, opacity: i / n < playFrac ? 1 : 0.4 }} />
+          ))}
+        </div>
+        <div className="wave-playhead" style={{ left: `${playFrac * 100}%` }} />
+      </div>
+      <div className="wave-controls">
+        <button className="play-btn">▶</button>
+        <button className="btn tiny ghost">⤓ WAV</button>
+        <button className="btn tiny ghost">Open in Audio →</button>
+        <span className="wave-time">0:01.61 / {dur}</span>
+      </div>
+    </div>
+  );
+}
+
+function LiveMeter({ kind }) {
+  // animated pseudo-RMS bars; placeholder until real AnalyserNode is wired
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 80);
+    return () => clearInterval(id);
+  }, []);
+  const n = 64;
+  const idle = kind === 'input';
+  const bars = Array.from({ length: n }).map((_, i) => {
+    const phase = (i + tick) * (kind === 'input' ? 0.34 : 0.62);
+    const env = Math.abs(Math.sin(phase)) * 0.6 + Math.abs(Math.cos(phase * 0.27)) * 0.4;
+    const bias = kind === 'input' ? 0.18 : 0.7;
+    const h = 6 + env * bias * 100;
+    return Math.min(95, h);
+  });
+  return (
+    <div className={'live-meter ' + (kind === 'input' ? 'input' : '') + (idle ? ' idle' : '')}>
+      {bars.map((h, i) => <div key={i} className="b" style={{ height: `${h}%` }} />)}
+    </div>
+  );
+}
+
+function PushToTalk() {
+  const [held, setHeld] = useState(false);
+  return (
+    <div className="ptt-card">
+      <button
+        className={'ptt-btn' + (held ? ' held' : '')}
+        onMouseDown={() => setHeld(true)}
+        onMouseUp={() => setHeld(false)}
+        onMouseLeave={() => setHeld(false)}
+        title="Hold to talk (Space)"
+      >
+        ●
+      </button>
+      <div className="ptt-text">
+        <div className="l1">{held ? 'Listening…' : 'Push to talk'}</div>
+        <div className="l2">
+          hold <span className="kbd">Space</span> &nbsp;·&nbsp; tap <span className="kbd">⌘ M</span> to mute
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TranscriptTimeline({ turns, onSelect }) {
+  function relToSec(rel) {
+    if (!rel) return 0;
+    const s = rel.replace('−', '-').replace('+', '');
+    const m = s.match(/(?:(-?\d+)m\s*)?(-?[\d.]+)s/);
+    if (!m) return 0;
+    return Math.abs(parseFloat(m[1] || '0') * 60 + parseFloat(m[2] || '0'));
+  }
+  const ages = turns.map(t => relToSec(t.rel));
+  const maxAge = Math.max(...ages, 30);
+  const totalSec = Math.ceil(maxAge / 30) * 30;
+
+  // Build typed blocks across four lanes: user, talker, tool, reasoner
+  const blocks = [];
+  turns.forEach(t => {
+    const ageSec = relToSec(t.rel);
+    if (t.role === 'user') {
+      blocks.push({ id: t.id, lane: 'user', start: ageSec, dur: 0.6, turnId: t.id, label: t.text, kind: 'user' });
+      return;
+    }
+    // assistant turn → talker block
+    const dur = t.live ? 1.4 : (t.dur || 0) / 1000;
+    const tags = t.tags || [];
+    let kind = 'talker';
+    if (tags.includes('interrupted')) kind = 'interrupted';
+    blocks.push({ id: t.id, lane: 'talker', start: ageSec, dur, turnId: t.id, label: t.id, kind, live: t.live });
+    if (tags.includes('tool')) {
+      blocks.push({ id: t.id + '-tool', lane: 'tool', start: ageSec - 0.2, dur: Math.max(0.4, dur * 0.25), turnId: t.id, label: 'get_weather', kind: 'tool' });
+    }
+    if (tags.includes('delegated') && t.delegate) {
+      blocks.push({ id: t.id + '-rsr', lane: 'reasoner', start: ageSec - 0.05, dur: Math.max(0.8, dur * 0.4), turnId: t.id, label: '', kind: 'reasoner' });
+    }
+  });
+
+  const LANES = [
+    { id: 'user',     label: 'User' },
+    { id: 'talker',   label: 'Talker' },
+    { id: 'tool',     label: 'Tool' },
+    { id: 'reasoner', label: 'Reasoner' },
+  ];
+
+  return (
+    <div className="net-tl">
+      <div className="net-axis-row">
+        <span className="lane-gutter"></span>
+        <div className="net-axis">
+          <span>−{totalSec}s</span>
+          <span>−{Math.round(totalSec * 0.66)}s</span>
+          <span>−{Math.round(totalSec * 0.33)}s</span>
+          <span>now</span>
+        </div>
+      </div>
+      <div className="net-lanes">
+        {LANES.map(L => (
+          <div key={L.id} className="net-lane">
+            <span className="lane-gutter">{L.label}</span>
+            <div className="net-track">
+              {blocks.filter(b => b.lane === L.id).map(b => {
+                const startPct = ((totalSec - b.start) / totalSec) * 100;
+                const widthPct = (b.dur / totalSec) * 100;
+                const cls = ['net-block', b.kind];
+                if (b.live) cls.push('live');
+                return (
+                  <div key={b.id} className={cls.join(' ')}
+                    onClick={() => onSelect(b.turnId)}
+                    title={b.label}
+                    style={{
+                      left: `${Math.max(0, Math.min(99.5, startPct))}%`,
+                      width: `${Math.max(1.2, Math.min(100 - startPct, widthPct))}%`,
+                    }}>
+                    {widthPct > 10 ? <span className="bl">{b.label}</span> : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LiveInspector({ turns, onSelectTurn }) {
+  // Default view: pin to latest turn (streaming if there is one, else most recent assistant).
+  const live = turns.find(t => t.live);
+  const latest = live || turns.find(t => t.role === 'assistant');
+  if (!latest) {
+    return (
+      <div className="insp-head">
+        <div className="insp-eyebrow">Live</div>
+        <div className="insp-title">Idle</div>
+        <div style={{ marginTop: 6, fontSize: 11, color: 'var(--ink-3)', fontFamily: 'JetBrains Mono' }}>
+          waiting for first turn…
+        </div>
+      </div>
+    );
+  }
+  return <TurnInspectorBody turn={latest} streaming={!!live && latest.id === live.id} />;
+}
+
+function Inspector({ turn, turns, onSelectTurn }) {
+  if (!turn || turn.role === 'user') {
+    return <LiveInspector turns={turns} onSelectTurn={onSelectTurn} />;
+  }
+  return <TurnInspectorBody turn={turn} streaming={!!turn.live} pinned />;
+}
+
+function TurnInspectorBody({ turn, streaming, pinned }) {
+  const skel = (label, content) => streaming && content == null
+    ? <span className="skel">{label}</span>
+    : content;
+  return (
+    <>
+      <div className="insp-head">
+        <div className="insp-eyebrow">{streaming ? 'Streaming' : (pinned ? 'Turn inspector' : 'Latest turn')}</div>
+        <div className="insp-title">
+          {turn.id}
+          {streaming
+            ? <span className="pin streaming">live</span>
+            : pinned ? <span className="pin">pinned</span> : <span className="pin latest">latest</span>}
+        </div>
+        <div style={{ marginTop: 6, fontSize: 11, color: 'var(--ink-3)', fontFamily: 'JetBrains Mono' }}>
+          started {turn.abs}{streaming ? ' · in flight' : ` · ${(turn.dur / 1000).toFixed(2)}s`}
+        </div>
+      </div>
+
+      <div className="insp-section">
+        <h4>Statistics</h4>
+        <Stats turn={turn} streaming={streaming} />
+      </div>
+
+      <div className="insp-section">
+        <h4>Emotion track <span className="meta-r">{turn.emotions ? turn.emotions.length : 0} events</span></h4>
+        {turn.emotions && turn.emotions.length
+          ? <EmotionTrack turn={turn} />
+          : <div className="skel-row">no emotion events yet…</div>}
+      </div>
+
+      <div className="insp-section">
+        <h4>Audio {turn.audioKb ? <span className="meta-r">{turn.audioKb} KB · 24 kHz · pcm_s16le</span> : <span className="meta-r skel">waiting · 24 kHz · pcm_s16le</span>}</h4>
+        <Waveform turn={turn} />
+      </div>
+
+      <div className="insp-section">
+        <h4>Event timeline <span className="meta-r">{(turn.events || []).length} events{streaming ? ' · streaming' : ''}</span></h4>
+        <EventTimeline turn={turn} />
+      </div>
+
+      <div className="insp-section" style={{ borderBottom: 'none' }}>
+        <h4>Sentences</h4>
+        <div className="sent-list">
+          {(turn.sentences || []).map((s, i) => (
+            <div className="sent" key={i}>
+              <span className="ts">+{s.t.toFixed(2)}s</span>
+              <span>{s.text}</span>
+            </div>
+          ))}
+          {streaming && (
+            <div className="sent">
+              <span className="ts skel">+?.??s</span>
+              <span className="skel">awaiting next sentence…</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ============================================================
+   LOG PANEL
+============================================================ */
+
+function LogPanel({ collapsed, onToggle }) {
+  const [src, setSrc] = useState('all');
+  const [lvl, setLvl] = useState('INFO+');
+  const scrollRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const filtered = useMemo(() => LOGS.filter(l => {
+    if (src !== 'all' && l.src !== src) return false;
+    if (lvl === 'WARN+'  && !['WARN', 'ERROR'].includes(l.lvl)) return false;
+    if (lvl === 'ERROR'  && l.lvl !== 'ERROR') return false;
+    return true;
+  }), [src, lvl]);
+
+  // oldest → newest (terminal feel)
+  const ordered = useMemo(() => [...filtered].reverse(), [filtered]);
+
+  useEffect(() => {
+    if (autoScroll && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [ordered, autoScroll]);
+
+  function onScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    setAutoScroll(atBottom);
+  }
+
+  const [prompt, setPrompt] = useState('');
+  function sendPrompt() {
+    if (!prompt.trim()) return;
+    setPrompt('');
+  }
+
+  return (
+    <div className="logs">
+      <div className="prompt-bar">
+        <span className="prompt-pre">›</span>
+        <input
+          className="prompt-input"
+          placeholder="Send a text prompt to Kaguya…"
+          value={prompt}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPrompt(); } }}
+        />
+        <span className="prompt-hint">⏎ send</span>
+        <button className="send-btn" onClick={sendPrompt} disabled={!prompt.trim()}>Send</button>
+      </div>
+      <div className="log-toolbar">
+        <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-3)' }}>Logs</span>
+        <div className="seg">
+          {['all', 'gateway', 'talker', 'llm_server'].map(s => (
+            <button key={s} className={src === s ? 'on' : ''} onClick={() => setSrc(s)}>{s}</button>
+          ))}
+        </div>
+        <div className="seg">
+          {['ALL', 'INFO+', 'WARN+', 'ERROR'].map(l => (
+            <button key={l} className={lvl === l ? 'on' : ''} onClick={() => setLvl(l)}>{l}</button>
+          ))}
+        </div>
+        <input className="search" placeholder="filter… (regex ok)" />
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span className="counter mono"><b>{filtered.length}</b> / 312 entries · 1421/min</span>
+          <button className="btn tiny">Pause</button>
+          <button className="btn tiny">Clear</button>
+          <button className="btn tiny">Save .log</button>
+          <button className="logs-toggle" onClick={onToggle} title={collapsed ? 'Expand logs' : 'Collapse logs'}>
+            <span className="caret">▾</span>
+            <kbd>⌃`</kbd>
+          </button>
+        </span>
+      </div>
+      <div className="log-rows" ref={scrollRef} onScroll={onScroll}>
+        {ordered.map((l, i) => (
+          <div key={i} className={'log-row ' + (l.lvl === 'ERROR' ? 'error' : l.lvl === 'WARN' ? 'warn' : '')}>
+            <span className="ts">{l.ts}</span>
+            <span className={'src ' + (l.src === 'llm_server' ? 'llm' : l.src)}>{l.src}</span>
+            <span className="lvl">{l.lvl}</span>
+            <span className="line">{l.line}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   APP
+============================================================ */
+function App() {
+  const [selProc, setSelProc] = useState(null);
+  const [selTurn, setSelTurn] = useState(null); // null = live monitor view
+  const [highlights, setHighlights] = useState([]);
+  const [query, setQuery] = useState('');
+  const [logsCollapsed, setLogsCollapsed] = useState(false);
+
+  useEffect(() => {
+    function onKey(e) {
+      // Ctrl+` (or Cmd+`) toggles logs, matching VS Code's terminal toggle
+      if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+        e.preventDefault();
+        setLogsCollapsed(c => !c);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const selected = selTurn ? TURNS.find(t => t.id === selTurn) : null;
+  function toggleTurn(id) {
+    setSelTurn(prev => prev === id ? null : id);
+  }
+
+  return (
+    <div className={'app' + (logsCollapsed ? ' logs-collapsed' : '')}>
+      <Topbar />
+      <LeftRail selProc={selProc} setSelProc={setSelProc} />
+      <div className="center">
+        <div className="turns-wrap">
+          <div className="timeline-strip">
+            <div className="strip-tl">
+              <TranscriptTimeline turns={TURNS} onSelect={toggleTurn} />
+            </div>
+          </div>
+          <TurnsToolbar
+            active={highlights} setActive={setHighlights}
+            query={query} setQuery={setQuery}
+          />
+          <TurnList
+            turns={TURNS}
+            selectedId={selTurn}
+            onSelect={toggleTurn}
+            highlights={highlights}
+            query={query}
+          />
+        </div>
+      </div>
+      <div className="right">
+        <Inspector turn={selected} turns={TURNS} onSelectTurn={toggleTurn} />
+      </div>
+      <LogPanel collapsed={logsCollapsed} onToggle={() => setLogsCollapsed(c => !c)} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

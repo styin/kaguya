@@ -42,6 +42,7 @@ dist/
 
 # Claude Code local settings (per-developer, not shared)
 .claude/
+.codex/
 
 # Local data
 /config/MEMORY.md
