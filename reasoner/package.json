@@ -1,6 +1,7 @@
 {
   "name": "kaguya-reasoner",
   "version": "0.1.0",
+  "license": "AGPL-3.0-only",
   "description": "Kaguya Reasoner — OpenClaw/Claude Code adapter, streams ReasonerEvents to Gateway",
   "main": "dist/index.js",
   "scripts": {

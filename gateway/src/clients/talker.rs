@@ -126,7 +126,9 @@ impl TalkerClient {
         if let Some(tx) = guard.as_ref() {
             let msg = proto::TalkerInput {
                 payload: Some(proto::talker_input::Payload::BargeIn(
-                    proto::BargeInSignal { conversation_id: conversation_id.into() }
+                    proto::BargeInSignal {
+                        conversation_id: conversation_id.into(),
+                    },
                 )),
             };
             if tx.send(msg).await.is_err() {
@@ -140,12 +142,17 @@ impl TalkerClient {
     }
 
     pub async fn prefill_cache(&self, conversation_id: &str, ctx: proto::TalkerContext) {
-        let Some(mut client) = self.inner.read().await.clone() else { return };
+        let Some(mut client) = self.inner.read().await.clone() else {
+            return;
+        };
         debug!("→ PrefillCache");
-        if let Err(e) = client.prefill_cache(proto::PrefillRequest {
-            conversation_id: conversation_id.into(),
-            context: Some(ctx),
-        }).await {
+        if let Err(e) = client
+            .prefill_cache(proto::PrefillRequest {
+                conversation_id: conversation_id.into(),
+                context: Some(ctx),
+            })
+            .await
+        {
             warn!("PrefillCache failed: {e}");
         }
     }
@@ -157,8 +164,12 @@ impl TalkerClient {
             return;
         };
         drop(guard);
-        info!(soul_len = config.soul_md.len(), identity_len = config.identity_md.len(),
-              memory_len = config.memory_md.len(), "→ UpdatePersona");
+        info!(
+            soul_len = config.soul_md.len(),
+            identity_len = config.identity_md.len(),
+            memory_len = config.memory_md.len(),
+            "→ UpdatePersona"
+        );
         if let Err(e) = client.update_persona(config).await {
             error!("UpdatePersona failed: {e}");
         }

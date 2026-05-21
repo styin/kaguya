@@ -36,7 +36,9 @@ impl HybridRetriever {
     }
 
     pub async fn retrieve(&self, query: &str) -> Vec<proto::RetrievalResult> {
-        if query.is_empty() { return vec![]; }
+        if query.is_empty() {
+            return vec![];
+        }
 
         let mut sources: Vec<(&str, Vec<RankedItem>)> = Vec::new();
 
@@ -44,16 +46,23 @@ impl HybridRetriever {
         let bm25 = self.store.search_bm25(query, self.top_k * 2).await;
         if !bm25.is_empty() {
             debug!("BM25: {} hits", bm25.len());
-            sources.push(("bm25", bm25.into_iter().map(|r| RankedItem {
-                id: r.id, content: r.content,
-            }).collect()));
+            sources.push((
+                "bm25",
+                bm25.into_iter()
+                    .map(|r| RankedItem {
+                        id: r.id,
+                        content: r.content,
+                    })
+                    .collect(),
+            ));
         }
 
         // ── Vector similarity (optional, for semantic matching) ──
         if let Some(embedder) = &self.embedder {
             if let Ok(qvec) = embedder.embed(query).await {
                 let all = self.store.all_embeddings().await;
-                let mut scored: Vec<(String, f32)> = all.iter()
+                let mut scored: Vec<(String, f32)> = all
+                    .iter()
                     .map(|(id, v)| (id.clone(), cosine_similarity(&qvec, v)))
                     .collect();
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -64,7 +73,10 @@ impl HybridRetriever {
                     let mut items = Vec::new();
                     for (id, _) in scored {
                         if let Some(entry) = self.store.get_memory(&id).await {
-                            items.push(RankedItem { id, content: entry.content });
+                            items.push(RankedItem {
+                                id,
+                                content: entry.content,
+                            });
                         }
                     }
                     sources.push(("vector", items));

@@ -1,5 +1,5 @@
 //! Persona Management
-//! 
+//!
 //! Loads and manages the Talker's persona, including "soul" (core traits) and "identity" (current status).
 
 use std::path::Path;
@@ -17,8 +17,12 @@ impl Persona {
         soul_path: impl AsRef<Path>,
         identity_path: impl AsRef<Path>,
     ) -> anyhow::Result<Self> {
-        let soul = tokio::fs::read_to_string(soul_path).await.unwrap_or_default();
-        let identity = tokio::fs::read_to_string(identity_path).await.unwrap_or_default();
+        let soul = tokio::fs::read_to_string(soul_path)
+            .await
+            .unwrap_or_default();
+        let identity = tokio::fs::read_to_string(identity_path)
+            .await
+            .unwrap_or_default();
         Ok(Self {
             soul: Arc::new(RwLock::new(soul)),
             identity: Arc::new(RwLock::new(identity)),

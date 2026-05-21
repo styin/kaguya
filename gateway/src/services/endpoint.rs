@@ -4,8 +4,12 @@
 //! Phase 2 targets OpenPod protocol integration.
 
 use std::sync::Arc;
+
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     response::IntoResponse,
     routing::get,
     Router,
@@ -13,6 +17,7 @@ use axum::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
 use crate::types::*;
 
 pub struct EndpointState {
@@ -106,12 +111,16 @@ async fn handle_text_message(json: &str, state: &EndpointState) {
         Ok(v) => v,
         Err(_) => return,
     };
+
     match parsed.get("type").and_then(|t| t.as_str()) {
         Some("text") => {
             if let Some(c) = parsed.get("content").and_then(|c| c.as_str()) {
-                let _ = state.p1_tx.send(InputEvent::TextCommand {
-                    text: c.to_string(),
-                }).await;
+                let _ = state
+                    .p1_tx
+                    .send(InputEvent::TextCommand {
+                        text: c.to_string(),
+                    })
+                    .await;
             }
         }
         Some("control") => match parsed.get("command").and_then(|c| c.as_str()) {

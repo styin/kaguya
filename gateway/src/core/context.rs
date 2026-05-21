@@ -45,8 +45,16 @@ pub async fn with_tool_result(
     active_tasks: &[ActiveTask],
 ) -> proto::TalkerContext {
     let mut ctx = assemble(
-        conversation_id, turn_id, "", history, memory_md, vec![], tools, active_tasks,
-    ).await;
+        conversation_id,
+        turn_id,
+        "",
+        history,
+        memory_md,
+        vec![],
+        tools,
+        active_tasks,
+    )
+    .await;
     ctx.tool_request_id = request_id.into();
     ctx.tool_result_content = content.into();
     ctx
@@ -64,8 +72,16 @@ pub async fn with_reasoner_result(
     active_tasks: &[ActiveTask],
 ) -> proto::TalkerContext {
     let mut ctx = assemble(
-        conversation_id, turn_id, "", history, memory_md, vec![], tools, active_tasks,
-    ).await;
+        conversation_id,
+        turn_id,
+        "",
+        history,
+        memory_md,
+        vec![],
+        tools,
+        active_tasks,
+    )
+    .await;
     ctx.reasoner_task_id = task_id.into();
     ctx.reasoner_result_content = result.into();
     ctx
@@ -81,10 +97,19 @@ pub async fn for_silence(
     tools: &ToolRegistry,
 ) -> proto::TalkerContext {
     assemble(
-        conversation_id, turn_id,
-        &format!("[SYSTEM: {}s silence since last exchange]", duration.as_secs()),
-        history, memory_md, vec![], tools, &[],
-    ).await
+        conversation_id,
+        turn_id,
+        &format!(
+            "[SYSTEM: {}s silence since last exchange]",
+            duration.as_secs()
+        ),
+        history,
+        memory_md,
+        vec![],
+        tools,
+        &[],
+    )
+    .await
 }
 
 /// Reasoner narration step.
@@ -120,5 +145,15 @@ pub async fn for_prefill(
     tools: &ToolRegistry,
     active_tasks: &[ActiveTask],
 ) -> proto::TalkerContext {
-    assemble(conversation_id, "", "", history, memory_md, vec![], tools, active_tasks).await
+    assemble(
+        conversation_id,
+        "",
+        "",
+        history,
+        memory_md,
+        vec![],
+        tools,
+        active_tasks,
+    )
+    .await
 }

@@ -19,21 +19,48 @@ pub enum ControlSignal {
 /// - P5: Auxiliary events (`Telemetry`)
 #[derive(Debug, Clone)]
 pub enum InputEvent {
-    FinalTranscript { text: String, confidence: f32 },
-    TextCommand { text: String },
+    FinalTranscript {
+        text: String,
+        confidence: f32,
+    },
+    TextCommand {
+        text: String,
+    },
 
     VadSpeechStart,
-    VadSpeechEnd { silence_duration_ms: f32 },
-    PartialTranscript { text: String },
+    VadSpeechEnd {
+        silence_duration_ms: f32,
+    },
+    PartialTranscript {
+        text: String,
+    },
 
-    ToolResult { request_id: String, tool_name: String, content: String },
-    ReasonerStep { task_id: String, description: String },
-    ReasonerCompleted { task_id: String, summary: String },
-    ReasonerError { task_id: String, message: String, code: i32 },
-    
-    SilenceExceeded { duration: Duration },
-    
-    Telemetry { data: serde_json::Value },
+    ToolResult {
+        request_id: String,
+        tool_name: String,
+        content: String,
+    },
+    ReasonerStep {
+        task_id: String,
+        description: String,
+    },
+    ReasonerCompleted {
+        task_id: String,
+        summary: String,
+    },
+    ReasonerError {
+        task_id: String,
+        message: String,
+        code: i32,
+    },
+
+    SilenceExceeded {
+        duration: Duration,
+    },
+
+    Telemetry {
+        data: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

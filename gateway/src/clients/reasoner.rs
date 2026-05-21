@@ -42,11 +42,14 @@ impl ReasonerManager {
         let cancel = CancellationToken::new();
         let child = cancel.child_token();
 
-        self.agents.write().await.insert(task_id.clone(), Agent {
-            task_id: task_id.clone(),
-            description: description.clone(),
-            cancel,
-        });
+        self.agents.write().await.insert(
+            task_id.clone(),
+            Agent {
+                task_id: task_id.clone(),
+                description: description.clone(),
+                cancel,
+            },
+        );
 
         let agents = Arc::clone(&self.agents);
         let client_arc = Arc::clone(&self.client);
@@ -63,19 +66,17 @@ impl ReasonerManager {
             };
             let maybe_client = match maybe_client {
                 Some(c) => Some(c),
-                None => {
-                    match Channel::from_shared(endpoint) {
-                        Ok(ch) => match ch.connect().await {
-                            Ok(channel) => {
-                                let c = ReasonerServiceClient::new(channel);
-                                *client_arc.write().await = Some(c.clone());
-                                Some(c)
-                            }
-                            Err(_) => None,
-                        },
+                None => match Channel::from_shared(endpoint) {
+                    Ok(ch) => match ch.connect().await {
+                        Ok(channel) => {
+                            let c = ReasonerServiceClient::new(channel);
+                            *client_arc.write().await = Some(c.clone());
+                            Some(c)
+                        }
                         Err(_) => None,
-                    }
-                }
+                    },
+                    Err(_) => None,
+                },
             };
 
             if let Some(mut client) = maybe_client {
@@ -84,15 +85,17 @@ impl ReasonerManager {
                 let outbound = ReceiverStream::new(del_rx);
 
                 // Send TaskRequest
-                let _ = del_tx.send(proto::DelegateInput {
-                    payload: Some(proto::delegate_input::Payload::StartTask(
-                        proto::TaskRequest {
-                            task_id: tid.clone(),
-                            description: description.clone(),
-                            metadata: HashMap::new(),
-                        }
-                    )),
-                }).await;
+                let _ = del_tx
+                    .send(proto::DelegateInput {
+                        payload: Some(proto::delegate_input::Payload::StartTask(
+                            proto::TaskRequest {
+                                task_id: tid.clone(),
+                                description: description.clone(),
+                                metadata: HashMap::new(),
+                            },
+                        )),
+                    })
+                    .await;
 
                 match client.delegate(outbound).await {
                     Ok(resp) => {
@@ -161,9 +164,13 @@ impl ReasonerManager {
                     }
                     Err(e) => {
                         error!("Delegate failed: {e}");
-                        let _ = p3_tx.send(InputEvent::ReasonerError {
-                            task_id: tid.clone(), message: e.to_string(), code: -1,
-                        }).await;
+                        let _ = p3_tx
+                            .send(InputEvent::ReasonerError {
+                                task_id: tid.clone(),
+                                message: e.to_string(),
+                                code: -1,
+                            })
+                            .await;
                     }
                 }
             } else {
@@ -198,9 +205,14 @@ impl ReasonerManager {
     }
 
     pub async fn active_tasks(&self) -> Vec<ActiveTask> {
-        self.agents.read().await.values().map(|a| ActiveTask {
-            task_id: a.task_id.clone(),
-            description: a.description.clone(),
-        }).collect()
+        self.agents
+            .read()
+            .await
+            .values()
+            .map(|a| ActiveTask {
+                task_id: a.task_id.clone(),
+                description: a.description.clone(),
+            })
+            .collect()
     }
 }

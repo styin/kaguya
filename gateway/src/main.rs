@@ -1,8 +1,8 @@
 //! Kaguya Gateway — main event loop.
 //! Uses RagEngine (not Memory), bidi Listener/Talker clients.
 
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
@@ -83,7 +83,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         info!(addr = %grpc_addr, "gRPC control server listening");
         if let Err(e) = Server::builder()
-            .add_service(proto::router_control_service_server::RouterControlServiceServer::new(control_svc))
+            .add_service(
+                proto::router_control_service_server::RouterControlServiceServer::new(control_svc),
+            )
             .serve(grpc_addr)
             .await
         {
@@ -117,11 +119,13 @@ async fn main() -> anyhow::Result<()> {
     // ── Connect Talker ──
     talker.try_connect().await;
     let mut last_memory_md = rag.export_memory_md().await;
-    talker.update_persona(proto::PersonaConfig {
-        soul_md: persona.soul().await,
-        identity_md: persona.identity().await,
-        memory_md: last_memory_md.clone(),
-    }).await;
+    talker
+        .update_persona(proto::PersonaConfig {
+            soul_md: persona.soul().await,
+            identity_md: persona.identity().await,
+            memory_md: last_memory_md.clone(),
+        })
+        .await;
 
     // ── WebSocket endpoint (dev-console feature) ──
     // listener_audio_tx comes from ListenerClient (raw audio socket).
@@ -154,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── File watcher (SOUL.md + IDENTITY.md only — memory is in SQLite) ──
     {
-        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, EventKind};
+        use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
         let persona_w = persona.clone();
         let talker_w = talker.clone();
@@ -178,7 +182,8 @@ async fn main() -> anyhow::Result<()> {
         for p in [&soul_path, &identity_path] {
             if let Some(parent) = p.parent() {
                 if parent.exists() {
-                    watcher.watch(parent, RecursiveMode::NonRecursive)
+                    watcher
+                        .watch(parent, RecursiveMode::NonRecursive)
                         .unwrap_or_else(|e| warn!("watch failed for {:?}: {e}", parent));
                 }
             }
@@ -201,11 +206,13 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                talker_w.update_persona(proto::PersonaConfig {
-                    soul_md: persona_w.soul().await,
-                    identity_md: persona_w.identity().await,
-                    memory_md: rag_w.export_memory_md().await,
-                }).await;
+                talker_w
+                    .update_persona(proto::PersonaConfig {
+                        soul_md: persona_w.soul().await,
+                        identity_md: persona_w.identity().await,
+                        memory_md: rag_w.export_memory_md().await,
+                    })
+                    .await;
                 info!("persona pushed to Talker");
             }
         });

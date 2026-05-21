@@ -20,7 +20,10 @@ pub struct ListenerClient {
 
 impl ListenerClient {
     pub fn new(grpc_endpoint: String, audio_addr: String) -> Self {
-        Self { grpc_endpoint, audio_addr }
+        Self {
+            grpc_endpoint,
+            audio_addr,
+        }
     }
 
     /// Start bidi gRPC stream for ASR events + raw TCP forwarder for audio.
@@ -53,21 +56,25 @@ impl ListenerClient {
                         let _ = p2_tx.send(InputEvent::VadSpeechStart).await;
                     }
                     Some(proto::listener_output::Event::VadSpeechEnd(e)) => {
-                        let _ = p2_tx.send(InputEvent::VadSpeechEnd {
-                            silence_duration_ms: e.silence_duration_ms,
-                        }).await;
+                        let _ = p2_tx
+                            .send(InputEvent::VadSpeechEnd {
+                                silence_duration_ms: e.silence_duration_ms,
+                            })
+                            .await;
                     }
                     Some(proto::listener_output::Event::PartialTranscript(t)) => {
-                        let _ = p2_tx.send(InputEvent::PartialTranscript {
-                            text: t.text,
-                        }).await;
+                        let _ = p2_tx
+                            .send(InputEvent::PartialTranscript { text: t.text })
+                            .await;
                     }
                     Some(proto::listener_output::Event::FinalTranscript(t)) => {
                         debug!(text = %t.text, "Listener → P1: final_transcript");
-                        let _ = p1_tx.send(InputEvent::FinalTranscript {
-                            text: t.text,
-                            confidence: t.confidence,
-                        }).await;
+                        let _ = p1_tx
+                            .send(InputEvent::FinalTranscript {
+                                text: t.text,
+                                confidence: t.confidence,
+                            })
+                            .await;
                     }
                     None => {}
                 }
