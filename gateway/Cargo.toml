@@ -28,7 +28,7 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 bytes = "1"
-notify = "7"
+notify = "8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # No TLS backend: embedder talks to a local HTTP server today (REF-011).
 # Switch to `rustls-tls` (or `native-tls`) when the embedding endpoint goes HTTPS.
