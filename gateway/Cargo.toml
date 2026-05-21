@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 bytes = "1"
 notify = "7"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 # No TLS backend: embedder talks to a local HTTP server today (REF-011).
 # Switch to `rustls-tls` (or `native-tls`) when the embedding endpoint goes HTTPS.
 reqwest = { version = "0.12", default-features = false, features = ["json", "http2"] }
