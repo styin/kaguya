@@ -11,6 +11,23 @@ pub enum ControlSignal {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlEffect {
+    InterruptActiveWork,
+    RequestShutdown,
+    RecordApproval,
+}
+
+impl ControlSignal {
+    pub fn effect(&self) -> ControlEffect {
+        match self {
+            ControlSignal::Stop => ControlEffect::InterruptActiveWork,
+            ControlSignal::Approval { .. } => ControlEffect::RecordApproval,
+            ControlSignal::Shutdown => ControlEffect::RequestShutdown,
+        }
+    }
+}
+
 /// P1–P5 Input Priority Queue
 /// - P1: User intent (`FinalTranscript`, `TextCommand`)
 /// - P2: ASR states (`VadSpeechStart`, `VadSpeechEnd`, `PartialTranscript`)
@@ -114,6 +131,25 @@ impl DispatchKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p0_signals_distinguish_stop_from_shutdown() {
+        assert_eq!(
+            ControlSignal::Stop.effect(),
+            ControlEffect::InterruptActiveWork
+        );
+        assert_eq!(
+            ControlSignal::Shutdown.effect(),
+            ControlEffect::RequestShutdown
+        );
+        assert_eq!(
+            ControlSignal::Approval {
+                context: "allow".into(),
+            }
+            .effect(),
+            ControlEffect::RecordApproval
+        );
+    }
 
     // ── P0-3: dispatch-kind gating for evaluate_and_store ──
 

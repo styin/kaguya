@@ -16,6 +16,7 @@ use kaguya_gateway::control::ControlServiceImpl;
 use kaguya_gateway::endpoint;
 use kaguya_gateway::history::History;
 use kaguya_gateway::input_stream;
+use kaguya_gateway::lifecycle::{LifecycleSupervisor, ShutdownReason};
 use kaguya_gateway::listener::ListenerClient;
 use kaguya_gateway::narration::NarrationFilter;
 use kaguya_gateway::output::OutputManager;
@@ -38,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     info!("Kaguya Gateway starting");
+    let mut lifecycle = LifecycleSupervisor::new();
 
     let config = GatewayConfig::load("../config/gateway.toml").unwrap_or_else(|e| {
         warn!("config load failed ({e}), using defaults");
@@ -48,8 +50,19 @@ async fn main() -> anyhow::Result<()> {
     let (control_tx, mut control_rx) = mpsc::channel::<ControlSignal>(64);
     let (input_tx, mut input_rx) = input_stream::create(256);
     let (talker_output_tx, mut talker_output_rx) = mpsc::channel::<proto::TalkerOutput>(256);
-    let (audio_out_tx, audio_out_rx) = mpsc::channel::<bytes::Bytes>(512);
-    let (metadata_out_tx, metadata_out_rx) = mpsc::channel::<MetadataEvent>(256);
+    let (audio_out_tx, _audio_out_rx) = mpsc::channel::<bytes::Bytes>(512);
+    let (metadata_out_tx, _metadata_out_rx) = mpsc::channel::<MetadataEvent>(256);
+
+    let signal_tx = control_tx.clone();
+    lifecycle.spawn("os_signal_shutdown", async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                info!("OS shutdown signal received");
+                let _ = signal_tx.send(ControlSignal::Shutdown).await;
+            }
+            Err(e) => warn!("failed to listen for OS shutdown signal: {e}"),
+        }
+    });
 
     // ── Components ──
     let conversation_id = Uuid::new_v4().to_string();
@@ -59,28 +72,41 @@ async fn main() -> anyhow::Result<()> {
         &config.rag,
         config.files.workspace_root.clone(),
     )?);
-    let tools = ToolRegistry::new(config.files.workspace_root.clone());
-    let reasoner = ReasonerManager::new(config.clients.reasoner_addr.clone());
+    let task_spawner = lifecycle.spawner();
+    let talker_connection = lifecycle.register_connection("talker");
+    let listener_connection = lifecycle.register_connection("listener");
+    let reasoner_connection = lifecycle.register_connection("reasoner");
+    let tools = ToolRegistry::new(config.files.workspace_root.clone(), task_spawner.clone());
+    let reasoner = ReasonerManager::new(
+        config.clients.reasoner_addr.clone(),
+        task_spawner.clone(),
+        reasoner_connection,
+    );
     let silence = SilenceTimers::new(
         config.silence.soft_prompt_secs,
         config.silence.follow_up_secs,
         config.silence.context_shift_secs,
         input_tx.p4.clone(),
+        task_spawner.clone(),
     );
-    let talker = TalkerClient::new(config.clients.talker_addr.clone());
+    let talker = TalkerClient::new(
+        config.clients.talker_addr.clone(),
+        task_spawner.clone(),
+        talker_connection,
+    );
     let output = OutputManager::new(audio_out_tx, metadata_out_tx);
     let mut narration = NarrationFilter::new(5);
 
     // ── Start RAG embedder background task ──
     if let Some(ref embedder) = rag.embedder {
         let emb = embedder.clone();
-        tokio::spawn(async move { emb.run().await });
+        lifecycle.spawn("rag_embedder", async move { emb.run().await });
     }
 
     // ── gRPC server (RouterControlService only) ──
     let grpc_addr = config.server.grpc_addr.parse()?;
     let control_svc = ControlServiceImpl::new(control_tx.clone());
-    tokio::spawn(async move {
+    lifecycle.spawn("grpc_control_server", async move {
         info!(addr = %grpc_addr, "gRPC control server listening");
         if let Err(e) = Server::builder()
             .add_service(
@@ -98,6 +124,8 @@ async fn main() -> anyhow::Result<()> {
     let listener_client = ListenerClient::new(
         config.clients.listener_grpc_addr.clone(),
         config.clients.listener_audio_addr.clone(),
+        task_spawner.clone(),
+        listener_connection,
     );
     #[cfg_attr(not(feature = "dev-console"), allow(unused_variables))]
     let listener_audio_tx = match listener_client
@@ -134,13 +162,13 @@ async fn main() -> anyhow::Result<()> {
         let endpoint_state = Arc::new(endpoint::EndpointState {
             control_tx: control_tx.clone(),
             p1_tx: input_tx.p1.clone(),
-            audio_out_rx: tokio::sync::Mutex::new(audio_out_rx),
-            metadata_rx: tokio::sync::Mutex::new(metadata_out_rx),
+            audio_out_rx: tokio::sync::Mutex::new(_audio_out_rx),
+            metadata_rx: tokio::sync::Mutex::new(_metadata_out_rx),
             active_client: std::sync::Mutex::new(None),
             listener_audio_tx,
         });
         let ws_addr = config.server.ws_addr.clone();
-        tokio::spawn(async move {
+        lifecycle.spawn("websocket_endpoint", async move {
             let app = endpoint::router(endpoint_state);
             let listener = match tokio::net::TcpListener::bind(&ws_addr).await {
                 Ok(l) => l,
@@ -188,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        tokio::spawn(async move {
+        lifecycle.spawn("persona_file_watcher", async move {
             let _watcher = watcher;
             while let Some(changed) = watch_rx.recv().await {
                 info!(file = ?changed, "config file changed");
@@ -254,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         if let Some(t) = active_silence.take() { t.cancel(); }
                         reasoner.cancel_all().await;
+                        lifecycle.shutdown(ShutdownReason::P0Shutdown).await;
                         break;
                     }
                     ControlSignal::Approval { context } => {
