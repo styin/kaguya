@@ -4,11 +4,14 @@
 //! component-level tasks can migrate here incrementally without changing the
 //! public event loop semantics.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -162,6 +165,65 @@ pub struct ManagedTask {
     handle: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedProcessSpec {
+    name: String,
+    command: String,
+    command_win32: Option<String>,
+    cwd: Option<PathBuf>,
+    env: BTreeMap<String, String>,
+}
+
+impl ManagedProcessSpec {
+    pub fn new(name: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: command.into(),
+            command_win32: None,
+            cwd: None,
+            env: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_command_win32(mut self, command_win32: Option<String>) -> Self {
+        self.command_win32 = command_win32;
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: Option<PathBuf>) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
+    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn command_for_platform(&self) -> &str {
+        if cfg!(windows) {
+            self.command_win32.as_deref().unwrap_or(&self.command)
+        } else {
+            &self.command
+        }
+    }
+}
+
+pub struct ManagedProcess {
+    name: String,
+    child: Child,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedProcessSnapshot {
+    pub name: String,
+    pub pid: Option<u32>,
+}
+
 #[derive(Clone)]
 pub struct TaskSpawner {
     shutdown: CancellationToken,
@@ -201,6 +263,7 @@ impl TaskSpawner {
 pub struct LifecycleSupervisor {
     shutdown: CancellationToken,
     tasks: Arc<Mutex<Vec<ManagedTask>>>,
+    processes: Arc<Mutex<Vec<ManagedProcess>>>,
     connections: Arc<Mutex<HashMap<String, ManagedConnection>>>,
     shutdown_grace: Duration,
 }
@@ -210,6 +273,7 @@ impl LifecycleSupervisor {
         Self {
             shutdown: CancellationToken::new(),
             tasks: Arc::new(Mutex::new(Vec::new())),
+            processes: Arc::new(Mutex::new(Vec::new())),
             connections: Arc::new(Mutex::new(HashMap::new())),
             shutdown_grace: Duration::from_secs(5),
         }
@@ -265,6 +329,28 @@ impl LifecycleSupervisor {
             .len()
     }
 
+    pub fn process_count(&self) -> usize {
+        self.processes
+            .lock()
+            .expect("managed process registry lock poisoned")
+            .len()
+    }
+
+    pub fn processes_snapshot(&self) -> Vec<ManagedProcessSnapshot> {
+        let mut processes = self
+            .processes
+            .lock()
+            .expect("managed process registry lock poisoned")
+            .iter()
+            .map(|process| ManagedProcessSnapshot {
+                name: process.name.clone(),
+                pid: process.child.id(),
+            })
+            .collect::<Vec<_>>();
+        processes.sort_by(|a, b| a.name.cmp(&b.name));
+        processes
+    }
+
     pub fn spawn<F>(&self, name: impl Into<String>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -272,8 +358,37 @@ impl LifecycleSupervisor {
         self.spawner().spawn(name, future);
     }
 
+    pub fn start_process(&self, spec: ManagedProcessSpec) -> anyhow::Result<()> {
+        let command = spec.command_for_platform();
+        let mut child_command = shell_command(command);
+        if let Some(cwd) = &spec.cwd {
+            child_command.current_dir(cwd);
+        }
+        child_command
+            .envs(&spec.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        let child = child_command.spawn()?;
+        info!(
+            process = %spec.name(),
+            pid = ?child.id(),
+            "managed process started"
+        );
+
+        self.processes
+            .lock()
+            .expect("managed process registry lock poisoned")
+            .push(ManagedProcess {
+                name: spec.name,
+                child,
+            });
+        Ok(())
+    }
+
     pub async fn shutdown(&mut self, reason: ShutdownReason) {
-        if self.shutdown.is_cancelled() && self.task_count() == 0 {
+        if self.shutdown.is_cancelled() && self.task_count() == 0 && self.process_count() == 0 {
             return;
         }
 
@@ -291,6 +406,7 @@ impl LifecycleSupervisor {
         info!(
             reason = ?reason,
             task_count = tasks.len(),
+            process_count = self.process_count(),
             "lifecycle shutdown requested"
         );
 
@@ -316,6 +432,50 @@ impl LifecycleSupervisor {
                 }
             }
         }
+
+        let processes = {
+            let mut guard = self
+                .processes
+                .lock()
+                .expect("managed process registry lock poisoned");
+            std::mem::take(&mut *guard)
+        };
+
+        for process in processes {
+            self.stop_process(process).await;
+        }
+    }
+
+    async fn stop_process(&self, mut process: ManagedProcess) {
+        let name = process.name;
+        let pid = process.child.id();
+        info!(process = %name, pid = ?pid, "stopping managed process");
+
+        if let Some(pid) = pid {
+            if let Err(e) = terminate_process(pid).await {
+                warn!(process = %name, pid = pid, "failed to request process termination: {e}");
+            }
+        }
+
+        tokio::select! {
+            result = process.child.wait() => {
+                match result {
+                    Ok(status) => info!(process = %name, status = %status, "managed process exited"),
+                    Err(e) => warn!(process = %name, "failed waiting for managed process: {e}"),
+                }
+            }
+            _ = tokio::time::sleep(self.shutdown_grace) => {
+                warn!(process = %name, "managed process did not stop within grace period; force killing");
+                if let Some(pid) = process.child.id() {
+                    if let Err(e) = force_kill_process(pid).await {
+                        warn!(process = %name, pid = pid, "failed to force kill process tree: {e}");
+                    }
+                } else if let Err(e) = process.child.kill().await {
+                    warn!(process = %name, "failed to kill managed process: {e}");
+                }
+                let _ = process.child.wait().await;
+            }
+        }
     }
 
     fn mark_connections(&self, readiness: Readiness) {
@@ -328,6 +488,62 @@ impl LifecycleSupervisor {
             connection.set_readiness(readiness);
         }
     }
+}
+
+fn shell_command(command: &str) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg(command);
+        cmd
+    } else {
+        let mut cmd = Command::new("/bin/bash");
+        cmd.arg("-lc").arg(command);
+        cmd
+    }
+}
+
+async fn terminate_process(pid: u32) -> std::io::Result<()> {
+    let pid = pid.to_string();
+    if cfg!(windows) {
+        Command::new("taskkill")
+            .args(["/PID", &pid, "/T"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
+    } else {
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
+    }
+    Ok(())
+}
+
+async fn force_kill_process(pid: u32) -> std::io::Result<()> {
+    let pid = pid.to_string();
+    if cfg!(windows) {
+        Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
+    } else {
+        Command::new("kill")
+            .args(["-KILL", &pid])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
+    }
+    Ok(())
 }
 
 impl Default for LifecycleSupervisor {
@@ -478,5 +694,26 @@ mod tests {
         supervisor.shutdown(ShutdownReason::LoopEnded).await;
         assert_eq!(supervisor.task_count(), 0);
         assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_managed_process() {
+        let mut supervisor =
+            LifecycleSupervisor::new().with_shutdown_grace(Duration::from_millis(500));
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command \"Start-Sleep -Seconds 60\""
+        } else {
+            "sleep 60"
+        };
+
+        supervisor
+            .start_process(ManagedProcessSpec::new("test-process", command))
+            .expect("process should start");
+        assert_eq!(supervisor.process_count(), 1);
+        assert_eq!(supervisor.processes_snapshot().len(), 1);
+
+        supervisor.shutdown(ShutdownReason::P0Shutdown).await;
+
+        assert_eq!(supervisor.process_count(), 0);
     }
 }

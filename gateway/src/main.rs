@@ -45,6 +45,12 @@ async fn main() -> anyhow::Result<()> {
         warn!("config load failed ({e}), using defaults");
         GatewayConfig::default()
     });
+    if config.runtime.manage_processes {
+        for spec in config.runtime.eager_managed_process_specs()? {
+            lifecycle.start_process(spec)?;
+        }
+    }
+    let clients = config.resolved_clients();
 
     // ── Channels ──
     let (control_tx, mut control_rx) = mpsc::channel::<ControlSignal>(64);
@@ -78,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let reasoner_connection = lifecycle.register_connection("reasoner");
     let tools = ToolRegistry::new(config.files.workspace_root.clone(), task_spawner.clone());
     let reasoner = ReasonerManager::new(
-        config.clients.reasoner_addr.clone(),
+        clients.reasoner_addr.clone(),
         task_spawner.clone(),
         reasoner_connection,
     );
@@ -90,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         task_spawner.clone(),
     );
     let talker = TalkerClient::new(
-        config.clients.talker_addr.clone(),
+        clients.talker_addr.clone(),
         task_spawner.clone(),
         talker_connection,
     );
@@ -121,27 +127,33 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Connect Listener (Gateway is client) ──
     // FIX #1: start() returns the audio_tx, which we wire into EndpointState
-    let listener_client = ListenerClient::new(
-        config.clients.listener_grpc_addr.clone(),
-        config.clients.listener_audio_addr.clone(),
-        task_spawner.clone(),
-        listener_connection,
-    );
     #[cfg_attr(not(feature = "dev-console"), allow(unused_variables))]
-    let listener_audio_tx = match listener_client
-        .start(input_tx.p1.clone(), input_tx.p2.clone())
-        .await
-    {
-        Ok(tx) => {
-            info!("Listener connected (gRPC + audio socket)");
-            tx
+    let listener_audio_tx = if config.listener_enabled() {
+        let listener_client = ListenerClient::new(
+            clients.listener_grpc_addr.clone(),
+            clients.listener_audio_addr.clone(),
+            task_spawner.clone(),
+            listener_connection,
+        );
+        match listener_client
+            .start(input_tx.p1.clone(), input_tx.p2.clone())
+            .await
+        {
+            Ok(tx) => {
+                info!("Listener connected (gRPC + audio socket)");
+                tx
+            }
+            Err(e) => {
+                warn!("Listener not available at startup: {e} (text-only mode)");
+                // Dummy channel — audio frames go nowhere, text input still works
+                let (tx, _rx) = mpsc::channel(1);
+                tx
+            }
         }
-        Err(e) => {
-            warn!("Listener not available at startup: {e} (text-only mode)");
-            // Dummy channel — audio frames go nowhere, text input still works
-            let (tx, _rx) = mpsc::channel(1);
-            tx
-        }
+    } else {
+        info!("Listener disabled by runtime profile (text-only mode)");
+        let (tx, _rx) = mpsc::channel(1);
+        tx
     };
 
     // ── Connect Talker ──

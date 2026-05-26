@@ -3,11 +3,12 @@
 //! Handles a single connected browser client at a time (§2.4).
 //! Phase 2 targets OpenPod protocol integration.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
     response::IntoResponse,
@@ -19,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::types::*;
+
+const CLOSE_SUPERSEDED: u16 = 4001;
 
 pub struct EndpointState {
     pub control_tx: mpsc::Sender<ControlSignal>,
@@ -67,6 +70,12 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
 
             _ = token.cancelled() => {
                 info!("dev console superseded by new client");
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_SUPERSEDED,
+                        reason: Cow::from("superseded by another dev console client"),
+                    })))
+                    .await;
                 break;
             }
 
