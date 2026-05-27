@@ -33,8 +33,12 @@ export type ProcessStatus = "stopped" | "starting" | "running" | "errored";
 
 export interface ProcessInfo {
   name: string;
+  label: string;
   managed: boolean;
   status: ProcessStatus;
+  group?: string;
+  conflicts?: string[];
+  blockedBy?: string[];
   pid?: number;
   uptimeSecs?: number;
   exitCode?: number | null;
@@ -48,7 +52,13 @@ export interface LogEntry {
   line: string;
 }
 
-interface ManagedProcessConfig {
+interface ProcessConfigBase {
+  label?: string;
+  group?: string;
+  conflicts?: string[];
+}
+
+interface ManagedProcessConfig extends ProcessConfigBase {
   command: string;
   command_win32?: string;
   cwd: string;
@@ -56,7 +66,7 @@ interface ManagedProcessConfig {
   managed?: true;
 }
 
-interface UnmanagedProcessConfig {
+interface UnmanagedProcessConfig extends ProcessConfigBase {
   managed: false;
   health_url: string;
   poll_interval_ms: number;
@@ -71,6 +81,7 @@ interface SupervisorConfig {
 // ── Supervisor ──
 
 const MAX_LOG_ENTRIES = 10_000;
+const MANAGED_CHILD_LOG_PREFIX = "__KAGUYA_MANAGED_LOG__ ";
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 // Drop TTY spinners (e.g. RealtimeSTT's `⠋ recording`) — Braille block U+2800–U+28FF
@@ -81,6 +92,37 @@ const VOICE_STATUS_SPINNER_RE = /^(?:[\\|/-]\s*)?(?:recording|speak now)\s*$/i;
 function isTransientStatusLine(line: string): boolean {
   const trimmed = line.trim();
   return SPINNER_RE.test(trimmed) || VOICE_STATUS_SPINNER_RE.test(trimmed);
+}
+
+interface ManagedChildLog {
+  source: string;
+  stream?: "stdout" | "stderr";
+  line: string;
+}
+
+function parseManagedChildLog(line: string): ManagedChildLog | null {
+  if (!line.startsWith(MANAGED_CHILD_LOG_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(line.slice(MANAGED_CHILD_LOG_PREFIX.length));
+    if (
+      typeof parsed?.source !== "string" ||
+      typeof parsed?.line !== "string" ||
+      (parsed.stream !== undefined &&
+        parsed.stream !== "stdout" &&
+        parsed.stream !== "stderr")
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeLogSource(source: string): string {
+  if (source === "kaguya_app" || source === "gateway_standalone") return "gateway";
+  if (source === "voice_stack" || source === "talker_standalone") return "talker";
+  return source;
 }
 
 interface ManagedProcess {
@@ -142,6 +184,13 @@ export class Supervisor {
     const proc = this.managed.get(name);
     if (!proc) return { ok: false, error: `unknown process: ${name}` };
     if (proc.child) return { ok: false, error: `${name} already running` };
+    const blockedBy = this.runningConflicts(name, proc.config);
+    if (blockedBy.length > 0) {
+      return {
+        ok: false,
+        error: `${name} conflicts with running process(es): ${blockedBy.join(", ")}`,
+      };
+    }
 
     const cwd = path.resolve(this.baseDir, proc.config.cwd);
     const env = { ...process.env, ...proc.config.env };
@@ -246,8 +295,12 @@ export class Supervisor {
     for (const [name, proc] of this.managed) {
       const info: ProcessInfo = {
         name,
+        label: proc.config.label ?? name,
         managed: true,
         status: proc.status,
+        group: proc.config.group,
+        conflicts: proc.config.conflicts,
+        blockedBy: this.runningConflicts(name, proc.config),
         pid: proc.child?.pid,
         exitCode: proc.exitCode,
       };
@@ -258,10 +311,29 @@ export class Supervisor {
     }
 
     for (const [name, proc] of this.unmanaged) {
-      result.push({ name, managed: false, status: proc.status });
+      result.push({
+        name,
+        label: proc.config.label ?? name,
+        managed: false,
+        status: proc.status,
+        group: proc.config.group,
+        conflicts: proc.config.conflicts,
+      });
     }
 
     return result;
+  }
+
+  private runningConflicts(name: string, config: ProcessConfig): string[] {
+    const conflicts = new Set(config.conflicts ?? []);
+    const blockedBy: string[] = [];
+    for (const [otherName, other] of this.managed) {
+      if (otherName === name || !other.child) continue;
+      if (conflicts.has(otherName) || other.config.conflicts?.includes(name)) {
+        blockedBy.push(otherName);
+      }
+    }
+    return blockedBy;
   }
 
   // ── Logs ──
@@ -283,14 +355,15 @@ export class Supervisor {
   }
 
   private pushLog(source: string, stream: "stdout" | "stderr", line: string) {
-    const cleaned = line.replace(ANSI_RE, "");
+    const childLog = parseManagedChildLog(line.replace(ANSI_RE, ""));
+    const cleaned = (childLog?.line ?? line).replace(ANSI_RE, "");
     if (isTransientStatusLine(cleaned)) return;
     this.logId++;
     const entry: LogEntry = {
       id: this.logId,
       timestamp: new Date().toISOString(),
-      source,
-      stream,
+      source: normalizeLogSource(childLog?.source ?? source),
+      stream: childLog?.stream ?? stream,
       line: cleaned,
     };
     this.logs.push(entry);

@@ -20,17 +20,21 @@ export function ProcessCard({
 
   // Status semantics: running → Stop+Restart; otherwise → Start only.
   const isRunning = status === "running" || status === "starting";
+  const blockedBy = info.blockedBy ?? [];
+  const isBlocked = blockedBy.length > 0;
+  const displayName = info.label || info.name;
 
   return (
     <div className="process-card">
       <span className={dotClass} />
       <div className="process-name">
         <span className="process-name-row">
-          {info.name}
+          {displayName}
+          {info.group && <span className="process-group">{info.group}</span>}
           {!info.managed && <span className="process-unmanaged">unmanaged</span>}
         </span>
         <span className="process-status-row">
-          {status}
+          {isBlocked && !isRunning ? `blocked by ${blockedBy.join(", ")}` : status}
           {info.pid !== undefined && ` · pid ${info.pid}`}
           {info.uptimeSecs !== undefined && ` · ${info.uptimeSecs}s`}
         </span>
@@ -55,6 +59,12 @@ export function ProcessCard({
               type="button"
               className="process-action"
               onClick={() => onAction(info.name, "start")}
+              disabled={isBlocked}
+              title={
+                isBlocked
+                  ? `Stop ${blockedBy.join(", ")} before starting ${displayName}`
+                  : `Start ${displayName}`
+              }
             >
               Start
             </button>

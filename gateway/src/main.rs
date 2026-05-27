@@ -3,12 +3,14 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Server;
+use tonic::transport::{Channel, Server};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use kaguya_gateway::audio_sink::ListenerAudioSink;
 use kaguya_gateway::config::GatewayConfig;
 use kaguya_gateway::context;
 use kaguya_gateway::control::ControlServiceImpl;
@@ -16,7 +18,9 @@ use kaguya_gateway::control::ControlServiceImpl;
 use kaguya_gateway::endpoint;
 use kaguya_gateway::history::History;
 use kaguya_gateway::input_stream;
-use kaguya_gateway::lifecycle::{LifecycleSupervisor, ShutdownReason};
+use kaguya_gateway::lifecycle::{
+    LifecycleSupervisor, ManagedConnectionHandle, Readiness, ReconnectPolicy, ShutdownReason,
+};
 use kaguya_gateway::listener::ListenerClient;
 use kaguya_gateway::narration::NarrationFilter;
 use kaguya_gateway::output::OutputManager;
@@ -125,50 +129,57 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── Connect Listener (Gateway is client) ──
-    // FIX #1: start() returns the audio_tx, which we wire into EndpointState
-    #[cfg_attr(not(feature = "dev-console"), allow(unused_variables))]
-    let listener_audio_tx = if config.listener_enabled() {
-        let listener_client = ListenerClient::new(
-            clients.listener_grpc_addr.clone(),
-            clients.listener_audio_addr.clone(),
-            task_spawner.clone(),
-            listener_connection,
-        );
-        match listener_client
-            .start(input_tx.p1.clone(), input_tx.p2.clone())
-            .await
-        {
-            Ok(tx) => {
-                info!("Listener connected (gRPC + audio socket)");
-                tx
-            }
-            Err(e) => {
-                warn!("Listener not available at startup: {e} (text-only mode)");
-                // Dummy channel — audio frames go nowhere, text input still works
-                let (tx, _rx) = mpsc::channel(1);
-                tx
-            }
-        }
-    } else {
-        info!("Listener disabled by runtime profile (text-only mode)");
-        let (tx, _rx) = mpsc::channel(1);
-        tx
-    };
-
-    // ── Connect Talker ──
-    talker.try_connect().await;
+    // Runtime readiness bootstrap owns Talker/Listener connection startup.
     let mut last_memory_md = rag.export_memory_md().await;
-    talker
-        .update_persona(proto::PersonaConfig {
+    let listener_audio = ListenerAudioSink::new();
+    let listener_enabled = config.listener_enabled();
+    if !listener_enabled {
+        listener_connection.set_readiness(Readiness::Stopped);
+        info!("Listener disabled by runtime profile (text-only mode)");
+    }
+
+    {
+        let talker_boot = talker.clone();
+        let listener_boot = listener_enabled.then(|| {
+            ListenerClient::new(
+                clients.listener_grpc_addr.clone(),
+                clients.listener_audio_addr.clone(),
+                task_spawner.clone(),
+                listener_connection.clone(),
+            )
+        });
+        let initial_persona = proto::PersonaConfig {
             soul_md: persona.soul().await,
             identity_md: persona.identity().await,
             memory_md: last_memory_md.clone(),
-        })
-        .await;
+        };
+        let owned_voice_stack = config.runtime.owns_eager_runtime("voice_stack");
+        let talker_endpoint = clients.talker_addr.clone();
+        let listener_endpoint = clients.listener_grpc_addr.clone();
+        let p1_tx = input_tx.p1.clone();
+        let p2_tx = input_tx.p2.clone();
+        let listener_audio_boot = listener_audio.clone();
+        let listener_connection_boot = listener_connection.clone();
+
+        lifecycle.spawn("voice_stack_readiness", async move {
+            bootstrap_voice_stack(
+                talker_boot,
+                talker_endpoint,
+                listener_boot,
+                listener_endpoint,
+                listener_connection_boot,
+                p1_tx,
+                p2_tx,
+                listener_audio_boot,
+                initial_persona,
+                owned_voice_stack,
+            )
+            .await;
+        });
+    }
 
     // ── WebSocket endpoint (dev-console feature) ──
-    // listener_audio_tx comes from ListenerClient (raw audio socket).
+    // Listener audio is installed once the runtime readiness task connects it.
     #[cfg(feature = "dev-console")]
     {
         let endpoint_state = Arc::new(endpoint::EndpointState {
@@ -177,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
             audio_out_rx: tokio::sync::Mutex::new(_audio_out_rx),
             metadata_rx: tokio::sync::Mutex::new(_metadata_out_rx),
             active_client: std::sync::Mutex::new(None),
-            listener_audio_tx,
+            listener_audio: listener_audio.clone(),
         });
         let ws_addr = config.server.ws_addr.clone();
         lifecycle.spawn("websocket_endpoint", async move {
@@ -424,6 +435,13 @@ async fn main() -> anyhow::Result<()> {
                     _ => continue,
                 };
                 info!(text = %text, "P1: user intent");
+                if !talker.is_ready() {
+                    warn!(
+                        readiness = ?talker.readiness(),
+                        "P1 user intent skipped because Talker runtime is not ready"
+                    );
+                    continue;
+                }
                 if let Some(t) = active_silence.take() { t.cancel(); }
                 history.append_user(&text).await;
 
@@ -439,7 +457,15 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(t) = active_gen.take() { t.cancel(); }
                 output.unmute_audio();
                 current_dispatch_kind = Some(DispatchKind::UserIntent);
-                active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                active_gen = dispatch_talker_if_ready(
+                    &talker,
+                    ctx,
+                    talker_output_tx.clone(),
+                    DispatchKind::UserIntent,
+                ).await;
+                if active_gen.is_none() {
+                    current_dispatch_kind = None;
+                }
             }
 
             // ── P2: ASR States ──
@@ -476,7 +502,15 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
                         current_dispatch_kind = Some(DispatchKind::ToolResult);
-                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                        active_gen = dispatch_talker_if_ready(
+                            &talker,
+                            ctx,
+                            talker_output_tx.clone(),
+                            DispatchKind::ToolResult,
+                        ).await;
+                        if active_gen.is_none() {
+                            current_dispatch_kind = None;
+                        }
                     }
                     InputEvent::ReasonerStep { task_id: _, description } => {
                         if narration.should_narrate(&description) {
@@ -487,7 +521,15 @@ async fn main() -> anyhow::Result<()> {
                             ).await;
                             if active_gen.is_none() {
                                 current_dispatch_kind = Some(DispatchKind::ReasonerNarration);
-                                active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                                active_gen = dispatch_talker_if_ready(
+                                    &talker,
+                                    ctx,
+                                    talker_output_tx.clone(),
+                                    DispatchKind::ReasonerNarration,
+                                ).await;
+                                if active_gen.is_none() {
+                                    current_dispatch_kind = None;
+                                }
                             }
                         }
                     }
@@ -503,7 +545,15 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
                         current_dispatch_kind = Some(DispatchKind::ReasonerResult);
-                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                        active_gen = dispatch_talker_if_ready(
+                            &talker,
+                            ctx,
+                            talker_output_tx.clone(),
+                            DispatchKind::ReasonerResult,
+                        ).await;
+                        if active_gen.is_none() {
+                            current_dispatch_kind = None;
+                        }
                     }
                     InputEvent::ReasonerError { task_id, message, .. } => {
                         warn!(task_id = %task_id, err = %message, "P3: reasoner error");
@@ -528,7 +578,15 @@ async fn main() -> anyhow::Result<()> {
                             duration, &history, &last_memory_md, &tools,
                         ).await;
                         current_dispatch_kind = Some(DispatchKind::Silence);
-                        active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                        active_gen = dispatch_talker_if_ready(
+                            &talker,
+                            ctx,
+                            talker_output_tx.clone(),
+                            DispatchKind::Silence,
+                        ).await;
+                        if active_gen.is_none() {
+                            current_dispatch_kind = None;
+                        }
                     }
                 }
             }
@@ -544,4 +602,154 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Kaguya Gateway shutdown");
     Ok(())
+}
+
+async fn dispatch_talker_if_ready(
+    talker: &TalkerClient,
+    ctx: proto::TalkerContext,
+    output_tx: mpsc::Sender<proto::TalkerOutput>,
+    kind: DispatchKind,
+) -> Option<CancellationToken> {
+    if !talker.is_ready() {
+        warn!(
+            readiness = ?talker.readiness(),
+            dispatch_kind = ?kind,
+            "Talker dispatch skipped because runtime is not ready"
+        );
+        return None;
+    }
+    Some(talker.dispatch(ctx, output_tx).await)
+}
+
+async fn bootstrap_voice_stack(
+    talker: TalkerClient,
+    talker_endpoint: String,
+    listener: Option<ListenerClient>,
+    listener_endpoint: String,
+    listener_connection: ManagedConnectionHandle,
+    p1_tx: mpsc::Sender<InputEvent>,
+    p2_tx: mpsc::Sender<InputEvent>,
+    listener_audio: ListenerAudioSink,
+    initial_persona: proto::PersonaConfig,
+    owned_voice_stack: bool,
+) {
+    let talker_task = async {
+        wait_for_grpc_endpoint("talker", &talker_endpoint, owned_voice_stack, |readiness| {
+            talker.set_readiness(readiness)
+        })
+        .await;
+
+        loop {
+            if talker.try_connect().await {
+                talker.update_persona(initial_persona).await;
+                return;
+            }
+            if owned_voice_stack {
+                talker.set_readiness(Readiness::Starting);
+            }
+            sleep_probe_interval().await;
+        }
+    };
+
+    let listener_task = async {
+        let Some(listener) = listener else {
+            listener_connection.set_readiness(Readiness::Stopped);
+            listener_audio.clear().await;
+            return;
+        };
+
+        wait_for_grpc_endpoint(
+            "listener",
+            &listener_endpoint,
+            owned_voice_stack,
+            |readiness| listener_connection.set_readiness(readiness),
+        )
+        .await;
+
+        loop {
+            match listener.start(p1_tx.clone(), p2_tx.clone()).await {
+                Ok(audio_tx) => {
+                    listener_audio.install(audio_tx).await;
+                    info!("Listener connected (gRPC + audio socket)");
+                    return;
+                }
+                Err(e) => {
+                    warn!("Listener startup failed after endpoint readiness: {e}");
+                    if owned_voice_stack {
+                        listener_connection.set_readiness(Readiness::Starting);
+                    }
+                    sleep_probe_interval().await;
+                }
+            }
+        }
+    };
+
+    tokio::join!(talker_task, listener_task);
+}
+
+async fn wait_for_grpc_endpoint<F>(
+    name: &str,
+    endpoint: &str,
+    owned_runtime: bool,
+    mut set_readiness: F,
+) where
+    F: FnMut(Readiness),
+{
+    let mut warned_unmanaged = false;
+    loop {
+        if owned_runtime {
+            set_readiness(Readiness::Starting);
+        }
+        match probe_grpc_endpoint(endpoint).await {
+            Ok(()) => {
+                set_readiness(Readiness::Ready);
+                info!(runtime = name, endpoint, "runtime endpoint is ready");
+                return;
+            }
+            Err(e) => {
+                if owned_runtime {
+                    debug!(
+                        runtime = name,
+                        endpoint, "runtime endpoint still starting: {e}"
+                    );
+                } else {
+                    set_readiness(Readiness::Degraded);
+                    if !warned_unmanaged {
+                        warned_unmanaged = true;
+                        warn!(
+                            runtime = name,
+                            endpoint, "unmanaged runtime endpoint unavailable: {e}"
+                        );
+                    } else {
+                        debug!(
+                            runtime = name,
+                            endpoint, "unmanaged runtime endpoint still unavailable: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        sleep_probe_interval().await;
+    }
+}
+
+async fn probe_grpc_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    let timeout = ReconnectPolicy::default().attempt_timeout();
+    tokio::time::timeout(timeout, async {
+        Channel::from_shared(endpoint.to_string())?
+            .connect()
+            .await?;
+        anyhow::Ok(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("probe timed out after {}ms", timeout.as_millis()))?
+}
+
+async fn sleep_probe_interval() {
+    let delay = ReconnectPolicy::default()
+        .retry_delays()
+        .last()
+        .copied()
+        .unwrap_or(Duration::from_secs(1));
+    tokio::time::sleep(delay).await;
 }

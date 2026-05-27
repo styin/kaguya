@@ -16,6 +16,15 @@ The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (gateway) an
 
 On Windows, managed process entries can provide `command_win32`; the supervisor uses that command with the platform shell instead of the Unix `/bin/bash` command.
 
+The process rail exposes multiple launch targets:
+
+- `Gateway (standalone)`: console launches Gateway and expects Talker to be started separately.
+- `Talker (standalone)`: console launches the Python voice stack directly for component debugging.
+- `Kaguya App`: console launches Gateway with `KAGUYA_RUNTIME_MANAGE_PROCESSES=true`; Gateway then owns managed runtimes from `config/gateway.toml`.
+- `LLM server (external)`: console only observes the OpenAI-compatible endpoint health.
+
+`Kaguya App` conflicts with the standalone Gateway/Talker targets because they bind the same local ports. The console disables conflicting start buttons while one side is running.
+
 ## Layout
 
 ```

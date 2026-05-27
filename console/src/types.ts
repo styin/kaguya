@@ -83,8 +83,12 @@ export type ProcessStatus = "stopped" | "starting" | "running" | "errored";
 
 export interface ProcessInfo {
   name: string;
+  label: string;
   managed: boolean;
   status: ProcessStatus;
+  group?: string;
+  conflicts?: string[];
+  blockedBy?: string[];
   pid?: number;
   uptimeSecs?: number;
   exitCode?: number | null;

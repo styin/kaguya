@@ -161,6 +161,16 @@ impl RuntimeConfig {
             .unwrap_or(true)
     }
 
+    pub fn owns_eager_runtime(&self, runtime_id: &str) -> bool {
+        if !self.manage_processes {
+            return false;
+        }
+        let Some(runtime) = self.runtimes.get(runtime_id) else {
+            return false;
+        };
+        runtime.enabled && runtime.managed && runtime.activation == Some(Activation::Eager)
+    }
+
     pub fn eager_managed_process_specs(&self) -> anyhow::Result<Vec<ManagedProcessSpec>> {
         let mut specs = Vec::new();
         for (id, runtime) in &self.runtimes {
@@ -257,7 +267,15 @@ impl Default for RagConfig {
 impl GatewayConfig {
     pub fn load(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&content)?)
+        let mut config = toml::from_str::<Self>(&content)?;
+        config.apply_env_overrides();
+        Ok(config)
+    }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(value) = std::env::var("KAGUYA_RUNTIME_MANAGE_PROCESSES") {
+            self.runtime.manage_processes = parse_bool_env(&value);
+        }
     }
 
     pub fn resolved_clients(&self) -> ResolvedClientsConfig {
@@ -288,6 +306,13 @@ impl GatewayConfig {
     pub fn listener_enabled(&self) -> bool {
         self.runtime.capability_enabled("voice_stack", "listener")
     }
+}
+
+fn parse_bool_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 impl Default for GatewayConfig {
@@ -485,5 +510,41 @@ mod tests {
         let runtime: RuntimeConfig = toml::from_str(toml).expect("runtime config should parse");
 
         assert!(runtime.eager_managed_process_specs().is_err());
+    }
+
+    #[test]
+    fn owns_eager_runtime_requires_process_management_and_eager_runtime() {
+        let toml = r#"
+            manage_processes = true
+
+            [runtimes.voice_stack]
+            enabled = true
+            managed = true
+            activation = "eager"
+            command = "python main.py"
+
+            [runtimes.reasoner]
+            enabled = true
+            managed = true
+            activation = "on_demand"
+            command = "npm run start"
+        "#;
+
+        let mut runtime: RuntimeConfig = toml::from_str(toml).expect("runtime config should parse");
+        assert!(runtime.owns_eager_runtime("voice_stack"));
+        assert!(!runtime.owns_eager_runtime("reasoner"));
+
+        runtime.manage_processes = false;
+        assert!(!runtime.owns_eager_runtime("voice_stack"));
+    }
+
+    #[test]
+    fn bool_env_parser_accepts_common_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(parse_bool_env(value), "{value} should be truthy");
+        }
+        for value in ["0", "false", "no", "off", ""] {
+            assert!(!parse_bool_env(value), "{value} should be falsey");
+        }
     }
 }

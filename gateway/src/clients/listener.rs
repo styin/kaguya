@@ -163,8 +163,8 @@ impl ListenerClient {
         reconnect: ReconnectPolicy,
     ) -> anyhow::Result<tonic::Streaming<proto::ListenerOutput>> {
         let retry_delays = reconnect.retry_delays();
+        connection.set_readiness(Readiness::Starting);
         for attempt in 1..=reconnect.max_attempts() {
-            connection.set_readiness(Readiness::Starting);
             match tokio::time::timeout(
                 reconnect.attempt_timeout(),
                 Self::connect_stream_once(endpoint),
@@ -176,7 +176,6 @@ impl ListenerClient {
                     return Ok(stream);
                 }
                 Ok(Err(e)) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -184,7 +183,6 @@ impl ListenerClient {
                     );
                 }
                 Err(_) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -199,6 +197,7 @@ impl ListenerClient {
             }
         }
 
+        connection.set_readiness(Readiness::Degraded);
         anyhow::bail!("Listener gRPC connect failed after reconnect policy was exhausted")
     }
 
@@ -220,8 +219,8 @@ impl ListenerClient {
         reconnect: ReconnectPolicy,
     ) -> Result<TcpStream, ()> {
         let retry_delays = reconnect.retry_delays();
+        connection.set_readiness(Readiness::Starting);
         for attempt in 1..=reconnect.max_attempts() {
-            connection.set_readiness(Readiness::Starting);
             match tokio::time::timeout(reconnect.attempt_timeout(), TcpStream::connect(audio_addr))
                 .await
             {
@@ -230,7 +229,6 @@ impl ListenerClient {
                     return Ok(stream);
                 }
                 Ok(Err(e)) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -238,7 +236,6 @@ impl ListenerClient {
                     );
                 }
                 Err(_) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -254,6 +251,7 @@ impl ListenerClient {
         }
 
         warn!("Audio socket reconnect policy exhausted; retrying policy window");
+        connection.set_readiness(Readiness::Degraded);
         Err(())
     }
 }

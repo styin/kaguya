@@ -227,8 +227,8 @@ impl ReasonerManager {
         reconnect: ReconnectPolicy,
     ) -> Option<ReasonerServiceClient<Channel>> {
         let retry_delays = reconnect.retry_delays();
+        connection.set_readiness(Readiness::Starting);
         for attempt in 1..=reconnect.max_attempts() {
-            connection.set_readiness(Readiness::Starting);
             match tokio::time::timeout(reconnect.attempt_timeout(), Self::connect_once(endpoint))
                 .await
             {
@@ -237,7 +237,6 @@ impl ReasonerManager {
                     return Some(client);
                 }
                 Ok(Err(e)) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -245,7 +244,6 @@ impl ReasonerManager {
                     );
                 }
                 Err(_) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -259,6 +257,7 @@ impl ReasonerManager {
                 tokio::time::sleep(*delay).await;
             }
         }
+        connection.set_readiness(Readiness::Degraded);
         None
     }
 

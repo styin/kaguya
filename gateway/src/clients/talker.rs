@@ -43,15 +43,31 @@ impl TalkerClient {
         }
     }
 
-    pub async fn try_connect(&self) {
+    pub fn readiness(&self) -> Readiness {
+        self.connection.readiness()
+    }
+
+    pub fn set_readiness(&self, readiness: Readiness) {
+        self.connection.set_readiness(readiness);
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.readiness() == Readiness::Ready
+    }
+
+    pub async fn try_connect(&self) -> bool {
         match Self::connect_with_policy(&self.endpoint, self.connection.clone(), self.reconnect)
             .await
         {
             Some(client) => {
                 *self.inner.write().await = Some(client);
                 info!(addr = %self.endpoint, "connected to Talker");
+                true
             }
-            None => warn!("Talker not ready after reconnect policy was exhausted"),
+            None => {
+                warn!("Talker not ready after reconnect policy was exhausted");
+                false
+            }
         }
     }
 
@@ -147,8 +163,8 @@ impl TalkerClient {
         reconnect: ReconnectPolicy,
     ) -> Option<TalkerServiceClient<Channel>> {
         let retry_delays = reconnect.retry_delays();
+        connection.set_readiness(Readiness::Starting);
         for attempt in 1..=reconnect.max_attempts() {
-            connection.set_readiness(Readiness::Starting);
             match tokio::time::timeout(reconnect.attempt_timeout(), Self::connect_once(endpoint))
                 .await
             {
@@ -157,7 +173,6 @@ impl TalkerClient {
                     return Some(client);
                 }
                 Ok(Err(e)) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -168,7 +183,6 @@ impl TalkerClient {
                     }
                 }
                 Err(_) => {
-                    connection.set_readiness(Readiness::Degraded);
                     warn!(
                         attempt,
                         max_attempts = reconnect.max_attempts(),
@@ -181,6 +195,7 @@ impl TalkerClient {
                 }
             }
         }
+        connection.set_readiness(Readiness::Degraded);
         None
     }
 
@@ -233,7 +248,9 @@ impl TalkerClient {
     pub async fn update_persona(&self, config: proto::PersonaConfig) {
         let guard = self.inner.read().await;
         let Some(mut client) = guard.clone() else {
-            self.connection.set_readiness(Readiness::Degraded);
+            if self.connection.readiness() != Readiness::Starting {
+                self.connection.set_readiness(Readiness::Degraded);
+            }
             warn!("cannot UpdatePersona: Talker not connected");
             return;
         };

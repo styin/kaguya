@@ -11,6 +11,7 @@ pub mod clients {
 }
 
 pub mod core {
+    pub mod audio_sink;
     pub mod context;
     pub mod history;
     pub mod input_stream;
@@ -28,7 +29,9 @@ pub mod services {
 }
 
 pub use clients::{listener, reasoner, talker};
-pub use core::{context, history, input_stream, narration, output, persona, silence, types};
+pub use core::{
+    audio_sink, context, history, input_stream, narration, output, persona, silence, types,
+};
 pub use services::control;
 #[cfg(feature = "dev-console")]
 pub use services::endpoint;

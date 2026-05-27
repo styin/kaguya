@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::audio_sink::ListenerAudioSink;
 use crate::types::*;
 
 const CLOSE_SUPERSEDED: u16 = 4001;
@@ -29,7 +30,7 @@ pub struct EndpointState {
     pub audio_out_rx: tokio::sync::Mutex<mpsc::Receiver<bytes::Bytes>>,
     pub metadata_rx: tokio::sync::Mutex<mpsc::Receiver<MetadataEvent>>,
     pub active_client: std::sync::Mutex<Option<CancellationToken>>,
-    pub listener_audio_tx: mpsc::Sender<bytes::Bytes>,
+    pub listener_audio: ListenerAudioSink,
 }
 
 pub fn router(state: Arc<EndpointState>) -> Router {
@@ -86,7 +87,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
                     }
                     Some(Ok(Message::Binary(data))) => {
                         // G4: forward raw audio bytes to Listener via Unix socket
-                        let _ = state.listener_audio_tx.send(bytes::Bytes::from(data)).await;
+                        state.listener_audio.send(bytes::Bytes::from(data)).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}

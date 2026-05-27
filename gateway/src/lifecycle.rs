@@ -6,15 +6,21 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde::Serialize;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+const MANAGED_PROCESS_LOG_PREFIX: &str = "__KAGUYA_MANAGED_LOG__ ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownReason {
@@ -216,6 +222,14 @@ impl ManagedProcessSpec {
 pub struct ManagedProcess {
     name: String,
     child: Child,
+    log_tasks: Vec<JoinHandle<()>>,
+}
+
+#[derive(Serialize)]
+struct ManagedProcessLogLine<'a> {
+    source: &'a str,
+    stream: &'a str,
+    line: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,10 +381,26 @@ impl LifecycleSupervisor {
         child_command
             .envs(&spec.env)
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-        let child = child_command.spawn()?;
+        let mut child = child_command.spawn()?;
+        let mut log_tasks = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            log_tasks.push(spawn_process_log_forwarder(
+                spec.name.clone(),
+                "stdout",
+                stdout,
+            ));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            log_tasks.push(spawn_process_log_forwarder(
+                spec.name.clone(),
+                "stderr",
+                stderr,
+            ));
+        }
+
         info!(
             process = %spec.name(),
             pid = ?child.id(),
@@ -383,6 +413,7 @@ impl LifecycleSupervisor {
             .push(ManagedProcess {
                 name: spec.name,
                 child,
+                log_tasks,
             });
         Ok(())
     }
@@ -452,29 +483,55 @@ impl LifecycleSupervisor {
         info!(process = %name, pid = ?pid, "stopping managed process");
 
         if let Some(pid) = pid {
-            if let Err(e) = terminate_process(pid).await {
-                warn!(process = %name, pid = pid, "failed to request process termination: {e}");
+            match tokio::time::timeout(self.shutdown_grace, terminate_process(pid)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!(process = %name, pid = pid, "failed to request process termination: {e}");
+                }
+                Err(_) => {
+                    warn!(
+                        process = %name,
+                        pid = pid,
+                        "process termination request timed out"
+                    );
+                }
             }
         }
 
-        tokio::select! {
-            result = process.child.wait() => {
-                match result {
-                    Ok(status) => info!(process = %name, status = %status, "managed process exited"),
-                    Err(e) => warn!(process = %name, "failed waiting for managed process: {e}"),
-                }
-            }
-            _ = tokio::time::sleep(self.shutdown_grace) => {
+        match wait_for_process_exit(&mut process.child, self.shutdown_grace).await {
+            Ok(Some(status)) => info!(process = %name, status = %status, "managed process exited"),
+            Ok(None) => {
                 warn!(process = %name, "managed process did not stop within grace period; force killing");
                 if let Some(pid) = process.child.id() {
-                    if let Err(e) = force_kill_process(pid).await {
-                        warn!(process = %name, pid = pid, "failed to force kill process tree: {e}");
+                    match tokio::time::timeout(self.shutdown_grace, force_kill_process(pid)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            warn!(process = %name, pid = pid, "failed to force kill process tree: {e}");
+                        }
+                        Err(_) => {
+                            warn!(process = %name, pid = pid, "force kill process tree timed out");
+                        }
                     }
-                } else if let Err(e) = process.child.kill().await {
-                    warn!(process = %name, "failed to kill managed process: {e}");
                 }
-                let _ = process.child.wait().await;
+                if let Err(e) = process.child.start_kill() {
+                    warn!(process = %name, "failed to signal managed process kill: {e}");
+                }
+                match wait_for_process_exit(&mut process.child, self.shutdown_grace).await {
+                    Ok(Some(status)) => {
+                        info!(process = %name, status = %status, "managed process killed")
+                    }
+                    Ok(None) => {
+                        warn!(process = %name, "managed process still alive after force kill")
+                    }
+                    Err(e) => warn!(process = %name, "failed waiting for killed process: {e}"),
+                }
             }
+            Err(e) => warn!(process = %name, "failed waiting for managed process: {e}"),
+        }
+
+        for task in process.log_tasks {
+            task.abort();
+            let _ = task.await;
         }
     }
 
@@ -487,6 +544,55 @@ impl LifecycleSupervisor {
         {
             connection.set_readiness(readiness);
         }
+    }
+}
+
+fn spawn_process_log_forwarder<R>(
+    process: String,
+    stream: &'static str,
+    reader: R,
+) -> JoinHandle<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => emit_managed_process_log(&process, stream, &line),
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(
+                        process = %process,
+                        stream,
+                        "failed reading managed process log stream: {e}"
+                    );
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn emit_managed_process_log(process: &str, stream: &str, line: &str) {
+    let payload = ManagedProcessLogLine {
+        source: process,
+        stream,
+        line,
+    };
+    let Ok(encoded) = serde_json::to_string(&payload) else {
+        warn!(process, stream, "failed encoding managed process log line");
+        return;
+    };
+    let line = format!("{MANAGED_PROCESS_LOG_PREFIX}{encoded}");
+    if stream == "stderr" {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{line}");
+        let _ = stderr.flush();
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{line}");
+        let _ = stdout.flush();
     }
 }
 
@@ -506,7 +612,7 @@ async fn terminate_process(pid: u32) -> std::io::Result<()> {
     let pid = pid.to_string();
     if cfg!(windows) {
         Command::new("taskkill")
-            .args(["/PID", &pid, "/T"])
+            .args(["/PID", &pid, "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -544,6 +650,25 @@ async fn force_kill_process(pid: u32) -> std::io::Result<()> {
             .await?;
     }
     Ok(())
+}
+
+async fn wait_for_process_exit(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+
+        tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
+    }
 }
 
 impl Default for LifecycleSupervisor {
@@ -701,9 +826,9 @@ mod tests {
         let mut supervisor =
             LifecycleSupervisor::new().with_shutdown_grace(Duration::from_millis(500));
         let command = if cfg!(windows) {
-            "powershell -NoProfile -Command \"Start-Sleep -Seconds 60\""
+            "powershell -NoProfile -Command Start-Sleep -Seconds 2"
         } else {
-            "sleep 60"
+            "sleep 2"
         };
 
         supervisor
