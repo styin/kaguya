@@ -2,6 +2,7 @@ pub mod config;
 pub mod error;
 pub mod lifecycle;
 pub mod rag;
+pub mod runtime;
 pub mod tools;
 
 pub mod clients {

@@ -80,6 +80,17 @@ export type Turn = AssistantTurn | UserTurn;
 // because tsconfig.json scopes `include` to `src/` only.
 
 export type ProcessStatus = "stopped" | "starting" | "running" | "errored";
+export type RuntimeReadiness = "starting" | "ready" | "degraded" | "stopped";
+
+export interface RuntimeChildInfo {
+  name: string;
+  label: string;
+  kind: "process" | "connection";
+  status: ProcessStatus;
+  readiness?: RuntimeReadiness;
+  pid?: number | null;
+  exitCode?: number | null;
+}
 
 export interface ProcessInfo {
   name: string;
@@ -92,6 +103,31 @@ export interface ProcessInfo {
   pid?: number;
   uptimeSecs?: number;
   exitCode?: number | null;
+  children?: RuntimeChildInfo[];
+}
+
+export interface RuntimeProcessSnapshot {
+  name: string;
+  pid?: number | null;
+  status: "running" | "exited" | "failed";
+  exit_code?: number | null;
+}
+
+export interface RuntimeConnectionSnapshot {
+  name: string;
+  readiness: RuntimeReadiness;
+}
+
+export interface RuntimeLifecycleSnapshot {
+  task_count: number;
+  process_count: number;
+  processes: RuntimeProcessSnapshot[];
+  connections: RuntimeConnectionSnapshot[];
+}
+
+export interface RuntimeStatusSnapshot {
+  manage_processes: boolean;
+  lifecycle: RuntimeLifecycleSnapshot;
 }
 
 export interface LogEntry {

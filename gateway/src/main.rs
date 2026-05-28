@@ -28,6 +28,7 @@ use kaguya_gateway::persona::Persona;
 use kaguya_gateway::proto;
 use kaguya_gateway::rag::RagEngine;
 use kaguya_gateway::reasoner::ReasonerManager;
+use kaguya_gateway::runtime;
 use kaguya_gateway::silence::SilenceTimers;
 use kaguya_gateway::talker::TalkerClient;
 use kaguya_gateway::tools::ToolRegistry;
@@ -50,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         GatewayConfig::default()
     });
     if config.runtime.manage_processes {
+        runtime::preflight_managed_runtime_endpoints(&config.runtime).await?;
         for spec in config.runtime.eager_managed_process_specs()? {
             lifecycle.start_process(spec)?;
         }
@@ -86,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
     let talker_connection = lifecycle.register_connection("talker");
     let listener_connection = lifecycle.register_connection("listener");
     let reasoner_connection = lifecycle.register_connection("reasoner");
+    reasoner_connection.set_readiness(Readiness::Stopped);
     let tools = ToolRegistry::new(config.files.workspace_root.clone(), task_spawner.clone());
     let reasoner = ReasonerManager::new(
         clients.reasoner_addr.clone(),
@@ -189,6 +192,10 @@ async fn main() -> anyhow::Result<()> {
             metadata_rx: tokio::sync::Mutex::new(_metadata_out_rx),
             active_client: std::sync::Mutex::new(None),
             listener_audio: listener_audio.clone(),
+            runtime_status: endpoint::RuntimeStatusState {
+                manage_processes: config.runtime.manage_processes,
+                lifecycle: lifecycle.clone(),
+            },
         });
         let ws_addr = config.server.ws_addr.clone();
         lifecycle.spawn("websocket_endpoint", async move {

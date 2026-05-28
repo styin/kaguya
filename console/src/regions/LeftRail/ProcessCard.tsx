@@ -80,6 +80,27 @@ export function ProcessCard({
           </button>
         </div>
       )}
+      {info.children && info.children.length > 0 && (
+        <div className="process-children">
+          {info.children.map((child) => (
+            <div
+              key={`${child.kind}:${child.name}`}
+              className="process-child-row"
+            >
+              <span className={`process-child-dot ${child.status}`} />
+              <span className="process-child-name">{child.label}</span>
+              <span className="process-child-kind">{child.kind}</span>
+              <span className="process-child-status">
+                {child.readiness ?? child.status}
+                {child.pid !== undefined && child.pid !== null && ` · pid ${child.pid}`}
+                {child.exitCode !== undefined &&
+                  child.exitCode !== null &&
+                  ` · exit ${child.exitCode}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

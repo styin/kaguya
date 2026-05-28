@@ -13,13 +13,15 @@ use axum::{
     },
     response::IntoResponse,
     routing::get,
-    Router,
+    Json, Router,
 };
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::audio_sink::ListenerAudioSink;
+use crate::lifecycle::{LifecycleSnapshot, LifecycleSupervisor};
 use crate::types::*;
 
 const CLOSE_SUPERSEDED: u16 = 4001;
@@ -31,13 +33,38 @@ pub struct EndpointState {
     pub metadata_rx: tokio::sync::Mutex<mpsc::Receiver<MetadataEvent>>,
     pub active_client: std::sync::Mutex<Option<CancellationToken>>,
     pub listener_audio: ListenerAudioSink,
+    pub runtime_status: RuntimeStatusState,
+}
+
+#[derive(Clone)]
+pub struct RuntimeStatusState {
+    pub manage_processes: bool,
+    pub lifecycle: LifecycleSupervisor,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeStatusResponse {
+    pub manage_processes: bool,
+    pub lifecycle: LifecycleSnapshot,
 }
 
 pub fn router(state: Arc<EndpointState>) -> Router {
     Router::new()
         .route("/ws", get(ws_upgrade))
         .route("/health", get(|| async { "OK" }))
+        .route("/runtime/status", get(runtime_status))
         .with_state(state)
+}
+
+async fn runtime_status(State(state): State<Arc<EndpointState>>) -> Json<RuntimeStatusResponse> {
+    Json(runtime_status_response(&state.runtime_status))
+}
+
+fn runtime_status_response(state: &RuntimeStatusState) -> RuntimeStatusResponse {
+    RuntimeStatusResponse {
+        manage_processes: state.manage_processes,
+        lifecycle: state.lifecycle.snapshot(),
+    }
 }
 
 async fn ws_upgrade(
@@ -143,5 +170,31 @@ async fn handle_text_message(json: &str, state: &EndpointState) {
             _ => {}
         },
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lifecycle::Readiness;
+
+    #[test]
+    fn runtime_status_response_includes_lifecycle_snapshot() {
+        let lifecycle = LifecycleSupervisor::new();
+        let talker = lifecycle.register_connection("talker");
+        talker.set_readiness(Readiness::Ready);
+
+        let response = runtime_status_response(&RuntimeStatusState {
+            manage_processes: true,
+            lifecycle,
+        });
+
+        assert!(response.manage_processes);
+        assert_eq!(response.lifecycle.connections.len(), 1);
+        assert_eq!(response.lifecycle.connections[0].name, "talker");
+        assert_eq!(
+            response.lifecycle.connections[0].readiness,
+            Readiness::Ready
+        );
     }
 }

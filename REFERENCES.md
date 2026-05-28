@@ -394,3 +394,30 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 - `reqwest` features documentation: https://docs.rs/reqwest/0.12/reqwest/#optional-features
 - `openssl-sys` build requirements: https://docs.rs/openssl/latest/openssl/#building
 - `rustls` vs `native-tls` trade-offs: https://github.com/rustls/rustls#project-goals (modern-only TLS, no OS keychain integration by default)
+
+---
+
+## REF-012 - Gateway Lifecycle Module Split (Gateway, lifecycle refactor)
+
+**Decision:** Gateway lifecycle supervision remains exported as `crate::lifecycle`, but the implementation is split into submodules by ownership concern:
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `gateway/src/lifecycle/mod.rs` | `LifecycleSupervisor`, shutdown orchestration, public re-exports |
+| `gateway/src/lifecycle/task.rs` | `TaskSpawner` and supervised Tokio task handles |
+| `gateway/src/lifecycle/connection.rs` | connection readiness state and shared handles |
+| `gateway/src/lifecycle/process.rs` | managed child-process launch, log forwarding, and termination |
+| `gateway/src/lifecycle/reconnect.rs` | bounded reconnect policy |
+
+**Rationale:**
+
+1. **Lifecycle is an infrastructure subsystem, not conversational core.** It owns task/process/connection resources and shutdown behavior. Keeping it under `gateway/src/lifecycle/` preserves the `crate::lifecycle` API while avoiding a misleading move into `gateway/src/core/`, whose existing modules model turn, persona, history, silence, and other conversation-domain concerns.
+
+2. **Split by owned resource.** Tasks, connections, processes, and reconnect policies have different failure modes and test surfaces. Keeping each resource type in its own file makes the next lifecycle work, especially runtime health snapshots and process monitoring, easier to review without changing external imports.
+
+3. **Public API stability.** `gateway/src/lib.rs` continues to expose `pub mod lifecycle;`, and `mod.rs` re-exports the existing public types. Existing callers keep using `crate::lifecycle::{...}` / `kaguya_gateway::lifecycle::{...}`.
+
+**Sources:**
+
+- Rust module system convention: directory modules with `mod.rs` preserve the same module path as a single `lifecycle.rs` file.
+- Kaguya Gateway source organization: `gateway/src/core/` is already domain-oriented, while lifecycle supervision is process/runtime infrastructure.
