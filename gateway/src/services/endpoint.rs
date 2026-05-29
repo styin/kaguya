@@ -50,6 +50,7 @@ pub fn router(state: Arc<EndpointState>) -> Router {
     Router::new()
         .route("/ws", get(ws_upgrade))
         .route("/health", get(|| async { "OK" }))
+        .route("/capabilities/status", get(runtime_status))
         .route("/runtime/status", get(runtime_status))
         .with_state(state)
 }

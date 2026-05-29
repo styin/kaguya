@@ -9,39 +9,6 @@ reasoner_addr      = "http://127.0.0.1:50054"
 listener_grpc_addr = "http://127.0.0.1:50055"
 listener_audio_addr = "127.0.0.1:50056"
 
-[runtime]
-profile = "voice_local"
-
-[runtime.runtimes.voice_stack]
-enabled = true
-criticality = "required"
-provides = ["talker", "listener", "stt", "vad", "tts"]
-
-[runtime.runtimes.voice_stack.endpoints]
-talker_grpc = "http://127.0.0.1:50053"
-listener_grpc = "http://127.0.0.1:50055"
-listener_audio = "127.0.0.1:50056"
-
-[runtime.runtimes.voice_stack.capabilities.listener]
-enabled = true
-criticality = "degraded_usable"
-fallback = "limited"
-
-[runtime.runtimes.reasoner]
-enabled = true
-criticality = "degraded_usable"
-fallback = "stub"
-provides = ["reasoner"]
-
-[runtime.runtimes.reasoner.endpoints]
-grpc = "http://127.0.0.1:50054"
-
-[runtime.runtimes.llm_server]
-enabled = true
-criticality = "degraded_usable"
-fallback = "none"
-provides = ["llm"]
-
 [files]
 # Paths are resolved relative to the Gateway's cwd (`<repo>/gateway`).
 soul_path      = "../config/SOUL.md"

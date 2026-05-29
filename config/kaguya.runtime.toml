@@ -1,10 +1,13 @@
 profile = "voice_local"
+supervisor_addr = "127.0.0.1:3001"
 
 [processes.gateway]
 enabled = true
+label = "Gateway"
 launch = "eager"
 criticality = "required"
 restart = "on_failure"
+sandbox = { provider = "none", required = false }
 command = "source $HOME/.cargo/env && cargo run --features dev-console"
 command_win32 = "cargo run --features dev-console"
 cwd = "../gateway"
@@ -19,14 +22,16 @@ websocket = "http://127.0.0.1:8080"
 
 [processes.voice_stack]
 enabled = true
+label = "Voice Stack"
 launch = "eager"
 criticality = "required"
 restart = "keep_alive"
-sandbox = "none"
+sandbox = { provider = "none", required = false }
 command = ".venv/bin/python main.py"
 command_win32 = ".venv\\Scripts\\python.exe main.py"
 cwd = "../talker"
 provides = ["talker", "listener", "stt", "vad", "tts"]
+depends_on = ["gateway"]
 
 [processes.voice_stack.env]
 KAGUYA_TALKER_LISTEN_ADDR = "0.0.0.0:50053"
@@ -40,8 +45,24 @@ talker_grpc = "http://127.0.0.1:50053"
 listener_grpc = "http://127.0.0.1:50055"
 listener_audio = "127.0.0.1:50056"
 
+[processes.reasoner]
+enabled = true
+label = "Reasoner"
+launch = "on_demand"
+criticality = "degraded_usable"
+restart = "on_failure"
+sandbox = { provider = "none", required = false }
+command = "npm run dev"
+command_win32 = "npm.cmd run dev"
+cwd = "../reasoner"
+provides = ["reasoner"]
+
+[processes.reasoner.endpoints]
+grpc = "http://127.0.0.1:50054"
+
 [processes.llm_server]
 enabled = true
+label = "LLM server"
 launch = "external"
 criticality = "degraded_usable"
 restart = "never"

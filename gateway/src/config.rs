@@ -62,6 +62,13 @@ pub struct RuntimeConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct RuntimeTopologyFile {
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub processes: BTreeMap<String, RuntimeSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSpec {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -101,6 +108,15 @@ impl Default for RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    pub fn load_topology(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let topology = toml::from_str::<RuntimeTopologyFile>(&content)?;
+        Ok(Self {
+            profile: topology.profile,
+            runtimes: topology.processes,
+        })
+    }
+
     pub fn endpoint(&self, runtime_id: &str, endpoint_name: &str) -> Option<&str> {
         self.runtimes
             .get(runtime_id)
@@ -204,7 +220,11 @@ impl Default for RagConfig {
 impl GatewayConfig {
     pub fn load(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Ok(toml::from_str::<Self>(&content)?)
+        let mut config = toml::from_str::<Self>(&content)?;
+        if let Some(runtime) = load_runtime_topology()? {
+            config.runtime = runtime;
+        }
+        Ok(config)
     }
 
     pub fn resolved_clients(&self) -> ResolvedClientsConfig {
@@ -235,6 +255,24 @@ impl GatewayConfig {
     pub fn listener_enabled(&self) -> bool {
         self.runtime.capability_enabled("voice_stack", "listener")
     }
+}
+
+fn load_runtime_topology() -> anyhow::Result<Option<RuntimeConfig>> {
+    if let Ok(path) = std::env::var("KAGUYA_RUNTIME_CONFIG") {
+        return RuntimeConfig::load_topology(path).map(Some);
+    }
+
+    for candidate in [
+        "../config/kaguya.runtime.toml",
+        "config/kaguya.runtime.toml",
+    ] {
+        let path = std::path::Path::new(candidate);
+        if path.exists() {
+            return RuntimeConfig::load_topology(path).map(Some);
+        }
+    }
+
+    Ok(None)
 }
 
 impl Default for GatewayConfig {

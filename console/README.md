@@ -1,6 +1,6 @@
 # Kaguya Dev Console
 
-Local web app for supervising and inspecting a Kaguya stack — gateway, talker, llm_server. Provides a chat surface, live transcript timeline, mic/TTS audio meters, process control, and a streaming log viewer.
+Local web app for inspecting and controlling a Kaguya stack: Supervisor, Gateway, voice stack, and external providers. Provides a chat surface, live transcript timeline, mic/TTS audio meters, process control, and a streaming log viewer.
 
 Protocol surface this UI binds to is defined in `docs/spec-endpoint-v0.1.0.md` (Appendix A) and the gateway-side egress wiring in `gateway/src/output.rs`.
 
@@ -12,18 +12,18 @@ npm install     # first time
 npm run dev     # http://localhost:3000
 ```
 
-The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (gateway) and mounts an in-process supervisor at `/api/*` for managing/observing child processes. The supervisor's process definitions live in `console/supervisor.json`.
+The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (Gateway). It starts the Rust `kaguya-supervisor` binary and proxies `/api/*` to the Supervisor HTTP/SSE API at `127.0.0.1:3001`. Runtime process definitions live in `config/kaguya.runtime.toml`.
 
-On Windows, managed process entries can provide `command_win32`; the supervisor uses that command with the platform shell instead of the Unix `/bin/bash` command.
+On Windows, managed process entries can provide `command_win32`; Supervisor uses that command with the platform shell instead of the Unix shell command.
 
-The process rail exposes multiple launch targets:
+The process rail renders Supervisor-owned app processes and Gateway-reported capability readiness:
 
-- `Gateway (standalone)`: console launches Gateway and expects Talker to be started separately.
-- `Talker (standalone)`: console launches the Python voice stack directly for component debugging.
-- `Kaguya App`: console launches Gateway with `KAGUYA_RUNTIME_MANAGE_PROCESSES=true`; Gateway then owns managed runtimes from `config/gateway.toml`.
-- `LLM server (external)`: console only observes the OpenAI-compatible endpoint health.
+- `Gateway`: Supervisor launches Gateway as the app control/runtime router.
+- `Voice Stack`: Supervisor launches the Python runtime that provides Talker/Listener capabilities.
+- `Talker`, `Listener`, `Reasoner`: capability readiness children reported by Gateway.
+- `LLM server`: an unmanaged external endpoint observed through health polling.
 
-`Kaguya App` conflicts with the standalone Gateway/Talker targets because they bind the same local ports. The console disables conflicting start buttons while one side is running.
+Standalone Gateway/Talker debugging remains available through direct CLI commands; canonical app mode is Supervisor-owned.
 
 ## Layout
 
@@ -74,13 +74,13 @@ Derived shapes — turn lists, streaming-turn lookups, message counters, TTFS, a
 | TopBar — WS status pulse | `regions/TopBar/TopBar.tsx` | `ws.onopen` / `onclose` | wired |
 | TopBar — WS uptime | `regions/TopBar/TopBar.tsx` | `wsOpenedAt` observation | wired |
 | TopBar — msg counters (↑/↓) | `regions/TopBar/TopBar.tsx` | `selectWsInCount` / `selectWsOutCount` | wired |
-| TopBar — Shutdown button | `regions/TopBar/TopBar.tsx` | `{type:"control", command:"shutdown"}` ingress | wired |
+| TopBar — Shutdown button | `regions/TopBar/TopBar.tsx` | `POST /api/app/shutdown` via Supervisor | wired |
 | TopBar — session id | — | needs `session_init` egress event | **skeleton (omitted)** |
 | LeftRail — Mic strip (meter) | `regions/LeftRail/AudioStrip.tsx`, `audio/capture.ts`, `audio/meter.ts` | MediaStream → AnalyserNode | wired |
 | LeftRail — TTS strip (meter) | `regions/LeftRail/AudioStrip.tsx`, `audio/playback.ts`, `audio/meter.ts` | Playback worklet → AnalyserNode — front-end side ready, **but** no TTS audio reaches the browser today ([#36](https://github.com/styin/kaguya/issues/36)) | **bug: no audio source** |
 | LeftRail — Open-mic toggle | `regions/LeftRail/LeftRail.tsx` | `startCapture` lifecycle | wired |
 | LeftRail — Space-hold PTT | — | needs gateway-side PTT/open-mic VAD policy split | **skeleton (control dropped)** |
-| LeftRail — Process cards | `regions/LeftRail/ProcessCard.tsx`, `regions/LeftRail/LeftRail.tsx` | `GET /api/process/status` (1s poll) + `POST /api/process/:name/restart` | wired |
+| LeftRail — Process cards | `regions/LeftRail/ProcessCard.tsx`, `regions/LeftRail/LeftRail.tsx` | `GET /api/app/status` (1s poll) + `POST /api/process/:name/restart` | wired |
 | LeftRail — Device name on audio strips | — | needs device enumeration via `mediaDevices.enumerateDevices()` | **skeleton (generic labels)** |
 | TurnsPanel — User lane (timeline strip) | `regions/TurnsPanel/TimelineStrip.tsx` | `user_input` events + `ws_out` text sends | wired |
 | TurnsPanel — Talker lane (timeline strip) | `regions/TurnsPanel/TimelineStrip.tsx` | `response_started` / `sentence` / `response_complete` | wired |
@@ -126,12 +126,10 @@ For each **skeleton** row above, the underlying protocol expansion required. Pic
 console/
 ├── index.html                — Google Fonts preconnect, root div
 ├── package.json              — Vite + React 19 + TypeScript
-├── vite.config.ts            — proxies /ws, /health; mounts supervisor plugin; injects __APP_VERSION__
+├── vite.config.ts            — proxies /ws, /health; launches/proxies Rust Supervisor; injects __APP_VERSION__
 ├── tsconfig.json
-├── supervisor.json           — managed/unmanaged process definitions
 ├── server/
-│   ├── plugin.ts             — Vite plugin: /api/process/*, /api/logs/stream
-│   └── supervisor.ts         — child_process spawn/kill/restart, log ring buffer
+│   └── plugin.ts             — Vite plugin: starts kaguya-supervisor and proxies /api/*
 ├── src/
 │   ├── main.tsx
 │   ├── App.tsx               — region orchestration + WS / audio lifecycles

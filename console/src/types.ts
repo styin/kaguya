@@ -76,11 +76,11 @@ export type Turn = AssistantTurn | UserTurn;
 
 // ─── Supervisor HTTP types ───────────────────────────────────────────
 //
-// Mirror of `console/server/supervisor.ts` shapes. Duplicated here
-// because tsconfig.json scopes `include` to `src/` only.
+// Mirror of the Rust supervisor HTTP shapes.
 
 export type ProcessStatus = "stopped" | "starting" | "running" | "errored";
 export type RuntimeReadiness = "starting" | "ready" | "degraded" | "stopped";
+export type RestartPolicy = "never" | "on_failure" | "keep_alive";
 
 export interface RuntimeChildInfo {
   name: string;
@@ -103,6 +103,8 @@ export interface ProcessInfo {
   pid?: number;
   uptimeSecs?: number;
   exitCode?: number | null;
+  restartPolicy?: RestartPolicy;
+  restartCount?: number;
   children?: RuntimeChildInfo[];
 }
 
@@ -118,6 +120,12 @@ export interface RuntimeLifecycleSnapshot {
 
 export interface RuntimeStatusSnapshot {
   lifecycle: RuntimeLifecycleSnapshot;
+}
+
+export interface AppStatusSnapshot {
+  state: "stopped" | "running" | "degraded" | "stopping";
+  processes: ProcessInfo[];
+  gateway?: RuntimeStatusSnapshot | null;
 }
 
 export interface LogEntry {

@@ -27,7 +27,7 @@ use task::ManagedTask;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownReason {
-    P0Shutdown,
+    ControlShutdown,
     OsSignal,
     Fatal,
     LoopEnded,
@@ -219,7 +219,7 @@ mod tests {
         });
 
         assert_eq!(supervisor.task_count(), 1);
-        supervisor.shutdown(ShutdownReason::P0Shutdown).await;
+        supervisor.shutdown(ShutdownReason::ControlShutdown).await;
         assert_eq!(supervisor.task_count(), 0);
         assert!(!stopped.load(Ordering::SeqCst));
     }
@@ -296,7 +296,7 @@ mod tests {
         let connection = supervisor.register_connection("listener");
 
         connection.set_readiness(Readiness::Ready);
-        supervisor.shutdown(ShutdownReason::P0Shutdown).await;
+        supervisor.shutdown(ShutdownReason::ControlShutdown).await;
 
         assert_eq!(connection.readiness(), Readiness::Stopped);
     }
@@ -361,7 +361,7 @@ mod tests {
             LifecycleSupervisor::new().with_shutdown_grace(Duration::from_millis(100));
         let spawner = supervisor.spawner();
 
-        supervisor.shutdown(ShutdownReason::P0Shutdown).await;
+        supervisor.shutdown(ShutdownReason::ControlShutdown).await;
         spawner.spawn("late-task", async move {
             tokio::time::sleep(Duration::from_secs(60)).await;
             ran_task.store(true, Ordering::SeqCst);

@@ -7,12 +7,13 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 pub const MANAGED_PROCESS_LOG_PREFIX: &str = "__KAGUYA_MANAGED_LOG__ ";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ManagedProcessSpec {
     name: String,
     command: String,
@@ -20,6 +21,7 @@ pub struct ManagedProcessSpec {
     cwd: Option<PathBuf>,
     env: BTreeMap<String, String>,
     restart_policy: ManagedProcessRestartPolicy,
+    log_sink: Option<mpsc::UnboundedSender<ManagedProcessLogLine>>,
 }
 
 impl ManagedProcessSpec {
@@ -31,6 +33,7 @@ impl ManagedProcessSpec {
             cwd: None,
             env: BTreeMap::new(),
             restart_policy: ManagedProcessRestartPolicy::Never,
+            log_sink: None,
         }
     }
 
@@ -54,12 +57,24 @@ impl ManagedProcessSpec {
         self
     }
 
+    pub fn with_log_sink(
+        mut self,
+        log_sink: Option<mpsc::UnboundedSender<ManagedProcessLogLine>>,
+    ) -> Self {
+        self.log_sink = log_sink;
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
 
     pub fn restart_policy(&self) -> ManagedProcessRestartPolicy {
         self.restart_policy
+    }
+
+    pub fn command(&self) -> &str {
+        &self.command
     }
 
     fn command_for_platform(&self) -> &str {
@@ -81,6 +96,10 @@ pub struct ManagedProcess {
 }
 
 impl ManagedProcess {
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     pub fn refresh_snapshot(&mut self) -> ManagedProcessSnapshot {
         self.poll_exit_status();
 
@@ -122,6 +141,17 @@ impl ManagedProcess {
                 warn!(process = %self.spec.name, "failed restarting managed process: {e}");
             }
         }
+    }
+
+    pub async fn wait_for_exit(
+        &mut self,
+        timeout: Duration,
+    ) -> std::io::Result<Option<ExitStatus>> {
+        let result = wait_for_process_exit(&mut self.child, timeout).await?;
+        if let Some(status) = result {
+            self.exit_status = Some(status);
+        }
+        Ok(result)
     }
 
     fn poll_exit_status(&mut self) {
@@ -166,11 +196,11 @@ impl ManagedProcess {
     }
 }
 
-#[derive(Serialize)]
-struct ManagedProcessLogLine<'a> {
-    source: &'a str,
-    stream: &'a str,
-    line: &'a str,
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedProcessLogLine {
+    pub source: String,
+    pub stream: String,
+    pub line: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -236,6 +266,7 @@ fn spawn_managed_child(spec: &ManagedProcessSpec) -> anyhow::Result<StartedManag
             spec.name.clone(),
             "stdout",
             stdout,
+            spec.log_sink.clone(),
         ));
     }
     if let Some(stderr) = child.stderr.take() {
@@ -243,6 +274,7 @@ fn spawn_managed_child(spec: &ManagedProcessSpec) -> anyhow::Result<StartedManag
             spec.name.clone(),
             "stderr",
             stderr,
+            spec.log_sink.clone(),
         ));
     }
 
@@ -335,6 +367,7 @@ fn spawn_process_log_forwarder<R>(
     process: String,
     stream: &'static str,
     reader: R,
+    log_sink: Option<mpsc::UnboundedSender<ManagedProcessLogLine>>,
 ) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -343,7 +376,7 @@ where
         let mut lines = BufReader::new(reader).lines();
         loop {
             match lines.next_line().await {
-                Ok(Some(line)) => emit_managed_process_log(&process, stream, &line),
+                Ok(Some(line)) => emit_managed_process_log(&process, stream, &line, &log_sink),
                 Ok(None) => break,
                 Err(e) => {
                     warn!(
@@ -358,11 +391,25 @@ where
     })
 }
 
-fn emit_managed_process_log(process: &str, stream: &str, line: &str) {
+fn emit_managed_process_log(
+    process: &str,
+    stream: &str,
+    line: &str,
+    log_sink: &Option<mpsc::UnboundedSender<ManagedProcessLogLine>>,
+) {
+    if let Some(log_sink) = log_sink {
+        let _ = log_sink.send(ManagedProcessLogLine {
+            source: process.to_string(),
+            stream: stream.to_string(),
+            line: line.to_string(),
+        });
+        return;
+    }
+
     let payload = ManagedProcessLogLine {
-        source: process,
-        stream,
-        line,
+        source: process.to_string(),
+        stream: stream.to_string(),
+        line: line.to_string(),
     };
     let Ok(encoded) = serde_json::to_string(&payload) else {
         warn!(process, stream, "failed encoding managed process log line");

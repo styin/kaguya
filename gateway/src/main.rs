@@ -304,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         if let Some(t) = active_silence.take() { t.cancel(); }
                         reasoner.cancel_all().await;
-                        lifecycle.shutdown(ShutdownReason::P0Shutdown).await;
+                        lifecycle.shutdown(ShutdownReason::ControlShutdown).await;
                         break;
                     }
                     ControlSignal::Approval { context } => {

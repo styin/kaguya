@@ -18,7 +18,7 @@ export function ProcessCard({
           ? "starting"
           : "");
 
-  // Status semantics: running → Stop+Restart; otherwise → Start only.
+  // Status semantics: running means Stop+Restart; otherwise Start only.
   const isRunning = status === "running" || status === "starting";
   const blockedBy = info.blockedBy ?? [];
   const isBlocked = blockedBy.length > 0;
@@ -37,6 +37,12 @@ export function ProcessCard({
           {isBlocked && !isRunning ? `blocked by ${blockedBy.join(", ")}` : status}
           {info.pid !== undefined && ` · pid ${info.pid}`}
           {info.uptimeSecs !== undefined && ` · ${info.uptimeSecs}s`}
+          {info.exitCode !== undefined &&
+            info.exitCode !== null &&
+            ` · exit ${info.exitCode}`}
+          {info.restartCount !== undefined &&
+            info.restartCount > 0 &&
+            ` · restarted ${info.restartCount}`}
         </span>
       </div>
       {/*
@@ -62,7 +68,7 @@ export function ProcessCard({
               disabled={isBlocked}
               title={
                 isBlocked
-                  ? `Stop ${blockedBy.join(", ")} before starting ${displayName}`
+                  ? `Start ${blockedBy.join(", ")} before starting ${displayName}`
                   : `Start ${displayName}`
               }
             >

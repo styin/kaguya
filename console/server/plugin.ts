@@ -1,95 +1,107 @@
-import type { Plugin } from "vite";
+import { spawn, type ChildProcess } from "node:child_process";
+import http from "node:http";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Supervisor } from "./supervisor.js";
+import type { Plugin } from "vite";
+
+const SUPERVISOR_ORIGIN = "http://127.0.0.1:3001";
 
 export function supervisorPlugin(): Plugin {
-  let supervisor: Supervisor;
+  let supervisor: ChildProcess | null = null;
 
   return {
     name: "kaguya-supervisor",
     configureServer(server) {
-      supervisor = new Supervisor(
-        fileURLToPath(new URL("../supervisor.json", import.meta.url))
-      );
-      supervisor.init().catch((err) => {
-        console.error("[supervisor] init failed:", err);
-      });
+      supervisor = startRustSupervisor();
 
-      // Clean up child processes on server close
-      server.httpServer?.on("close", () => supervisor.shutdown());
+      server.httpServer?.on("close", () => stopRustSupervisor(supervisor));
       process.on("SIGINT", () => {
-        supervisor.shutdown();
+        stopRustSupervisor(supervisor);
         process.exit(0);
       });
       process.on("SIGTERM", () => {
-        supervisor.shutdown();
+        stopRustSupervisor(supervisor);
         process.exit(0);
       });
 
-      // ── HTTP API ──
-
       server.middlewares.use((req, res, next) => {
         if (!req.url?.startsWith("/api/")) return next();
-
-        // POST /api/process/:name/start|stop|restart
-        const actionMatch = req.url.match(
-          /^\/api\/process\/(\w+)\/(start|stop|restart)$/
-        );
-        if (actionMatch && req.method === "POST") {
-          const [, name, action] = actionMatch;
-          const result =
-            action === "start"
-              ? supervisor.start(name)
-              : action === "stop"
-                ? supervisor.stop(name)
-                : supervisor.restart(name);
-          res.writeHead(result.ok ? 200 : 400, {
-            "Content-Type": "application/json",
-          });
-          res.end(JSON.stringify(result));
-          return;
-        }
-
-        // GET /api/process/status
-        if (req.url === "/api/process/status" && req.method === "GET") {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(supervisor.status()));
-          return;
-        }
-
-        // GET /api/logs/stream — SSE for real-time log push (must match before /api/logs)
-        if (req.url === "/api/logs/stream" && req.method === "GET") {
-          res.writeHead(200, {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-          });
-
-          // Send recent backlog as initial batch
-          const backlog = supervisor.getLogsSince(0);
-          for (const entry of backlog) {
-            res.write(`data: ${JSON.stringify(entry)}\n\n`);
-          }
-
-          const unsubscribe = supervisor.subscribeLogs((entry) => {
-            res.write(`data: ${JSON.stringify(entry)}\n\n`);
-          });
-
-          req.on("close", unsubscribe);
-          return;
-        }
-
-        // GET /api/logs?since=N (polling fallback)
-        if (req.url?.startsWith("/api/logs") && req.method === "GET") {
-          const url = new URL(req.url, "http://localhost");
-          const since = parseInt(url.searchParams.get("since") ?? "0", 10);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(supervisor.getLogsSince(since)));
-          return;
-        }
-
-        next();
+        proxyToSupervisor(req, res);
       });
     },
   };
+}
+
+function startRustSupervisor(): ChildProcess {
+  const supervisorDir = fileURLToPath(
+    new URL("../../supervisor/", import.meta.url),
+  );
+  const configPath = fileURLToPath(
+    new URL("../../config/kaguya.runtime.toml", import.meta.url),
+  );
+  const cargoToml = path.join(supervisorDir, "Cargo.toml");
+  const child = spawn("cargo", ["run", "--manifest-path", cargoToml], {
+    cwd: supervisorDir,
+    env: {
+      ...process.env,
+      KAGUYA_RUNTIME_CONFIG: configPath,
+      RUST_LOG: process.env.RUST_LOG ?? "kaguya_supervisor=info",
+    },
+    shell: process.platform === "win32",
+    stdio: ["ignore", "inherit", "inherit"],
+    windowsHide: true,
+  });
+
+  child.on("exit", (code, signal) => {
+    console.error(`[supervisor] exited code=${code} signal=${signal}`);
+  });
+  child.on("error", (err) => {
+    console.error(`[supervisor] spawn error: ${err.message}`);
+  });
+
+  return child;
+}
+
+function stopRustSupervisor(child: ChildProcess | null): void {
+  if (!child || child.killed) return;
+  if (process.platform === "win32" && child.pid !== undefined) {
+    spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    return;
+  }
+  child.kill("SIGTERM");
+}
+
+function proxyToSupervisor(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): void {
+  const target = new URL(req.url ?? "/", SUPERVISOR_ORIGIN);
+  const proxyReq = http.request(
+    target,
+    {
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: target.host,
+      },
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+      proxyRes.pipe(res);
+    },
+  );
+
+  proxyReq.on("error", (err) => {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: err.message }));
+  });
+
+  req.pipe(proxyReq);
 }
