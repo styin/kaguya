@@ -106,13 +106,6 @@ export interface ProcessInfo {
   children?: RuntimeChildInfo[];
 }
 
-export interface RuntimeProcessSnapshot {
-  name: string;
-  pid?: number | null;
-  status: "running" | "exited" | "failed";
-  exit_code?: number | null;
-}
-
 export interface RuntimeConnectionSnapshot {
   name: string;
   readiness: RuntimeReadiness;
@@ -120,13 +113,10 @@ export interface RuntimeConnectionSnapshot {
 
 export interface RuntimeLifecycleSnapshot {
   task_count: number;
-  process_count: number;
-  processes: RuntimeProcessSnapshot[];
   connections: RuntimeConnectionSnapshot[];
 }
 
 export interface RuntimeStatusSnapshot {
-  manage_processes: boolean;
   lifecycle: RuntimeLifecycleSnapshot;
 }
 

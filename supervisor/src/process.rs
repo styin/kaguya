@@ -10,7 +10,7 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-const MANAGED_PROCESS_LOG_PREFIX: &str = "__KAGUYA_MANAGED_LOG__ ";
+pub const MANAGED_PROCESS_LOG_PREFIX: &str = "__KAGUYA_MANAGED_LOG__ ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedProcessSpec {
@@ -19,6 +19,7 @@ pub struct ManagedProcessSpec {
     command_win32: Option<String>,
     cwd: Option<PathBuf>,
     env: BTreeMap<String, String>,
+    restart_policy: ManagedProcessRestartPolicy,
 }
 
 impl ManagedProcessSpec {
@@ -29,6 +30,7 @@ impl ManagedProcessSpec {
             command_win32: None,
             cwd: None,
             env: BTreeMap::new(),
+            restart_policy: ManagedProcessRestartPolicy::Never,
         }
     }
 
@@ -47,8 +49,17 @@ impl ManagedProcessSpec {
         self
     }
 
+    pub fn with_restart_policy(mut self, restart_policy: ManagedProcessRestartPolicy) -> Self {
+        self.restart_policy = restart_policy;
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn restart_policy(&self) -> ManagedProcessRestartPolicy {
+        self.restart_policy
     }
 
     fn command_for_platform(&self) -> &str {
@@ -60,21 +71,65 @@ impl ManagedProcessSpec {
     }
 }
 
-pub(crate) struct ManagedProcess {
-    name: String,
+pub struct ManagedProcess {
+    spec: ManagedProcessSpec,
     child: Child,
     pid: Option<u32>,
     exit_status: Option<ExitStatus>,
+    restart_count: u64,
     log_tasks: Vec<JoinHandle<()>>,
 }
 
 impl ManagedProcess {
-    pub(crate) fn refresh_snapshot(&mut self) -> ManagedProcessSnapshot {
+    pub fn refresh_snapshot(&mut self) -> ManagedProcessSnapshot {
+        self.poll_exit_status();
+
+        ManagedProcessSnapshot {
+            name: self.spec.name.clone(),
+            pid: self.pid,
+            status: self.status(),
+            exit_code: self.exit_status.and_then(|status| status.code()),
+            restart_policy: self.spec.restart_policy,
+            restart_count: self.restart_count,
+        }
+    }
+
+    pub fn apply_restart_policy(&mut self) {
+        self.poll_exit_status();
+        let Some(exit_status) = self.exit_status else {
+            return;
+        };
+        if !self.should_restart(exit_status) {
+            return;
+        }
+
+        self.abort_log_tasks();
+        match spawn_managed_child(&self.spec) {
+            Ok(started) => {
+                self.child = started.child;
+                self.pid = started.pid;
+                self.log_tasks = started.log_tasks;
+                self.exit_status = None;
+                self.restart_count += 1;
+                info!(
+                    process = %self.spec.name,
+                    restart_count = self.restart_count,
+                    policy = ?self.spec.restart_policy,
+                    "managed process restarted"
+                );
+            }
+            Err(e) => {
+                warn!(process = %self.spec.name, "failed restarting managed process: {e}");
+            }
+        }
+    }
+
+    fn poll_exit_status(&mut self) {
         if self.exit_status.is_none() {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
                     info!(
-                        process = %self.name,
+                        process = %self.spec.name,
                         status = %status,
                         "managed process exited"
                     );
@@ -82,22 +137,31 @@ impl ManagedProcess {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    warn!(process = %self.name, "failed polling managed process status: {e}");
+                    warn!(process = %self.spec.name, "failed polling managed process status: {e}");
                 }
             }
         }
+    }
 
-        let status = match self.exit_status {
+    fn status(&self) -> ManagedProcessStatus {
+        match self.exit_status {
             None => ManagedProcessStatus::Running,
             Some(status) if status.success() => ManagedProcessStatus::Exited,
             Some(_) => ManagedProcessStatus::Failed,
-        };
+        }
+    }
 
-        ManagedProcessSnapshot {
-            name: self.name.clone(),
-            pid: self.pid,
-            status,
-            exit_code: self.exit_status.and_then(|status| status.code()),
+    fn should_restart(&self, status: ExitStatus) -> bool {
+        match self.spec.restart_policy {
+            ManagedProcessRestartPolicy::Never => false,
+            ManagedProcessRestartPolicy::OnFailure => !status.success(),
+            ManagedProcessRestartPolicy::KeepAlive => true,
+        }
+    }
+
+    fn abort_log_tasks(&mut self) {
+        for task in self.log_tasks.drain(..) {
+            task.abort();
         }
     }
 }
@@ -107,6 +171,14 @@ struct ManagedProcessLogLine<'a> {
     source: &'a str,
     stream: &'a str,
     line: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedProcessRestartPolicy {
+    Never,
+    OnFailure,
+    KeepAlive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -123,9 +195,29 @@ pub struct ManagedProcessSnapshot {
     pub pid: Option<u32>,
     pub status: ManagedProcessStatus,
     pub exit_code: Option<i32>,
+    pub restart_policy: ManagedProcessRestartPolicy,
+    pub restart_count: u64,
 }
 
-pub(crate) fn start_managed_process(spec: ManagedProcessSpec) -> anyhow::Result<ManagedProcess> {
+pub fn start_managed_process(spec: ManagedProcessSpec) -> anyhow::Result<ManagedProcess> {
+    let started = spawn_managed_child(&spec)?;
+    Ok(ManagedProcess {
+        spec,
+        child: started.child,
+        pid: started.pid,
+        exit_status: None,
+        restart_count: 0,
+        log_tasks: started.log_tasks,
+    })
+}
+
+struct StartedManagedProcess {
+    child: Child,
+    pid: Option<u32>,
+    log_tasks: Vec<JoinHandle<()>>,
+}
+
+fn spawn_managed_child(spec: &ManagedProcessSpec) -> anyhow::Result<StartedManagedProcess> {
     let command = spec.command_for_platform();
     let mut child_command = shell_command(command);
     if let Some(cwd) = &spec.cwd {
@@ -161,17 +253,15 @@ pub(crate) fn start_managed_process(spec: ManagedProcessSpec) -> anyhow::Result<
     );
 
     let pid = child.id();
-    Ok(ManagedProcess {
-        name: spec.name,
+    Ok(StartedManagedProcess {
         child,
         pid,
-        exit_status: None,
         log_tasks,
     })
 }
 
-pub(crate) async fn stop_managed_process(mut process: ManagedProcess, shutdown_grace: Duration) {
-    let name = process.name;
+pub async fn stop_managed_process(mut process: ManagedProcess, shutdown_grace: Duration) {
+    let name = process.spec.name.clone();
     if let Some(status) = process.exit_status {
         info!(process = %name, status = %status, "managed process already exited");
         abort_log_tasks(process.log_tasks).await;
@@ -362,5 +452,83 @@ async fn wait_for_process_exit(
         }
 
         tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_managed_process_stops_child() {
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command Start-Sleep -Seconds 2"
+        } else {
+            "sleep 2"
+        };
+
+        let process = start_managed_process(ManagedProcessSpec::new("test-process", command))
+            .expect("process should start");
+
+        stop_managed_process(process, Duration::from_millis(500)).await;
+    }
+
+    #[tokio::test]
+    async fn process_snapshot_reports_failed_exit_status() {
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command exit 7"
+        } else {
+            "exit 7"
+        };
+
+        let mut process =
+            start_managed_process(ManagedProcessSpec::new("failing-process", command))
+                .expect("process should start");
+
+        let mut snapshot = process.refresh_snapshot();
+        for _ in 0..10 {
+            snapshot = process.refresh_snapshot();
+            if snapshot.status == ManagedProcessStatus::Failed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(snapshot.name, "failing-process");
+        assert_eq!(snapshot.status, ManagedProcessStatus::Failed);
+        assert_eq!(snapshot.exit_code, Some(7));
+        assert_eq!(snapshot.restart_policy, ManagedProcessRestartPolicy::Never);
+        assert_eq!(snapshot.restart_count, 0);
+
+        stop_managed_process(process, Duration::from_millis(500)).await;
+    }
+
+    #[tokio::test]
+    async fn restart_policy_restarts_failed_process() {
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command Start-Sleep -Milliseconds 250; exit 7"
+        } else {
+            "sleep 0.25; exit 7"
+        };
+
+        let mut process = start_managed_process(
+            ManagedProcessSpec::new("restart-process", command)
+                .with_restart_policy(ManagedProcessRestartPolicy::OnFailure),
+        )
+        .expect("process should start");
+
+        let mut restart_count = 0;
+        for _ in 0..20 {
+            process.apply_restart_policy();
+            restart_count = process.refresh_snapshot().restart_count;
+            if restart_count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert!(restart_count > 0);
+
+        stop_managed_process(process, Duration::from_millis(500)).await;
     }
 }

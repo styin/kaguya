@@ -1,6 +1,6 @@
 //! Gateway lifecycle supervision primitives.
 //!
-//! This module owns Gateway task, connection, and process lifecycle state.
+//! This module owns Gateway task and connection lifecycle state.
 //! Submodules keep each ownership concern small while preserving the public
 //! `crate::lifecycle` API used by the rest of the Gateway.
 
@@ -14,18 +14,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 mod connection;
-mod process;
 mod reconnect;
 mod task;
 
 pub use connection::{
     ManagedConnection, ManagedConnectionHandle, ManagedConnectionSnapshot, Readiness,
 };
-pub use process::{ManagedProcessSnapshot, ManagedProcessSpec, ManagedProcessStatus};
 pub use reconnect::ReconnectPolicy;
 pub use task::TaskSpawner;
 
-use process::{start_managed_process, stop_managed_process, ManagedProcess};
 use task::ManagedTask;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +37,6 @@ pub enum ShutdownReason {
 pub struct LifecycleSupervisor {
     shutdown: CancellationToken,
     tasks: Arc<Mutex<Vec<ManagedTask>>>,
-    processes: Arc<Mutex<Vec<ManagedProcess>>>,
     connections: Arc<Mutex<HashMap<String, ManagedConnection>>>,
     shutdown_grace: Duration,
 }
@@ -48,8 +44,6 @@ pub struct LifecycleSupervisor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleSnapshot {
     pub task_count: usize,
-    pub process_count: usize,
-    pub processes: Vec<ManagedProcessSnapshot>,
     pub connections: Vec<ManagedConnectionSnapshot>,
 }
 
@@ -58,7 +52,6 @@ impl LifecycleSupervisor {
         Self {
             shutdown: CancellationToken::new(),
             tasks: Arc::new(Mutex::new(Vec::new())),
-            processes: Arc::new(Mutex::new(Vec::new())),
             connections: Arc::new(Mutex::new(HashMap::new())),
             shutdown_grace: Duration::from_secs(5),
         }
@@ -120,11 +113,8 @@ impl LifecycleSupervisor {
     }
 
     pub fn snapshot(&self) -> LifecycleSnapshot {
-        let processes = self.processes_snapshot();
         LifecycleSnapshot {
             task_count: self.task_count(),
-            process_count: processes.len(),
-            processes,
             connections: self.connection_statuses(),
         }
     }
@@ -136,25 +126,6 @@ impl LifecycleSupervisor {
             .len()
     }
 
-    pub fn process_count(&self) -> usize {
-        self.processes
-            .lock()
-            .expect("managed process registry lock poisoned")
-            .len()
-    }
-
-    pub fn processes_snapshot(&self) -> Vec<ManagedProcessSnapshot> {
-        let mut processes = self
-            .processes
-            .lock()
-            .expect("managed process registry lock poisoned")
-            .iter_mut()
-            .map(ManagedProcess::refresh_snapshot)
-            .collect::<Vec<_>>();
-        processes.sort_by(|a, b| a.name.cmp(&b.name));
-        processes
-    }
-
     pub fn spawn<F>(&self, name: impl Into<String>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -162,17 +133,8 @@ impl LifecycleSupervisor {
         self.spawner().spawn(name, future);
     }
 
-    pub fn start_process(&self, spec: ManagedProcessSpec) -> anyhow::Result<()> {
-        let process = start_managed_process(spec)?;
-        self.processes
-            .lock()
-            .expect("managed process registry lock poisoned")
-            .push(process);
-        Ok(())
-    }
-
     pub async fn shutdown(&mut self, reason: ShutdownReason) {
-        if self.shutdown.is_cancelled() && self.task_count() == 0 && self.process_count() == 0 {
+        if self.shutdown.is_cancelled() && self.task_count() == 0 {
             return;
         }
 
@@ -190,7 +152,6 @@ impl LifecycleSupervisor {
         info!(
             reason = ?reason,
             task_count = tasks.len(),
-            process_count = self.process_count(),
             "lifecycle shutdown requested"
         );
 
@@ -215,18 +176,6 @@ impl LifecycleSupervisor {
                     let _ = handle.await;
                 }
             }
-        }
-
-        let processes = {
-            let mut guard = self
-                .processes
-                .lock()
-                .expect("managed process registry lock poisoned");
-            std::mem::take(&mut *guard)
-        };
-
-        for process in processes {
-            stop_managed_process(process, self.shutdown_grace).await;
         }
     }
 
@@ -381,7 +330,6 @@ mod tests {
         let snapshot = supervisor.snapshot();
 
         assert_eq!(snapshot.task_count, 0);
-        assert_eq!(snapshot.process_count, 0);
         assert_eq!(
             snapshot.connections,
             vec![
@@ -426,57 +374,5 @@ mod tests {
         supervisor.shutdown(ShutdownReason::LoopEnded).await;
         assert_eq!(supervisor.task_count(), 0);
         assert!(!ran.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn shutdown_stops_managed_process() {
-        let mut supervisor =
-            LifecycleSupervisor::new().with_shutdown_grace(Duration::from_millis(500));
-        let command = if cfg!(windows) {
-            "powershell -NoProfile -Command Start-Sleep -Seconds 2"
-        } else {
-            "sleep 2"
-        };
-
-        supervisor
-            .start_process(ManagedProcessSpec::new("test-process", command))
-            .expect("process should start");
-        assert_eq!(supervisor.process_count(), 1);
-        assert_eq!(supervisor.processes_snapshot().len(), 1);
-
-        supervisor.shutdown(ShutdownReason::P0Shutdown).await;
-
-        assert_eq!(supervisor.process_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn process_snapshot_reports_failed_exit_status() {
-        let mut supervisor =
-            LifecycleSupervisor::new().with_shutdown_grace(Duration::from_millis(500));
-        let command = if cfg!(windows) {
-            "powershell -NoProfile -Command exit 7"
-        } else {
-            "exit 7"
-        };
-
-        supervisor
-            .start_process(ManagedProcessSpec::new("failing-process", command))
-            .expect("process should start");
-
-        let mut snapshot = Vec::new();
-        for _ in 0..10 {
-            snapshot = supervisor.processes_snapshot();
-            if snapshot[0].status == ManagedProcessStatus::Failed {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].name, "failing-process");
-        assert_eq!(snapshot[0].status, ManagedProcessStatus::Failed);
-        assert_eq!(snapshot[0].exit_code, Some(7));
-
-        supervisor.shutdown(ShutdownReason::P0Shutdown).await;
     }
 }

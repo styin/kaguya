@@ -1,0 +1,50 @@
+profile = "voice_local"
+
+[processes.gateway]
+enabled = true
+launch = "eager"
+criticality = "required"
+restart = "on_failure"
+command = "source $HOME/.cargo/env && cargo run --features dev-console"
+command_win32 = "cargo run --features dev-console"
+cwd = "../gateway"
+provides = ["gateway"]
+
+[processes.gateway.env]
+RUST_LOG = "kaguya_gateway=debug"
+
+[processes.gateway.endpoints]
+grpc = "http://127.0.0.1:50051"
+websocket = "http://127.0.0.1:8080"
+
+[processes.voice_stack]
+enabled = true
+launch = "eager"
+criticality = "required"
+restart = "keep_alive"
+sandbox = "none"
+command = ".venv/bin/python main.py"
+command_win32 = ".venv\\Scripts\\python.exe main.py"
+cwd = "../talker"
+provides = ["talker", "listener", "stt", "vad", "tts"]
+
+[processes.voice_stack.env]
+KAGUYA_TALKER_LISTEN_ADDR = "0.0.0.0:50053"
+KAGUYA_LISTENER_GRPC_ADDR = "0.0.0.0:50055"
+KAGUYA_LISTENER_AUDIO_ADDR = "0.0.0.0"
+KAGUYA_LISTENER_AUDIO_PORT = "50056"
+KAGUYA_LLM_BASE_URL = "http://localhost:1234"
+
+[processes.voice_stack.endpoints]
+talker_grpc = "http://127.0.0.1:50053"
+listener_grpc = "http://127.0.0.1:50055"
+listener_audio = "127.0.0.1:50056"
+
+[processes.llm_server]
+enabled = true
+launch = "external"
+criticality = "degraded_usable"
+restart = "never"
+provides = ["llm"]
+health_url = "http://localhost:1234/v1/models"
+poll_interval_ms = 5000

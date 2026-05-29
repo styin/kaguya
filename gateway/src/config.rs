@@ -2,8 +2,6 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::lifecycle::ManagedProcessSpec;
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
     pub server: ServerConfig,
@@ -49,21 +47,6 @@ pub enum Criticality {
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Activation {
-    Eager,
-    OnDemand,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeRestartPolicy {
-    Never,
-    OnFailure,
-    KeepAlive,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum FallbackPolicy {
     None,
     Stub,
@@ -75,8 +58,6 @@ pub enum FallbackPolicy {
 pub struct RuntimeConfig {
     pub profile: Option<String>,
     #[serde(default)]
-    pub manage_processes: bool,
-    #[serde(default)]
     pub runtimes: BTreeMap<String, RuntimeSpec>,
 }
 
@@ -85,27 +66,9 @@ pub struct RuntimeSpec {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
-    pub managed: bool,
-    #[serde(default)]
     pub criticality: Option<Criticality>,
     #[serde(default)]
-    pub activation: Option<Activation>,
-    #[serde(default)]
-    pub restart: Option<RuntimeRestartPolicy>,
-    #[serde(default)]
     pub fallback: Option<FallbackPolicy>,
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub command_win32: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<PathBuf>,
-    #[serde(default)]
-    pub health_url: Option<String>,
-    #[serde(default)]
-    pub poll_interval_ms: Option<u64>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub endpoints: BTreeMap<String, String>,
     #[serde(default)]
@@ -132,7 +95,6 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             profile: None,
-            manage_processes: false,
             runtimes: BTreeMap::new(),
         }
     }
@@ -161,36 +123,11 @@ impl RuntimeConfig {
             .unwrap_or(true)
     }
 
-    pub fn owns_eager_runtime(&self, runtime_id: &str) -> bool {
-        if !self.manage_processes {
-            return false;
-        }
-        let Some(runtime) = self.runtimes.get(runtime_id) else {
-            return false;
-        };
-        runtime.enabled && runtime.managed && runtime.activation == Some(Activation::Eager)
-    }
-
-    pub fn eager_managed_process_specs(&self) -> anyhow::Result<Vec<ManagedProcessSpec>> {
-        let mut specs = Vec::new();
-        for (id, runtime) in &self.runtimes {
-            if !runtime.enabled || !runtime.managed {
-                continue;
-            }
-            if runtime.activation != Some(Activation::Eager) {
-                continue;
-            }
-            let Some(command) = runtime.command.clone() else {
-                anyhow::bail!("managed eager runtime '{id}' is missing command");
-            };
-            specs.push(
-                ManagedProcessSpec::new(id.clone(), command)
-                    .with_command_win32(runtime.command_win32.clone())
-                    .with_cwd(runtime.cwd.clone())
-                    .with_env(runtime.env.clone()),
-            );
-        }
-        Ok(specs)
+    pub fn runtime_expected(&self, runtime_id: &str) -> bool {
+        self.runtimes
+            .get(runtime_id)
+            .map(|runtime| runtime.enabled && runtime.criticality != Some(Criticality::Optional))
+            .unwrap_or(false)
     }
 }
 
@@ -267,15 +204,7 @@ impl Default for RagConfig {
 impl GatewayConfig {
     pub fn load(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config = toml::from_str::<Self>(&content)?;
-        config.apply_env_overrides();
-        Ok(config)
-    }
-
-    fn apply_env_overrides(&mut self) {
-        if let Ok(value) = std::env::var("KAGUYA_RUNTIME_MANAGE_PROCESSES") {
-            self.runtime.manage_processes = parse_bool_env(&value);
-        }
+        Ok(toml::from_str::<Self>(&content)?)
     }
 
     pub fn resolved_clients(&self) -> ResolvedClientsConfig {
@@ -306,13 +235,6 @@ impl GatewayConfig {
     pub fn listener_enabled(&self) -> bool {
         self.runtime.capability_enabled("voice_stack", "listener")
     }
-}
-
-fn parse_bool_env(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 impl Default for GatewayConfig {
@@ -396,8 +318,6 @@ mod tests {
             [runtime.runtimes.voice_stack]
             enabled = true
             criticality = "required"
-            activation = "eager"
-            restart = "keep_alive"
             provides = ["talker", "listener"]
 
             [runtime.runtimes.voice_stack.endpoints]
@@ -408,7 +328,6 @@ mod tests {
             [runtime.runtimes.reasoner]
             enabled = true
             criticality = "degraded_usable"
-            activation = "on_demand"
             fallback = "stub"
 
             [runtime.runtimes.reasoner.endpoints]
@@ -429,17 +348,8 @@ mod tests {
         let mut config = GatewayConfig::default();
         let mut voice_stack = RuntimeSpec {
             enabled: true,
-            managed: false,
             criticality: None,
-            activation: None,
-            restart: None,
             fallback: None,
-            command: None,
-            command_win32: None,
-            cwd: None,
-            health_url: None,
-            poll_interval_ms: None,
-            env: BTreeMap::new(),
             endpoints: BTreeMap::new(),
             provides: vec!["talker".into(), "listener".into()],
             capabilities: BTreeMap::new(),
@@ -461,90 +371,21 @@ mod tests {
     }
 
     #[test]
-    fn eager_managed_process_specs_include_enabled_eager_runtimes_only() {
+    fn runtime_expected_follows_enabled_and_optional_criticality() {
         let toml = r#"
-            manage_processes = true
-
             [runtimes.voice_stack]
             enabled = true
-            managed = true
-            activation = "eager"
-            command = "python main.py"
-            command_win32 = ".venv\\Scripts\\python.exe main.py"
-            cwd = "../talker"
-
-            [runtimes.voice_stack.env]
-            KAGUYA_LOG_LEVEL = "INFO"
+            criticality = "required"
 
             [runtimes.reasoner]
             enabled = true
-            managed = true
-            activation = "on_demand"
-            command = "npm run start"
-
-            [runtimes.disabled]
-            enabled = false
-            managed = true
-            activation = "eager"
-            command = "disabled"
-        "#;
-
-        let runtime: RuntimeConfig = toml::from_str(toml).expect("runtime config should parse");
-        let specs = runtime
-            .eager_managed_process_specs()
-            .expect("runtime process specs should resolve");
-
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].name(), "voice_stack");
-    }
-
-    #[test]
-    fn eager_managed_runtime_requires_command() {
-        let toml = r#"
-            [runtimes.voice_stack]
-            enabled = true
-            managed = true
-            activation = "eager"
+            criticality = "optional"
         "#;
 
         let runtime: RuntimeConfig = toml::from_str(toml).expect("runtime config should parse");
 
-        assert!(runtime.eager_managed_process_specs().is_err());
-    }
-
-    #[test]
-    fn owns_eager_runtime_requires_process_management_and_eager_runtime() {
-        let toml = r#"
-            manage_processes = true
-
-            [runtimes.voice_stack]
-            enabled = true
-            managed = true
-            activation = "eager"
-            command = "python main.py"
-
-            [runtimes.reasoner]
-            enabled = true
-            managed = true
-            activation = "on_demand"
-            command = "npm run start"
-        "#;
-
-        let mut runtime: RuntimeConfig = toml::from_str(toml).expect("runtime config should parse");
-        assert!(runtime.owns_eager_runtime("voice_stack"));
-        assert!(!runtime.owns_eager_runtime("reasoner"));
-
-        runtime.manage_processes = false;
-        assert!(!runtime.owns_eager_runtime("voice_stack"));
-    }
-
-    #[test]
-    fn bool_env_parser_accepts_common_truthy_values() {
-        for value in ["1", "true", "TRUE", "yes", "on"] {
-            assert!(parse_bool_env(value), "{value} should be truthy");
-        }
-        for value in ["0", "false", "no", "off", ""] {
-            assert!(!parse_bool_env(value), "{value} should be falsey");
-        }
+        assert!(runtime.runtime_expected("voice_stack"));
+        assert!(!runtime.runtime_expected("reasoner"));
+        assert!(!runtime.runtime_expected("missing"));
     }
 }

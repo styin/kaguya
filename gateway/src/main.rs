@@ -28,7 +28,6 @@ use kaguya_gateway::persona::Persona;
 use kaguya_gateway::proto;
 use kaguya_gateway::rag::RagEngine;
 use kaguya_gateway::reasoner::ReasonerManager;
-use kaguya_gateway::runtime;
 use kaguya_gateway::silence::SilenceTimers;
 use kaguya_gateway::talker::TalkerClient;
 use kaguya_gateway::tools::ToolRegistry;
@@ -50,12 +49,6 @@ async fn main() -> anyhow::Result<()> {
         warn!("config load failed ({e}), using defaults");
         GatewayConfig::default()
     });
-    if config.runtime.manage_processes {
-        runtime::preflight_managed_runtime_endpoints(&config.runtime).await?;
-        for spec in config.runtime.eager_managed_process_specs()? {
-            lifecycle.start_process(spec)?;
-        }
-    }
     let clients = config.resolved_clients();
 
     // ── Channels ──
@@ -156,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
             identity_md: persona.identity().await,
             memory_md: last_memory_md.clone(),
         };
-        let owned_voice_stack = config.runtime.owns_eager_runtime("voice_stack");
+        let expected_voice_stack = config.runtime.runtime_expected("voice_stack");
         let talker_endpoint = clients.talker_addr.clone();
         let listener_endpoint = clients.listener_grpc_addr.clone();
         let p1_tx = input_tx.p1.clone();
@@ -175,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
                 p2_tx,
                 listener_audio_boot,
                 initial_persona,
-                owned_voice_stack,
+                expected_voice_stack,
             )
             .await;
         });
@@ -193,7 +186,6 @@ async fn main() -> anyhow::Result<()> {
             active_client: std::sync::Mutex::new(None),
             listener_audio: listener_audio.clone(),
             runtime_status: endpoint::RuntimeStatusState {
-                manage_processes: config.runtime.manage_processes,
                 lifecycle: lifecycle.clone(),
             },
         });
@@ -638,12 +630,15 @@ async fn bootstrap_voice_stack(
     p2_tx: mpsc::Sender<InputEvent>,
     listener_audio: ListenerAudioSink,
     initial_persona: proto::PersonaConfig,
-    owned_voice_stack: bool,
+    expected_voice_stack: bool,
 ) {
     let talker_task = async {
-        wait_for_grpc_endpoint("talker", &talker_endpoint, owned_voice_stack, |readiness| {
-            talker.set_readiness(readiness)
-        })
+        wait_for_grpc_endpoint(
+            "talker",
+            &talker_endpoint,
+            expected_voice_stack,
+            |readiness| talker.set_readiness(readiness),
+        )
         .await;
 
         loop {
@@ -651,7 +646,7 @@ async fn bootstrap_voice_stack(
                 talker.update_persona(initial_persona).await;
                 return;
             }
-            if owned_voice_stack {
+            if expected_voice_stack {
                 talker.set_readiness(Readiness::Starting);
             }
             sleep_probe_interval().await;
@@ -668,7 +663,7 @@ async fn bootstrap_voice_stack(
         wait_for_grpc_endpoint(
             "listener",
             &listener_endpoint,
-            owned_voice_stack,
+            expected_voice_stack,
             |readiness| listener_connection.set_readiness(readiness),
         )
         .await;
@@ -682,7 +677,7 @@ async fn bootstrap_voice_stack(
                 }
                 Err(e) => {
                     warn!("Listener startup failed after endpoint readiness: {e}");
-                    if owned_voice_stack {
+                    if expected_voice_stack {
                         listener_connection.set_readiness(Readiness::Starting);
                     }
                     sleep_probe_interval().await;
@@ -697,14 +692,14 @@ async fn bootstrap_voice_stack(
 async fn wait_for_grpc_endpoint<F>(
     name: &str,
     endpoint: &str,
-    owned_runtime: bool,
+    expected_runtime: bool,
     mut set_readiness: F,
 ) where
     F: FnMut(Readiness),
 {
     let mut warned_unmanaged = false;
     loop {
-        if owned_runtime {
+        if expected_runtime {
             set_readiness(Readiness::Starting);
         }
         match probe_grpc_endpoint(endpoint).await {
@@ -714,7 +709,7 @@ async fn wait_for_grpc_endpoint<F>(
                 return;
             }
             Err(e) => {
-                if owned_runtime {
+                if expected_runtime {
                     debug!(
                         runtime = name,
                         endpoint, "runtime endpoint still starting: {e}"

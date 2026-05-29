@@ -105,7 +105,7 @@ function attachRuntimeChildren(
   runtime: RuntimeStatusSnapshot | null,
 ): ProcessInfo[] {
   const app = processes.find((process) => process.name === "kaguya_app");
-  if (!app || app.status === "stopped" || !runtime?.manage_processes) {
+  if (!app || app.status === "stopped" || !runtime) {
     return processes;
   }
 
@@ -116,15 +116,6 @@ function attachRuntimeChildren(
 }
 
 function runtimeChildren(runtime: RuntimeStatusSnapshot): RuntimeChildInfo[] {
-  const processChildren = runtime.lifecycle.processes.map((process) => ({
-    name: process.name,
-    label: displayRuntimeName(process.name),
-    kind: "process" as const,
-    status: processStatusFromRuntimeProcess(process.status),
-    pid: process.pid,
-    exitCode: process.exit_code,
-  }));
-
   const connectionChildren = runtime.lifecycle.connections.map((connection) => ({
     name: connection.name,
     label: displayRuntimeName(connection.name),
@@ -133,15 +124,7 @@ function runtimeChildren(runtime: RuntimeStatusSnapshot): RuntimeChildInfo[] {
     readiness: connection.readiness,
   }));
 
-  return [...processChildren, ...connectionChildren];
-}
-
-function processStatusFromRuntimeProcess(
-  status: "running" | "exited" | "failed",
-): ProcessStatus {
-  if (status === "running") return "running";
-  if (status === "failed") return "errored";
-  return "stopped";
+  return connectionChildren;
 }
 
 function processStatusFromReadiness(readiness: RuntimeReadiness): ProcessStatus {

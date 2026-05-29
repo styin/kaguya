@@ -421,3 +421,27 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 
 - Rust module system convention: directory modules with `mod.rs` preserve the same module path as a single `lifecycle.rs` file.
 - Kaguya Gateway source organization: `gateway/src/core/` is already domain-oriented, while lifecycle supervision is process/runtime infrastructure.
+
+---
+
+## REF-013 - Runtime Supervisor Package Boundary (Runtime supervisor refactor)
+
+**Decision:** Process ownership is extracted from Gateway into the standalone `supervisor/` Rust package. Gateway lifecycle now owns Tokio tasks, connection readiness, reconnect policy, and Gateway shutdown only. Runtime process launch, process-tree termination, child log forwarding, restart policy, and future sandbox wrapping belong to the supervisor package. Runtime launch policy lives in `config/kaguya.runtime.toml`; Gateway keeps only capability endpoint/readiness configuration.
+
+**Rationale:**
+
+1. **Separate lifecycle domains.** Gateway P0 `STOP` is an agent behavior path: cancel active generation, timers, reasoners, and output. Runtime shutdown/restart is an application process path. Keeping both inside Gateway made the Gateway lifecycle layer grow into a process orchestrator instead of a routing/control component.
+
+2. **Sandboxing is a process-launch concern.** Future sandbox providers such as `none`, OS-level wrappers, or platform-specific resource isolation wrap runtime processes, not Gateway turn stages. Locating process ownership in `supervisor/` leaves Gateway free of sandbox-specific branching and keeps untrusted sidecar capability providers outside Gateway's address space.
+
+3. **Preserve Rust process hardening.** The cross-platform process-tree shutdown, stdout/stderr forwarding, snapshots, and restart-policy tests were already implemented in Rust under Gateway. Moving that code outward keeps the stronger implementation while changing the owner.
+
+4. **Frontend telemetry can compose cleanly.** Supervisor remains authoritative for process health/logs/restarts; Gateway remains authoritative for capability connection readiness. The console can display both layers without Gateway exposing child-process snapshots.
+
+**Supersedes:** REF-012's process row for `gateway/src/lifecycle/process.rs`; Gateway no longer contains that module.
+
+**Sources:**
+
+- Kaguya architecture invariant: Gateway owns filesystem/capability routing, while runtime processes provide capabilities over IPC.
+- Kaguya supervisor extraction target: `supervisor/src/process.rs` owns managed child-process primitives and restart policy.
+- Gateway lifecycle source after extraction: `gateway/src/lifecycle/` contains task, connection, and reconnect modules only.

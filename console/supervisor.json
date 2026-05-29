@@ -8,8 +8,7 @@
       "command_win32": "cargo run --features dev-console",
       "cwd": "../gateway",
       "env": {
-        "RUST_LOG": "kaguya_gateway=debug",
-        "KAGUYA_RUNTIME_MANAGE_PROCESSES": "true"
+        "RUST_LOG": "kaguya_gateway=debug"
       }
     },
     "gateway_standalone": {

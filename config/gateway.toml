@@ -11,32 +11,16 @@ listener_audio_addr = "127.0.0.1:50056"
 
 [runtime]
 profile = "voice_local"
-# Dev console still owns child-process launch today. Flip this when Gateway's
-# ManagedProcess path replaces console/server/supervisor.ts for this profile.
-manage_processes = false
 
 [runtime.runtimes.voice_stack]
 enabled = true
-managed = true
 criticality = "required"
-activation = "eager"
-restart = "keep_alive"
-command = ".venv/bin/python main.py"
-command_win32 = ".venv\\Scripts\\python.exe main.py"
-cwd = "../talker"
 provides = ["talker", "listener", "stt", "vad", "tts"]
 
 [runtime.runtimes.voice_stack.endpoints]
 talker_grpc = "http://127.0.0.1:50053"
 listener_grpc = "http://127.0.0.1:50055"
 listener_audio = "127.0.0.1:50056"
-
-[runtime.runtimes.voice_stack.env]
-KAGUYA_TALKER_LISTEN_ADDR = "0.0.0.0:50053"
-KAGUYA_LISTENER_GRPC_ADDR = "0.0.0.0:50055"
-KAGUYA_LISTENER_AUDIO_ADDR = "0.0.0.0"
-KAGUYA_LISTENER_AUDIO_PORT = "50056"
-KAGUYA_LLM_BASE_URL = "http://localhost:1234"
 
 [runtime.runtimes.voice_stack.capabilities.listener]
 enabled = true
@@ -45,10 +29,7 @@ fallback = "limited"
 
 [runtime.runtimes.reasoner]
 enabled = true
-managed = false
 criticality = "degraded_usable"
-activation = "on_demand"
-restart = "on_failure"
 fallback = "stub"
 provides = ["reasoner"]
 
@@ -57,12 +38,8 @@ grpc = "http://127.0.0.1:50054"
 
 [runtime.runtimes.llm_server]
 enabled = true
-managed = false
 criticality = "degraded_usable"
-activation = "eager"
 fallback = "none"
-health_url = "http://localhost:1234/v1/models"
-poll_interval_ms = 5000
 provides = ["llm"]
 
 [files]

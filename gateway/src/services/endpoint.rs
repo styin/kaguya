@@ -38,13 +38,11 @@ pub struct EndpointState {
 
 #[derive(Clone)]
 pub struct RuntimeStatusState {
-    pub manage_processes: bool,
     pub lifecycle: LifecycleSupervisor,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatusResponse {
-    pub manage_processes: bool,
     pub lifecycle: LifecycleSnapshot,
 }
 
@@ -62,7 +60,6 @@ async fn runtime_status(State(state): State<Arc<EndpointState>>) -> Json<Runtime
 
 fn runtime_status_response(state: &RuntimeStatusState) -> RuntimeStatusResponse {
     RuntimeStatusResponse {
-        manage_processes: state.manage_processes,
         lifecycle: state.lifecycle.snapshot(),
     }
 }
@@ -184,12 +181,8 @@ mod tests {
         let talker = lifecycle.register_connection("talker");
         talker.set_readiness(Readiness::Ready);
 
-        let response = runtime_status_response(&RuntimeStatusState {
-            manage_processes: true,
-            lifecycle,
-        });
+        let response = runtime_status_response(&RuntimeStatusState { lifecycle });
 
-        assert!(response.manage_processes);
         assert_eq!(response.lifecycle.connections.len(), 1);
         assert_eq!(response.lifecycle.connections[0].name, "talker");
         assert_eq!(
