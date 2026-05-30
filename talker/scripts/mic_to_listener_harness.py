@@ -43,6 +43,11 @@ from voice.turn_detector import TurnDetector  # noqa: E402
 
 logger = logging.getLogger("mic-harness")
 
+LEGACY_GATEWAY_TARGET = "127.0.0.1:50051"
+LEGACY_RECONNECT_INITIAL_S = 1.0
+LEGACY_RECONNECT_MULTIPLIER = 2.0
+LEGACY_RECONNECT_MAX_S = 30.0
+
 
 def _normalize_target(raw: str) -> str:
     """Map config target to a grpc.aio.insecure_channel-compatible endpoint.
@@ -282,14 +287,14 @@ class MicHarness:
         )
 
     async def _stream_to_gateway(self) -> None:
-        backoff = self._config.gateway_reconnect_initial_s
+        backoff = LEGACY_RECONNECT_INITIAL_S
         while True:
             try:
                 logger.info("Connecting to ListenerService at %s", self._target)
                 async with grpc.aio.insecure_channel(self._target) as channel:
                     stub = kaguya_pb2_grpc.ListenerServiceStub(channel)
                     await stub.StreamEvents(self._event_generator())
-                    backoff = self._config.gateway_reconnect_initial_s
+                    backoff = LEGACY_RECONNECT_INITIAL_S
             except grpc.aio.AioRpcError as exc:
                 logger.warning(
                     "Gateway connection lost (%s). Reconnecting in %.1fs...",
@@ -298,8 +303,8 @@ class MicHarness:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(
-                    backoff * self._config.gateway_reconnect_multiplier,
-                    self._config.gateway_reconnect_max_s,
+                    backoff * LEGACY_RECONNECT_MULTIPLIER,
+                    LEGACY_RECONNECT_MAX_S,
                 )
             except asyncio.CancelledError:
                 return
@@ -316,7 +321,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target",
         default=None,
-        help="Gateway ListenerService target (default: TalkerConfig.gateway_socket)",
+        help=f"Legacy Gateway ListenerService target (default: {LEGACY_GATEWAY_TARGET})",
     )
     parser.add_argument(
         "--log-level",
@@ -346,7 +351,7 @@ async def _main() -> None:
     )
 
     config = TalkerConfig()
-    target = args.target or config.gateway_socket
+    target = args.target or LEGACY_GATEWAY_TARGET
 
     logger.info("Mic harness starting")
     logger.info("Configured gateway target: %s", target)

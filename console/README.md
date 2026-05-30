@@ -12,7 +12,12 @@ npm install     # first time
 npm run dev     # http://localhost:3000
 ```
 
-The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (Gateway). It starts the Rust `kaguya-supervisor` binary and proxies `/api/*` to the Supervisor HTTP/SSE API at `127.0.0.1:3001`. Runtime process definitions live in `config/kaguya.runtime.toml`.
+The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (Gateway). It starts the Rust `kaguya-supervisor` binary without auto-starting app processes, then proxies `/api/*` to the Supervisor HTTP/SSE API at `127.0.0.1:3001`. Runtime process and capability definitions live in `config/kaguya.runtime.toml`.
+
+Runtime mode is selected by profile:
+
+- `app`: Supervisor owns the eager app graph and starts Gateway plus first-party runtimes.
+- `dev_standalone`: Gateway and voice stack can be launched as isolated debug processes while sharing one bind/connect contract.
 
 On Windows, managed process entries can provide `command_win32`; Supervisor uses that command with the platform shell instead of the Unix shell command.
 
@@ -23,7 +28,7 @@ The process rail renders Supervisor-owned app processes and Gateway-reported cap
 - `Talker`, `Listener`, `Reasoner`: capability readiness children reported by Gateway.
 - `LLM server`: an unmanaged external endpoint observed through health polling.
 
-Standalone Gateway/Talker debugging remains available through direct CLI commands; canonical app mode is Supervisor-owned.
+Use `Start App` to start the eager app graph, or start individual process cards for isolated Gateway/voice-stack debugging. Direct CLI debugging remains available; canonical app mode is Supervisor-owned.
 
 ## Layout
 

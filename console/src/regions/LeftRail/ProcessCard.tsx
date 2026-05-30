@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import type { ProcessInfo } from "../../types";
 
 export function ProcessCard({
@@ -23,6 +24,14 @@ export function ProcessCard({
   const blockedBy = info.blockedBy ?? [];
   const isBlocked = blockedBy.length > 0;
   const displayName = info.label || info.name;
+
+  function handleAction(
+    event: MouseEvent<HTMLButtonElement>,
+    action: "start" | "stop" | "restart",
+  ) {
+    event.currentTarget.blur();
+    onAction(info.name, action);
+  }
 
   return (
     <div className="process-card">
@@ -56,7 +65,7 @@ export function ProcessCard({
             <button
               type="button"
               className="process-action"
-              onClick={() => onAction(info.name, "stop")}
+              onClick={(event) => handleAction(event, "stop")}
             >
               Stop
             </button>
@@ -64,7 +73,7 @@ export function ProcessCard({
             <button
               type="button"
               className="process-action"
-              onClick={() => onAction(info.name, "start")}
+              onClick={(event) => handleAction(event, "start")}
               disabled={isBlocked}
               title={
                 isBlocked
@@ -78,7 +87,7 @@ export function ProcessCard({
           <button
             type="button"
             className="process-action"
-            onClick={() => onAction(info.name, "restart")}
+            onClick={(event) => handleAction(event, "restart")}
             disabled={!isRunning}
             title={isRunning ? "Stop + start" : "Start the process first"}
           >

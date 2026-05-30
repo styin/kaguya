@@ -10,8 +10,8 @@ import "./topbar.css";
  * Top bar.
  *
  * Wired today: brand + version chip, WS status pill, WS uptime,
- * message counters, Reconnect (calls `ws.reconnect()`), Shutdown
- * (calls Supervisor `/api/app/shutdown`).
+ * message counters, Reconnect (calls `ws.reconnect()`), Start App /
+ * Shutdown (call Supervisor app lifecycle endpoints).
  *
  * Deliberately omitted: server-authoritative session ID. The gateway
  * mints `conversation_id` at startup but never sends it; rather than
@@ -57,6 +57,14 @@ export function TopBar({
         disabled={wsStatus === "connected" || wsStatus === "connecting"}
       >
         Reconnect
+      </button>
+      <button
+        type="button"
+        className="top-btn"
+        onClick={() => void fetch("/api/app/start", { method: "POST" })}
+        title="Start the supervised app runtime"
+      >
+        Start App
       </button>
       <button
         type="button"

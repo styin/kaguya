@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Kaguya Gateway starting");
     let mut lifecycle = LifecycleSupervisor::new();
 
-    let config = GatewayConfig::load("../config/gateway.toml").unwrap_or_else(|e| {
+    let config = GatewayConfig::load("gateway.toml").unwrap_or_else(|e| {
         warn!("config load failed ({e}), using defaults");
         GatewayConfig::default()
     });
@@ -721,11 +721,6 @@ async fn wait_for_grpc_endpoint<F>(
                         warn!(
                             runtime = name,
                             endpoint, "unmanaged runtime endpoint unavailable: {e}"
-                        );
-                    } else {
-                        debug!(
-                            runtime = name,
-                            endpoint, "unmanaged runtime endpoint still unavailable: {e}"
                         );
                     }
                 }

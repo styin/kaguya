@@ -142,7 +142,7 @@ Should work on most modern NVIDIA GPUs with 12+ GB VRAM. Cloud fallbacks (Deepgr
 - **Python 3.11+** + **uv** — for the Talker (uv manages the Python interpreter and venv)
 - **Node.js 20+** with **npm** — for the Reasoner / Toolkit
 - **`buf`** + **`protoc`** — for proto generation and lint (Rust uses tonic-build's eager generation; Python regen is optional, stubs are committed)
-- **llama.cpp** (or any OpenAI-compatible server) running Qwen3-8B at `http://localhost:8080`
+- **llama.cpp / LM Studio** (or any OpenAI-compatible server) running Qwen3-8B at `http://localhost:1234`
 - **CUDA-capable GPU** with 12+ GB VRAM recommended for the LLM
 
 ### Installation

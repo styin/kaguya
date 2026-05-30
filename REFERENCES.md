@@ -305,7 +305,7 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 - **Token budget:** Kaguya memories are short (capped at ~200 characters by `truncate_chars` in [gateway/src/rag/mod.rs](gateway/src/rag/mod.rs)). 10 retrieved entries ≈ 2000 chars ≈ 500–700 tokens — fits inside `TalkerContext` without crowding history or persona.
 - **Why over-fetch then fuse:** Pulling `top_k * 2` from each modality before RRF gives the fusion stage signal from items that might rank low in one source but high in the other. Truncating to `top_k` post-fusion preserves the diversity benefit.
 
-**Configurability:** Adjust `[rag] top_k` in `config/gateway.toml` if context length budgets change.
+**Configurability:** Adjust `[rag] top_k` in `gateway/gateway.toml` if context length budgets change.
 
 **Sources:**
 
@@ -337,7 +337,7 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 
 **Decision:** The RAG store keeps full-fidelity memory content. Truncation only happens at *output* time — when retrieval results or the exported `memory_md` document are assembled for the Talker prompt. The store side has only a defensive sanity bound.
 
-**Configuration ([gateway/src/config.rs](gateway/src/config.rs#L48), `[rag]` block in `config/gateway.toml`):**
+**Configuration ([gateway/src/config.rs](gateway/src/config.rs#L48), `[rag]` block in `gateway/gateway.toml`):**
 
 | Knob                       | Default     | Layer       | Purpose                                                                                                |
 | -------------------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------ |

@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 use crate::process::ManagedProcessLogLine;
 
 const MAX_LOG_ENTRIES: usize = 10_000;
+const ESC: char = '\u{1b}';
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
@@ -44,12 +45,16 @@ impl LogStore {
         stream: impl Into<String>,
         line: impl Into<String>,
     ) {
+        let line = strip_ansi(&line.into());
+        if line.trim().is_empty() || is_transient_status_line(&line) {
+            return;
+        }
         let entry = LogEntry {
             id: self.next_id.fetch_add(1, Ordering::SeqCst),
             timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             source: normalize_source(&source.into()),
             stream: stream.into(),
-            line: line.into(),
+            line,
         };
 
         {
@@ -103,5 +108,68 @@ fn normalize_source(source: &str) -> String {
         "gateway" | "gateway_standalone" | "kaguya_app" => "gateway".to_string(),
         "voice_stack" | "talker_standalone" => "talker".to_string(),
         other => other.to_string(),
+    }
+}
+
+fn is_transient_status_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if let Some(first) = trimmed.chars().next() {
+        if ('\u{2800}'..='\u{28ff}').contains(&first) {
+            return true;
+        }
+    }
+    let trimmed = trimmed
+        .trim_start_matches(['\\', '|', '/', '-'])
+        .trim()
+        .to_ascii_lowercase();
+    matches!(trimmed.as_str(), "recording" | "speak now")
+}
+
+fn strip_ansi(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != ESC {
+            output.push(ch);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for next in chars.by_ref() {
+            if ('@'..='~').contains(&next) {
+                break;
+            }
+        }
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_strips_ansi_sequences() {
+        let logs = LogStore::new();
+        logs.push(
+            "gateway",
+            "stdout",
+            "\u{1b}[2m2026-05-29\u{1b}[0m \u{1b}[32mINFO\u{1b}[0m ready",
+        );
+
+        let entries = logs.since(0);
+        assert_eq!(entries[0].line, "2026-05-29 INFO ready");
+    }
+
+    #[test]
+    fn push_drops_voice_spinner_lines() {
+        let logs = LogStore::new();
+        logs.push("talker", "stdout", "\\ speak now");
+        logs.push("talker", "stdout", "real log");
+
+        let entries = logs.since(0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].line, "real log");
     }
 }

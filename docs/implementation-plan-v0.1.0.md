@@ -289,8 +289,10 @@ Work in this order. Each milestone produces a runnable/testable artifact.
   - `grpcio` (runtime); `grpcio-tools` in dev-dependencies only (stub regeneration — stubs are committed, see REF-005)
   - `pydantic` (for config)
 - [ ] Write `talker/config.py` as a `pydantic.BaseSettings` class:
-  - `llm_base_url: str = "http://localhost:8080"`
-  - `gateway_socket: str = "/tmp/kaguya-gateway.sock"`
+  - `llm_base_url: str = "http://localhost:1234"` (direct-run default; launchers inject from `config/kaguya.runtime.toml`)
+  - `talker_listen_addr: str = "0.0.0.0:50053"` (direct-run default; launchers inject from runtime `bind`)
+  - `listener_grpc_addr: str = "0.0.0.0:50055"` (direct-run default; launchers inject from runtime `bind`)
+  - `listener_audio_addr: str = "0.0.0.0"` and `listener_audio_port: int = 50056` (direct-run defaults; launchers inject from runtime `bind`)
   - `silence_threshold_ms: int = 800`
   - `syntax_silence_threshold_ms: int = 300`
   - `kokoro_voice: str = "af_heart"` (placeholder — [OPEN] voice selection needs listening tests)
@@ -582,7 +584,7 @@ kaguya/
 ├── config/
 │   ├── SOUL.md                     # Kaguya persona — tone, values, voice
 │   ├── IDENTITY.md                 # Kaguya identity — name, backstory, rules
-│   └── gateway.toml                # Gateway runtime config (RAG db_path, addrs, etc.)
+│   └── kaguya.runtime.toml         # Runtime process/capability topology
 ├── data/
 │   └── kaguya.db                   # RAG store — SQLite + FTS5 BM25 + optional embeddings
 ├── docker/
@@ -592,6 +594,7 @@ kaguya/
 │   ├── spec-gateway-v0.1.0.md      # Gateway spec
 │   └── implementation-plan-v0.1.0.md  # This document
 ├── gateway/                        # Rust — tokio/tonic
+│   ├── gateway.toml                # Gateway-local behavior config
 │   ├── src/
 │   │   ├── main.rs
 │   │   ├── input_stream.rs         # Priority queue (P0–P5)

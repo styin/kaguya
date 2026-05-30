@@ -13,7 +13,9 @@ async fn main() -> anyhow::Result<()> {
     let addr = resolved.config.supervisor_addr.parse()?;
     let app = SupervisorApp::new(resolved);
     app.start_monitor();
-    app.start_app().await?;
+    if supervisor_autostart() {
+        app.start_app().await?;
+    }
 
     tokio::select! {
         result = server::serve(app.clone(), addr) => result?,
@@ -27,4 +29,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn supervisor_autostart() -> bool {
+    std::env::var("KAGUYA_SUPERVISOR_AUTOSTART")
+        .map(|value| {
+            !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
 }

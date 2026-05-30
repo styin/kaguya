@@ -352,7 +352,16 @@ impl SupervisorApp {
 
     async fn request_gateway_drain(&self) {
         let endpoint = {
-            let inner = self.inner.lock().await;
+            let mut inner = self.inner.lock().await;
+            let Some(gateway_state) = inner.processes.get_mut("gateway") else {
+                return;
+            };
+            let Some(process) = gateway_state.process.as_mut() else {
+                return;
+            };
+            if process.refresh_snapshot().status != ManagedProcessStatus::Running {
+                return;
+            }
             inner.config.gateway_grpc_endpoint().map(str::to_string)
         };
         let Some(endpoint) = endpoint else {
@@ -514,7 +523,7 @@ fn process_info(
         restart_policy: state.spec.restart,
         restart_count,
         blocked_by: blocked_dependencies(&state.spec, statuses),
-        children: capability_children(&state.spec, gateway),
+        children: capability_children(&state.spec, gateway, status),
     }
 }
 
@@ -566,6 +575,7 @@ fn blocked_dependencies(
 fn capability_children(
     spec: &ProcessSpec,
     gateway: Option<&GatewayStatus>,
+    parent_status: ProcessStatus,
 ) -> Vec<RuntimeChildInfo> {
     let Some(gateway) = gateway else {
         return Vec::new();
@@ -583,8 +593,16 @@ fn capability_children(
             name: connection.name.clone(),
             label: display_name(&connection.name),
             kind: "connection".to_string(),
-            status: process_status_from_readiness(&connection.readiness),
-            readiness: Some(connection.readiness.clone()),
+            status: if parent_status == ProcessStatus::Running {
+                process_status_from_readiness(&connection.readiness)
+            } else {
+                ProcessStatus::Stopped
+            },
+            readiness: Some(if parent_status == ProcessStatus::Running {
+                connection.readiness.clone()
+            } else {
+                "stopped".to_string()
+            }),
         })
         .collect()
 }
@@ -670,6 +688,7 @@ mod tests {
             command_win32: None,
             cwd: None,
             env: BTreeMap::new(),
+            bind: BTreeMap::new(),
             provides: vec![],
             depends_on: vec![],
             endpoints: BTreeMap::new(),
