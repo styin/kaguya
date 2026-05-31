@@ -5,13 +5,14 @@ pub mod rag;
 pub mod tools;
 
 pub mod clients {
+    pub mod audio_sink;
     pub mod listener;
+    pub mod probe;
     pub mod reasoner;
     pub mod talker;
 }
 
 pub mod core {
-    pub mod audio_sink;
     pub mod context;
     pub mod history;
     pub mod input_stream;
@@ -28,10 +29,8 @@ pub mod services {
     pub mod endpoint;
 }
 
-pub use clients::{listener, reasoner, talker};
-pub use core::{
-    audio_sink, context, history, input_stream, narration, output, persona, silence, types,
-};
+pub use clients::{audio_sink, listener, probe, reasoner, talker};
+pub use core::{context, history, input_stream, narration, output, persona, silence, types};
 pub use services::control;
 #[cfg(feature = "dev-console")]
 pub use services::endpoint;

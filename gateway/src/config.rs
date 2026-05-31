@@ -55,15 +55,6 @@ pub enum LaunchMode {
     External,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FallbackPolicy {
-    None,
-    Stub,
-    Limited,
-    External,
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub profile: Option<String>,
@@ -95,8 +86,6 @@ pub struct RuntimeSpec {
     #[serde(default)]
     pub criticality: Option<Criticality>,
     #[serde(default)]
-    pub fallback: Option<FallbackPolicy>,
-    #[serde(default)]
     pub endpoints: BTreeMap<String, String>,
     #[serde(default)]
     pub bind: BTreeMap<String, String>,
@@ -112,8 +101,6 @@ pub struct CapabilitySpec {
     pub enabled: bool,
     #[serde(default)]
     pub criticality: Option<Criticality>,
-    #[serde(default)]
-    pub fallback: Option<FallbackPolicy>,
 }
 
 fn default_enabled() -> bool {
@@ -438,7 +425,6 @@ mod tests {
             [runtime.runtimes.reasoner]
             enabled = true
             criticality = "degraded_usable"
-            fallback = "stub"
 
             [runtime.runtimes.reasoner.endpoints]
             grpc = "http://runtime-reasoner"
@@ -489,7 +475,6 @@ mod tests {
             enabled: true,
             launch: None,
             criticality: None,
-            fallback: None,
             endpoints: BTreeMap::new(),
             bind: BTreeMap::new(),
             provides: vec!["talker".into(), "listener".into()],
@@ -500,7 +485,6 @@ mod tests {
             CapabilitySpec {
                 enabled: false,
                 criticality: Some(Criticality::Optional),
-                fallback: Some(FallbackPolicy::Limited),
             },
         );
         config
