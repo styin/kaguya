@@ -3,10 +3,9 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tonic::transport::{Channel, Server};
+use tonic::transport::Server;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -18,10 +17,7 @@ use kaguya_gateway::control::ControlServiceImpl;
 use kaguya_gateway::endpoint;
 use kaguya_gateway::history::History;
 use kaguya_gateway::input_stream;
-use kaguya_gateway::lifecycle::{
-    LifecycleSupervisor, ManagedConnectionHandle, Readiness, ReconnectPolicy, ShutdownReason,
-};
-use kaguya_gateway::listener::ListenerClient;
+use kaguya_gateway::lifecycle::{LifecycleSupervisor, Readiness, ShutdownReason};
 use kaguya_gateway::narration::NarrationFilter;
 use kaguya_gateway::output::OutputManager;
 use kaguya_gateway::persona::Persona;
@@ -134,43 +130,51 @@ async fn main() -> anyhow::Result<()> {
         info!("Listener disabled by runtime profile (text-only mode)");
     }
 
-    {
-        let talker_boot = talker.clone();
-        let listener_boot = listener_enabled.then(|| {
-            ListenerClient::new(
-                clients.listener_grpc_addr.clone(),
-                clients.listener_audio_addr.clone(),
-                task_spawner.clone(),
-                listener_connection.clone(),
-            )
-        });
-        let initial_persona = proto::PersonaConfig {
+    let shared_persona: Arc<RwLock<proto::PersonaConfig>> =
+        Arc::new(RwLock::new(proto::PersonaConfig {
             soul_md: persona.soul().await,
             identity_md: persona.identity().await,
             memory_md: last_memory_md.clone(),
-        };
-        let expected_voice_stack = config.runtime.runtime_expected("voice_stack");
-        let talker_endpoint = clients.talker_addr.clone();
-        let listener_endpoint = clients.listener_grpc_addr.clone();
-        let p1_tx = input_tx.p1.clone();
-        let p2_tx = input_tx.p2.clone();
-        let listener_audio_boot = listener_audio.clone();
-        let listener_connection_boot = listener_connection.clone();
+        }));
+    let expected_voice_stack = config.runtime.runtime_expected("voice_stack");
+    let shutdown_token = lifecycle.shutdown_token();
 
-        lifecycle.spawn("voice_stack_readiness", async move {
-            bootstrap_voice_stack(
-                talker_boot,
-                talker_endpoint,
-                listener_boot,
-                listener_endpoint,
-                listener_connection_boot,
-                p1_tx,
-                p2_tx,
-                listener_audio_boot,
-                initial_persona,
-                expected_voice_stack,
-            )
-            .await;
+    {
+        let talker_recovery = talker.clone();
+        let persona_recovery = shared_persona.clone();
+        let shutdown = shutdown_token.clone();
+        lifecycle.spawn("talker_recovery", async move {
+            talker_recovery
+                .run_recovery_loop(persona_recovery, expected_voice_stack, shutdown)
+                .await;
+        });
+    }
+
+    if listener_enabled {
+        let shutdown = shutdown_token.clone();
+        lifecycle.spawn("listener_recovery", {
+            let grpc_endpoint = clients.listener_grpc_addr.clone();
+            let audio_addr = clients.listener_audio_addr.clone();
+            let spawner = task_spawner.clone();
+            let conn = listener_connection.clone();
+            let audio = listener_audio.clone();
+            let p1 = input_tx.p1.clone();
+            let p2 = input_tx.p2.clone();
+            async move {
+                kaguya_gateway::listener::run_recovery_loop(
+                    grpc_endpoint,
+                    audio_addr,
+                    spawner,
+                    conn,
+                    Default::default(),
+                    audio,
+                    p1,
+                    p2,
+                    expected_voice_stack,
+                    shutdown,
+                )
+                .await;
+            }
         });
     }
 
@@ -213,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         let persona_w = persona.clone();
         let talker_w = talker.clone();
         let rag_w = rag.clone();
+        let shared_persona_w = shared_persona.clone();
         let soul_path = config.files.soul_path.clone();
         let identity_path = config.files.identity_path.clone();
 
@@ -256,13 +261,13 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                talker_w
-                    .update_persona(proto::PersonaConfig {
-                        soul_md: persona_w.soul().await,
-                        identity_md: persona_w.identity().await,
-                        memory_md: rag_w.export_memory_md().await,
-                    })
-                    .await;
+                let new_persona = proto::PersonaConfig {
+                    soul_md: persona_w.soul().await,
+                    identity_md: persona_w.identity().await,
+                    memory_md: rag_w.export_memory_md().await,
+                };
+                *shared_persona_w.write().await = new_persona.clone();
+                talker_w.update_persona(new_persona).await;
                 info!("persona pushed to Talker");
             }
         });
@@ -394,11 +399,13 @@ async fn main() -> anyhow::Result<()> {
                             let new_memory_md = rag.export_memory_md().await;
                             if new_memory_md != last_memory_md {
                                 last_memory_md = new_memory_md;
-                                talker.update_persona(proto::PersonaConfig {
+                                let new_persona = proto::PersonaConfig {
                                     soul_md: persona.soul().await,
                                     identity_md: persona.identity().await,
                                     memory_md: last_memory_md.clone(),
-                                }).await;
+                                };
+                                *shared_persona.write().await = new_persona.clone();
+                                talker.update_persona(new_persona).await;
                             }
 
                             let tasks = reasoner.active_tasks().await;
@@ -456,13 +463,9 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(t) = active_gen.take() { t.cancel(); }
                 output.unmute_audio();
                 current_dispatch_kind = Some(DispatchKind::UserIntent);
-                active_gen = dispatch_talker_if_ready(
-                    &talker,
-                    ctx,
-                    talker_output_tx.clone(),
-                    DispatchKind::UserIntent,
-                ).await;
-                if active_gen.is_none() {
+                if dispatch_talker_if_ready(&talker, DispatchKind::UserIntent) {
+                    active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                } else {
                     current_dispatch_kind = None;
                 }
             }
@@ -501,13 +504,9 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
                         current_dispatch_kind = Some(DispatchKind::ToolResult);
-                        active_gen = dispatch_talker_if_ready(
-                            &talker,
-                            ctx,
-                            talker_output_tx.clone(),
-                            DispatchKind::ToolResult,
-                        ).await;
-                        if active_gen.is_none() {
+                        if dispatch_talker_if_ready(&talker, DispatchKind::ToolResult) {
+                            active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                        } else {
                             current_dispatch_kind = None;
                         }
                     }
@@ -520,13 +519,9 @@ async fn main() -> anyhow::Result<()> {
                             ).await;
                             if active_gen.is_none() {
                                 current_dispatch_kind = Some(DispatchKind::ReasonerNarration);
-                                active_gen = dispatch_talker_if_ready(
-                                    &talker,
-                                    ctx,
-                                    talker_output_tx.clone(),
-                                    DispatchKind::ReasonerNarration,
-                                ).await;
-                                if active_gen.is_none() {
+                                if dispatch_talker_if_ready(&talker, DispatchKind::ReasonerNarration) {
+                                    active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                                } else {
                                     current_dispatch_kind = None;
                                 }
                             }
@@ -544,13 +539,9 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(t) = active_gen.take() { t.cancel(); }
                         output.unmute_audio();
                         current_dispatch_kind = Some(DispatchKind::ReasonerResult);
-                        active_gen = dispatch_talker_if_ready(
-                            &talker,
-                            ctx,
-                            talker_output_tx.clone(),
-                            DispatchKind::ReasonerResult,
-                        ).await;
-                        if active_gen.is_none() {
+                        if dispatch_talker_if_ready(&talker, DispatchKind::ReasonerResult) {
+                            active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                        } else {
                             current_dispatch_kind = None;
                         }
                     }
@@ -577,13 +568,9 @@ async fn main() -> anyhow::Result<()> {
                             duration, &history, &last_memory_md, &tools,
                         ).await;
                         current_dispatch_kind = Some(DispatchKind::Silence);
-                        active_gen = dispatch_talker_if_ready(
-                            &talker,
-                            ctx,
-                            talker_output_tx.clone(),
-                            DispatchKind::Silence,
-                        ).await;
-                        if active_gen.is_none() {
+                        if dispatch_talker_if_ready(&talker, DispatchKind::Silence) {
+                            active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
+                        } else {
                             current_dispatch_kind = None;
                         }
                     }
@@ -603,150 +590,17 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn dispatch_talker_if_ready(
+fn dispatch_talker_if_ready(
     talker: &TalkerClient,
-    ctx: proto::TalkerContext,
-    output_tx: mpsc::Sender<proto::TalkerOutput>,
     kind: DispatchKind,
-) -> Option<CancellationToken> {
+) -> bool {
     if !talker.is_ready() {
         warn!(
             readiness = ?talker.readiness(),
             dispatch_kind = ?kind,
             "Talker dispatch skipped because runtime is not ready"
         );
-        return None;
+        return false;
     }
-    Some(talker.dispatch(ctx, output_tx).await)
-}
-
-async fn bootstrap_voice_stack(
-    talker: TalkerClient,
-    talker_endpoint: String,
-    listener: Option<ListenerClient>,
-    listener_endpoint: String,
-    listener_connection: ManagedConnectionHandle,
-    p1_tx: mpsc::Sender<InputEvent>,
-    p2_tx: mpsc::Sender<InputEvent>,
-    listener_audio: ListenerAudioSink,
-    initial_persona: proto::PersonaConfig,
-    expected_voice_stack: bool,
-) {
-    let talker_task = async {
-        wait_for_grpc_endpoint(
-            "talker",
-            &talker_endpoint,
-            expected_voice_stack,
-            |readiness| talker.set_readiness(readiness),
-        )
-        .await;
-
-        loop {
-            if talker.try_connect().await {
-                talker.update_persona(initial_persona).await;
-                return;
-            }
-            if expected_voice_stack {
-                talker.set_readiness(Readiness::Starting);
-            }
-            sleep_probe_interval().await;
-        }
-    };
-
-    let listener_task = async {
-        let Some(listener) = listener else {
-            listener_connection.set_readiness(Readiness::Stopped);
-            listener_audio.clear().await;
-            return;
-        };
-
-        wait_for_grpc_endpoint(
-            "listener",
-            &listener_endpoint,
-            expected_voice_stack,
-            |readiness| listener_connection.set_readiness(readiness),
-        )
-        .await;
-
-        loop {
-            match listener.start(p1_tx.clone(), p2_tx.clone()).await {
-                Ok(audio_tx) => {
-                    listener_audio.install(audio_tx).await;
-                    info!("Listener connected (gRPC + audio socket)");
-                    return;
-                }
-                Err(e) => {
-                    warn!("Listener startup failed after endpoint readiness: {e}");
-                    if expected_voice_stack {
-                        listener_connection.set_readiness(Readiness::Starting);
-                    }
-                    sleep_probe_interval().await;
-                }
-            }
-        }
-    };
-
-    tokio::join!(talker_task, listener_task);
-}
-
-async fn wait_for_grpc_endpoint<F>(
-    name: &str,
-    endpoint: &str,
-    expected_runtime: bool,
-    mut set_readiness: F,
-) where
-    F: FnMut(Readiness),
-{
-    let mut warned_unmanaged = false;
-    loop {
-        if expected_runtime {
-            set_readiness(Readiness::Starting);
-        }
-        match probe_grpc_endpoint(endpoint).await {
-            Ok(()) => {
-                set_readiness(Readiness::Ready);
-                info!(runtime = name, endpoint, "runtime endpoint is ready");
-                return;
-            }
-            Err(e) => {
-                if expected_runtime {
-                    debug!(
-                        runtime = name,
-                        endpoint, "runtime endpoint still starting: {e}"
-                    );
-                } else {
-                    set_readiness(Readiness::Degraded);
-                    if !warned_unmanaged {
-                        warned_unmanaged = true;
-                        warn!(
-                            runtime = name,
-                            endpoint, "unmanaged runtime endpoint unavailable: {e}"
-                        );
-                    }
-                }
-            }
-        }
-        sleep_probe_interval().await;
-    }
-}
-
-async fn probe_grpc_endpoint(endpoint: &str) -> anyhow::Result<()> {
-    let timeout = ReconnectPolicy::default().attempt_timeout();
-    tokio::time::timeout(timeout, async {
-        Channel::from_shared(endpoint.to_string())?
-            .connect()
-            .await?;
-        anyhow::Ok(())
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("probe timed out after {}ms", timeout.as_millis()))?
-}
-
-async fn sleep_probe_interval() {
-    let delay = ReconnectPolicy::default()
-        .retry_delays()
-        .last()
-        .copied()
-        .unwrap_or(Duration::from_secs(1));
-    tokio::time::sleep(delay).await;
+    true
 }

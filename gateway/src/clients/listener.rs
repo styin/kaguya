@@ -6,6 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
@@ -256,12 +257,93 @@ impl ListenerClient {
     }
 }
 
+pub async fn run_recovery_loop(
+    grpc_endpoint: String,
+    audio_addr: String,
+    task_spawner: TaskSpawner,
+    connection: ManagedConnectionHandle,
+    reconnect: ReconnectPolicy,
+    listener_audio: crate::audio_sink::ListenerAudioSink,
+    p1_tx: mpsc::Sender<InputEvent>,
+    p2_tx: mpsc::Sender<InputEvent>,
+    expected_runtime: bool,
+    shutdown: CancellationToken,
+) {
+    use crate::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
+
+    if !expected_runtime && p1_tx.is_closed() {
+        connection.set_readiness(Readiness::Stopped);
+        listener_audio.clear().await;
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            _ = wait_for_grpc_endpoint(
+                "listener",
+                &grpc_endpoint,
+                expected_runtime,
+                |readiness| connection.set_readiness(readiness),
+            ) => {}
+        }
+
+        let listener = ListenerClient::with_reconnect_policy(
+            grpc_endpoint.clone(),
+            audio_addr.clone(),
+            task_spawner.clone(),
+            connection.clone(),
+            reconnect,
+        );
+        match listener.start(p1_tx.clone(), p2_tx.clone()).await {
+            Ok(audio_tx) => {
+                listener_audio.install(audio_tx).await;
+                info!("Listener connected (gRPC + audio socket)");
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => return,
+                        _ = sleep_probe_interval() => {}
+                    }
+                    if connection.readiness() == Readiness::Degraded {
+                        info!("Listener connection lost, reconnecting");
+                        listener_audio.clear().await;
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Listener startup failed after endpoint readiness: {e}");
+                if expected_runtime {
+                    connection.set_readiness(Readiness::Starting);
+                }
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return,
+                    _ = sleep_probe_interval() => {}
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
+
+    fn fast_policy() -> ReconnectPolicy {
+        ReconnectPolicy::bounded(
+            1,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(100),
+        )
+    }
 
     #[tokio::test]
     async fn start_returns_error_and_degrades_readiness_after_policy_exhaustion() {
@@ -272,12 +354,7 @@ mod tests {
             "127.0.0.1:0".into(),
             lifecycle.spawner(),
             connection.clone(),
-            ReconnectPolicy::bounded(
-                1,
-                Duration::from_millis(1),
-                Duration::from_millis(1),
-                Duration::from_millis(1),
-            ),
+            fast_policy(),
         );
         let (p1_tx, _p1_rx) = mpsc::channel(1);
         let (p2_tx, _p2_rx) = mpsc::channel(1);
@@ -286,5 +363,166 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(connection.readiness(), Readiness::Degraded);
+    }
+
+    // BUG-SCOPING: Without a recovery loop, readiness stays Degraded
+    // permanently after start() fails. The bare ListenerClient has no
+    // built-in reconnect — run_recovery_loop() wraps it with one.
+    #[tokio::test]
+    async fn degraded_readiness_has_no_automatic_recovery() {
+        let lifecycle = LifecycleSupervisor::new();
+        let connection = lifecycle.register_connection("listener");
+        let listener = ListenerClient::with_reconnect_policy(
+            "http://127.0.0.1:1".into(),
+            "127.0.0.1:1".into(),
+            lifecycle.spawner(),
+            connection.clone(),
+            fast_policy(),
+        );
+        let (p1_tx, _p1_rx) = mpsc::channel(1);
+        let (p2_tx, _p2_rx) = mpsc::channel(1);
+
+        let _ = listener.start(p1_tx, p2_tx).await;
+        assert_eq!(connection.readiness(), Readiness::Degraded);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            connection.readiness(),
+            Readiness::Degraded,
+            "readiness should stay Degraded: no recovery loop exists"
+        );
+    }
+
+    // ── Recovery loop integration tests ──
+
+    use crate::audio_sink::ListenerAudioSink;
+    use crate::proto::listener_service_server::{
+        ListenerService as ListenerServiceTrait, ListenerServiceServer,
+    };
+    use tokio_stream::wrappers::TcpListenerStream;
+
+    struct StubListener;
+
+    #[tonic::async_trait]
+    impl ListenerServiceTrait for StubListener {
+        type StreamStream = ReceiverStream<Result<proto::ListenerOutput, tonic::Status>>;
+
+        async fn stream(
+            &self,
+            _req: tonic::Request<tonic::Streaming<proto::ListenerInput>>,
+        ) -> Result<tonic::Response<Self::StreamStream>, tonic::Status> {
+            let (tx, rx) = mpsc::channel(1);
+            // Hold stream sender alive so the ASR receiver task doesn't
+            // exit immediately. Drops when the server shuts down.
+            tokio::spawn(async move {
+                std::future::pending::<()>().await;
+                drop(tx);
+            });
+            Ok(tonic::Response::new(ReceiverStream::new(rx)))
+        }
+    }
+
+    async fn start_stub_listener(listener: tokio::net::TcpListener) -> CancellationToken {
+        let shutdown = CancellationToken::new();
+        let token = shutdown.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ListenerServiceServer::new(StubListener))
+                .serve_with_incoming_shutdown(
+                    TcpListenerStream::new(listener),
+                    token.cancelled(),
+                )
+                .await
+                .unwrap();
+        });
+        tokio::task::yield_now().await;
+        shutdown
+    }
+
+    /// Accept TCP connections and hold them open (audio socket stub).
+    async fn start_audio_acceptor(listener: tokio::net::TcpListener) -> CancellationToken {
+        let shutdown = CancellationToken::new();
+        let token = shutdown.clone();
+        tokio::spawn(async move {
+            let mut conns: Vec<tokio::net::TcpStream> = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => return,
+                    result = listener.accept() => {
+                        match result {
+                            Ok((stream, _)) => conns.push(stream),
+                            Err(_) => return,
+                        }
+                    }
+                }
+            }
+        });
+        shutdown
+    }
+
+    /// Poll until readiness reaches `target`, or panic after ~10s.
+    async fn poll_readiness(conn: &ManagedConnectionHandle, target: Readiness) {
+        for _ in 0..100 {
+            if conn.readiness() == target {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!(
+            "readiness did not reach {:?} (stuck at {:?})",
+            target,
+            conn.readiness()
+        );
+    }
+
+    /// Recovery loop: probe → connect gRPC + audio → Ready.
+    /// Set Degraded → recovery loop reconnects → Ready (twice).
+    ///
+    /// Keeps stub servers alive for the whole test (no port rebinding).
+    /// The recovery loop creates a fresh ListenerClient on each cycle,
+    /// reconnecting to the same running server.
+    #[tokio::test]
+    async fn recovery_loop_reconnects_after_stream_loss() {
+        // Start stub servers (kept alive for the whole test).
+        let grpc_tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let grpc_addr = grpc_tcp.local_addr().unwrap();
+        let audio_tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let audio_addr = audio_tcp.local_addr().unwrap();
+
+        let _grpc = start_stub_listener(grpc_tcp).await;
+        let _audio = start_audio_acceptor(audio_tcp).await;
+
+        let lifecycle = LifecycleSupervisor::new();
+        let connection = lifecycle.register_connection("listener");
+        let audio_sink = ListenerAudioSink::new();
+        let (p1_tx, _p1_rx) = mpsc::channel(16);
+        let (p2_tx, _p2_rx) = mpsc::channel(16);
+        let shutdown = CancellationToken::new();
+
+        tokio::spawn(run_recovery_loop(
+            format!("http://{grpc_addr}"),
+            audio_addr.to_string(),
+            lifecycle.spawner(),
+            connection.clone(),
+            fast_policy(),
+            audio_sink.clone(),
+            p1_tx,
+            p2_tx,
+            true,
+            shutdown.clone(),
+        ));
+
+        // Phase 1: initial connect → Ready.
+        poll_readiness(&connection, Readiness::Ready).await;
+
+        // Phase 2: simulate ASR stream loss → recovery loop reconnects.
+        connection.set_readiness(Readiness::Degraded);
+        poll_readiness(&connection, Readiness::Ready).await;
+
+        // Phase 3: second recovery cycle (proves recovery is repeatable).
+        connection.set_readiness(Readiness::Degraded);
+        poll_readiness(&connection, Readiness::Ready).await;
+
+        shutdown.cancel();
     }
 }
