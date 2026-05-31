@@ -41,6 +41,8 @@ struct RuntimeProcessState {
     last_exit_code: Option<i32>,
     external_status: Option<ProcessStatus>,
     last_health_check: Option<Instant>,
+    restart_timestamps: Vec<Instant>,
+    restart_exhausted: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +74,7 @@ pub struct ProcessInfo {
     pub exit_code: Option<i32>,
     pub restart_policy: RestartPolicy,
     pub restart_count: u64,
+    pub restart_exhausted: bool,
     pub blocked_by: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<RuntimeChildInfo>,
@@ -140,6 +143,8 @@ impl SupervisorApp {
                         last_exit_code: None,
                         external_status: None,
                         last_health_check: None,
+                        restart_timestamps: Vec::new(),
+                        restart_exhausted: false,
                     },
                 )
             })
@@ -243,6 +248,8 @@ impl SupervisorApp {
         state.manual_stopped = false;
         state.next_restart_at = None;
         state.last_exit_code = None;
+        state.restart_exhausted = false;
+        state.restart_timestamps.clear();
         self.logs
             .push(name, "stdout", format!("[supervisor] started PID {pid:?}"));
         Ok(())
@@ -320,7 +327,10 @@ impl SupervisorApp {
             }
 
             state.last_exit_code = snapshot.exit_code;
-            if state.manual_stopped || !should_restart(state.spec.restart, &snapshot) {
+            if state.manual_stopped
+                || state.restart_exhausted
+                || !should_restart(state.spec.restart, &snapshot)
+            {
                 continue;
             }
 
@@ -329,6 +339,25 @@ impl SupervisorApp {
                 .get_or_insert_with(|| now + restart_delay(snapshot.restart_count));
             if now < *next_restart_at {
                 continue;
+            }
+
+            if let Some(max_restarts) = state.spec.max_restarts {
+                let window = Duration::from_secs(state.spec.restart_window_secs.unwrap_or(300));
+                state.restart_timestamps.retain(|t| now.duration_since(*t) < window);
+                state.restart_timestamps.push(now);
+                if state.restart_timestamps.len() as u32 > max_restarts {
+                    state.restart_exhausted = true;
+                    self.logs.push(
+                        name,
+                        "stderr",
+                        format!(
+                            "[supervisor] restart exhaustion: {} restarts in {}s, suppressing further restarts",
+                            state.restart_timestamps.len(),
+                            window.as_secs(),
+                        ),
+                    );
+                    continue;
+                }
             }
 
             process.apply_restart_policy();
@@ -509,6 +538,10 @@ fn process_info(
         status = external_status.unwrap_or(ProcessStatus::Stopped);
     }
 
+    if state.restart_exhausted && status != ProcessStatus::Running {
+        status = ProcessStatus::Errored;
+    }
+
     ProcessInfo {
         name: name.to_string(),
         label: state.spec.label(name),
@@ -522,6 +555,7 @@ fn process_info(
         exit_code,
         restart_policy: state.spec.restart,
         restart_count,
+        restart_exhausted: state.restart_exhausted,
         blocked_by: blocked_dependencies(&state.spec, statuses),
         children: capability_children(&state.spec, gateway, status),
     }
@@ -694,6 +728,8 @@ mod tests {
             endpoints: BTreeMap::new(),
             health_url: None,
             poll_interval_ms: None,
+            max_restarts: None,
+            restart_window_secs: None,
         }
     }
 
@@ -884,5 +920,70 @@ mod tests {
         assert!(statuses
             .iter()
             .all(|process| process.status == ProcessStatus::Stopped));
+    }
+
+    #[tokio::test]
+    async fn restart_exhaustion_enters_errored_state() {
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command exit 1"
+        } else {
+            "exit 1"
+        };
+        let mut spec = test_spec(command.to_string(), RestartPolicy::KeepAlive);
+        spec.max_restarts = Some(1);
+        spec.restart_window_secs = Some(300);
+        let app = test_app(spec);
+
+        app.start_process("test")
+            .await
+            .expect("process should start");
+
+        for _ in 0..40 {
+            app.enforce_restart_policy().await;
+            let status = app.process_status().await;
+            if status[0].restart_exhausted {
+                assert_eq!(status[0].status, ProcessStatus::Errored);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        panic!("process should reach restart exhaustion");
+    }
+
+    #[tokio::test]
+    async fn manual_start_resets_restart_exhaustion() {
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command exit 1"
+        } else {
+            "exit 1"
+        };
+        let mut spec = test_spec(command.to_string(), RestartPolicy::KeepAlive);
+        spec.max_restarts = Some(1);
+        spec.restart_window_secs = Some(300);
+        let app = test_app(spec);
+
+        app.start_process("test")
+            .await
+            .expect("process should start");
+
+        for _ in 0..40 {
+            app.enforce_restart_policy().await;
+            if app.process_status().await[0].restart_exhausted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert!(
+            app.process_status().await[0].restart_exhausted,
+            "should be exhausted before reset"
+        );
+
+        app.start_process("test")
+            .await
+            .expect("manual start should succeed");
+        let status = app.process_status().await;
+        assert!(!status[0].restart_exhausted);
     }
 }

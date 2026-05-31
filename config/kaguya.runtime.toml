@@ -7,6 +7,8 @@ label = "Gateway"
 launch = "eager"
 criticality = "required"
 restart = "on_failure"
+max_restarts = 5
+restart_window_secs = 300
 sandbox = { provider = "none", required = false }
 command = "source $HOME/.cargo/env && cargo run --features dev-console"
 command_win32 = "cargo run --features dev-console"
@@ -26,6 +28,8 @@ label = "Voice Stack"
 launch = "eager"
 criticality = "required"
 restart = "keep_alive"
+max_restarts = 5
+restart_window_secs = 300
 sandbox = { provider = "none", required = false }
 command = ".venv/bin/python main.py"
 command_win32 = ".venv\\Scripts\\python.exe main.py"

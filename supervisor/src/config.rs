@@ -60,6 +60,10 @@ pub struct ProcessSpec {
     pub endpoints: BTreeMap<String, String>,
     pub health_url: Option<String>,
     pub poll_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default)]
+    pub restart_window_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
