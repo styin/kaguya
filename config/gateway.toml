@@ -38,3 +38,21 @@ max_storage_chars = 4096
 # prompt cost when many retrievals fire (REF-010).
 # max_chars_per_result = 400
 # max_chars_per_md_entry = 300
+
+[sandbox]
+enabled = true
+# native | docker | bubblewrap | job_object
+backend = "native"
+# Docker only: single_user (lazy, no warm pool) | hosted (warm pool)
+mode = "single_user"
+default_timeout_secs = 30
+# LLM-facing cap on captured output (chars). Keep small — it goes into context.
+max_output_bytes = 16384
+allowed_languages = ["python", "node", "bash"]
+
+# ── Docker backend ──
+image = "kaguya-sandbox:latest"
+pool_size = 0          # hosted mode: how many containers to pre-warm
+memory_limit_mb = 512
+pids_limit = 128
+network = false        # true to allow outbound network from the sandbox

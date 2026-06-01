@@ -394,3 +394,29 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 - `reqwest` features documentation: https://docs.rs/reqwest/0.12/reqwest/#optional-features
 - `openssl-sys` build requirements: https://docs.rs/openssl/latest/openssl/#building
 - `rustls` vs `native-tls` trade-offs: https://github.com/rustls/rustls#project-goals (modern-only TLS, no OS keychain integration by default)
+
+## REF-012 — Sandbox Backend & Resource Defaults (Gateway, tools/sandbox)
+
+**Decision:** Pluggable `SandboxBackend` trait. Default `native` (zero-dep,
+sub-ms, no isolation) for self-hosting; `docker` (mode: single_user lazy /
+hosted warm-pool) for isolation; `bubblewrap` (Linux) and `job_object`
+(Windows, feature-gated) as lighter daemon-free isolators.
+
+**Defaults (all configurable in `[sandbox]`):**
+- `default_timeout_secs = 30` — generous for a tool call; in-container enforced
+  via coreutils `timeout` (Docker) or tokio timeout + tree-kill (native).
+- `max_output_bytes = 16384` — LLM-facing cap; captured output feeds the next
+  prompt, so it must stay far below the 8B context budget (cf. REF-010 on
+  output-time truncation; REF-006 on voice brevity).
+- `memory_limit_mb = 512`, `pids_limit = 128` — Docker cgroup guards against
+  OOM-the-host and fork bombs. JobObject mirrors these on Windows.
+- `network = false` — `--network=none` (Docker) / `--unshare-all` (bwrap) by
+  default; opt-in network for code that needs it.
+- `mode`: single_user ⇒ lazy create, gateway-lifetime container; hosted ⇒
+  warm pool of `pool_size`. Single-user avoids pre-warming idle containers
+  that a one-conversation gateway would never use.
+
+**Rationale:** Sandbox is dispatched as an ordinary tool (`sandbox_exec`) on
+the existing P3 ToolResult path — no new proto/priority. Backend choice trades
+isolation vs. setup cost; the default path is the simplest (native), the
+secure path is opt-in (docker), per self-hosting ergonomics.

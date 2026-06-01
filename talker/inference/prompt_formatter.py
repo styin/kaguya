@@ -31,12 +31,24 @@ for execution while you continue speaking):
 
 Delegation (hands off a task to a Reasoner agent for deep work — you may \
 continue speaking while the Reasoner works in the background):
-  [DELEGATE:description of the task]"""
+  [DELEGATE:description of the task]
+
+Tag formatting rules — MUST follow exactly:
+  - Write each tag on a SINGLE line. Never put a literal line break inside a tag.
+  - Tool arguments are one JSON object. Every string value MUST be valid JSON:
+    escape newlines as \\n, tabs as \\t, and double quotes as \\".
+  - This matters most for [TOOL:sandbox_exec(...)], whose `code` argument is \
+source code. Send the whole program as ONE escaped JSON string on one line — \
+e.g. "code": "import sys\\nprint(sys.version)" — NOT with real line breaks.
+  - sandbox_exec runs code in an isolated sandbox and returns stdout, stderr, \
+and exit_code. Files you write persist for the rest of the conversation, so \
+later sandbox calls can read them back. Languages: python, node, bash."""
 
 _TOOL_EXAMPLES = """\
 Examples:
   User asks about a URL → "Let me check that. [TOOL:web_fetch({"url": "https://..."})]"
   User asks to save something → [TOOL:write_file({"path": "/notes.md", "content": "..."})]
+  User asks to run or test code → "Sure, running that now. [TOOL:sandbox_exec({"language": "python", "code": "nums = [3,1,2]\\nprint(sorted(nums))"})]"
   User asks a complex multi-step task → "I'll look into that. [DELEGATE:research and summarize X]"\
 """
 

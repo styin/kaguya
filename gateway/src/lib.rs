@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod rag;
+pub mod sandbox;
 pub mod tools;
 
 pub mod clients {

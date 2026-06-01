@@ -6,6 +6,15 @@ stateless, deterministic, no LLM calls.
 
 Inspired by Project Airi's "soul container" pattern. Operates on complete
 sentences after boundary detection, never on individual tokens.
+
+[CHANGE] TOOL extraction is no longer a single non-greedy regex. Tool args are
+JSON objects that, for sandbox_exec, contain arbitrary source code — code
+routinely contains ')', ']', '}', and even ')]' inside string literals, which
+a non-greedy regex truncates. The new scanner parses the tool name, then the
+JSON object argument by brace-depth tracking with JSON-string/escape awareness,
+so brackets/quotes inside code are ignored. TOOL is also extracted FIRST so
+tag-like substrings inside code (e.g. "[EMOTION:joy]" printed by the program)
+are protected from the emotion/unknown-tag strippers.
 """
 
 import logging
@@ -24,10 +33,6 @@ logger = logging.getLogger(__name__)
 # [EMOTION:value]
 _EMOTION_RE = re.compile(r"\[EMOTION:(\w+)\]")
 
-# [TOOL:name({...})] — captures tool name and raw args string.
-# No re.DOTALL: tool args are single-line JSON.
-_TOOL_RE = re.compile(r"\[TOOL:(\w+)\((.+?)\)\]")
-
 # [DELEGATE:description]
 _DELEGATE_RE = re.compile(r"\[DELEGATE:(.+?)\]")
 
@@ -36,6 +41,10 @@ _UNKNOWN_TAG_RE = re.compile(r"\[[A-Z_]+:[^\]]*\]")
 
 # Collapse runs of whitespace left after tag removal.
 _MULTI_SPACE_RE = re.compile(r"\s{2,}")
+
+# [TOOL: ... ] is parsed by a JSON-aware scanner, not a regex. See
+# _extract_tool_requests below.
+_TOOL_MARKER = "[TOOL:"
 
 # ──────────────────────────────────────────
 # Emotion normalization map
@@ -140,6 +149,130 @@ class SoulContainerResult:
 
 
 # ──────────────────────────────────────────
+# Tool tag extraction (JSON-aware, bracket-balanced)
+# ──────────────────────────────────────────
+
+
+def _extract_tool_requests(
+    text: str,
+) -> tuple[list[kaguya_pb2.ToolRequest], str]:
+    """Extract all `[TOOL:name({...})]` tags, returning (requests, cleaned_text).
+
+    A regex cannot reliably parse tool args that are themselves source code:
+    code contains ')', ']', '}' and ')]' inside string literals, which a
+    non-greedy regex truncates. This scanner walks the text, and for each
+    `[TOOL:` marker tries to parse: name → '(' → JSON object (brace-balanced,
+    string/escape aware) → optional whitespace → ')' → ']'. Valid tags are
+    removed from the text; malformed `[TOOL:` markers are left as literal text
+    (and later cleaned by _UNKNOWN_TAG_RE if they form a closeable bracket).
+    """
+    results: list[kaguya_pb2.ToolRequest] = []
+    out: list[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        start = text.find(_TOOL_MARKER, i)
+        if start == -1:
+            out.append(text[i:])
+            break
+
+        out.append(text[i:start])  # text before the tag
+
+        parsed = _try_parse_tool(text, start)
+        if parsed is None:
+            # Not well-formed — keep the marker literal, resume just past it.
+            out.append(_TOOL_MARKER)
+            i = start + len(_TOOL_MARKER)
+            continue
+
+        name, args_json, end = parsed
+        results.append(
+            kaguya_pb2.ToolRequest(
+                request_id=str(uuid.uuid4()),
+                tool_name=name,
+                args_json=args_json,
+            )
+        )
+        i = end  # resume after the full tag
+
+    return results, "".join(out)
+
+
+def _try_parse_tool(text: str, start: int) -> tuple[str, str, int] | None:
+    """Parse one tool tag beginning at `start` (index of '[TOOL:').
+
+    Returns (tool_name, args_json, end_index_exclusive) or None if malformed.
+    """
+    n = len(text)
+    j = start + len(_TOOL_MARKER)
+
+    # Tool name: [A-Za-z0-9_]+
+    name_start = j
+    while j < n and (text[j].isalnum() or text[j] == "_"):
+        j += 1
+    name = text[name_start:j]
+    if not name:
+        return None
+
+    # Opening paren of the call.
+    if j >= n or text[j] != "(":
+        return None
+    j += 1
+
+    # Skip whitespace before the JSON object.
+    while j < n and text[j].isspace():
+        j += 1
+
+    # Arguments must be a JSON object.
+    if j >= n or text[j] != "{":
+        return None
+    obj_start = j
+
+    depth = 0
+    in_str = False
+    escaped = False
+    closed_at = -1
+    while j < n:
+        c = text[j]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    closed_at = j
+                    break
+        j += 1
+
+    if closed_at == -1:
+        return None  # unterminated object (e.g. tag split across sentences)
+    args_json = text[obj_start : closed_at + 1]
+    j = closed_at + 1
+
+    # Skip whitespace, then require ')' then ']'.
+    while j < n and text[j].isspace():
+        j += 1
+    if j >= n or text[j] != ")":
+        return None
+    j += 1
+    if j >= n or text[j] != "]":
+        return None
+    j += 1
+
+    return name, args_json, j
+
+
+# ──────────────────────────────────────────
 # Core processing function
 # ──────────────────────────────────────────
 
@@ -148,6 +281,10 @@ def process(sentence: str, identity: IdentityConfig) -> SoulContainerResult:
     """Process one complete sentence through the soul container.
 
     Pure function: stateless, deterministic, no I/O.
+
+    Order matters: TOOL tags are extracted FIRST (with JSON-aware scanning) so
+    that bracketed/tag-like substrings inside code are removed with the tool
+    tag and never seen by the emotion / delegate / hallucination strippers.
 
     Args:
         sentence: Complete sentence from sentence_detector.
@@ -165,7 +302,11 @@ def process(sentence: str, identity: IdentityConfig) -> SoulContainerResult:
 
     text = sentence
 
-    # 1. Extract emotion tags and normalize.
+    # 1. Extract tool requests FIRST (protects code content from later regexes).
+    tool_requests, text = _extract_tool_requests(text)
+    result.tool_requests.extend(tool_requests)
+
+    # 2. Extract emotion tags and normalize.
     for match in _EMOTION_RE.finditer(text):
         raw = match.group(1).lower()
         normalized = _EMOTION_ALIASES.get(raw, raw)
@@ -174,17 +315,6 @@ def process(sentence: str, identity: IdentityConfig) -> SoulContainerResult:
         else:
             logger.debug("Unknown emotion tag dropped: %s", raw)
     text = _EMOTION_RE.sub("", text)
-
-    # 2. Extract tool requests.
-    for match in _TOOL_RE.finditer(text):
-        result.tool_requests.append(
-            kaguya_pb2.ToolRequest(
-                request_id=str(uuid.uuid4()),
-                tool_name=match.group(1),
-                args_json=match.group(2).strip(),
-            )
-        )
-    text = _TOOL_RE.sub("", text)
 
     # 3. Extract delegate requests.
     for match in _DELEGATE_RE.finditer(text):

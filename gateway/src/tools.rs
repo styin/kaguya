@@ -4,10 +4,12 @@
 //! Results sent back to Talker via P3 channel.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::proto;
+use crate::sandbox::SandboxManager;
 use crate::types::InputEvent;
 
 struct ToolMeta {
@@ -19,36 +21,45 @@ struct ToolMeta {
 pub struct ToolRegistry {
     tools: Vec<ToolMeta>,
     workspace_root: PathBuf,
+    sandbox: Option<Arc<SandboxManager>>,
 }
 
 impl ToolRegistry {
-    pub fn new(workspace_root: PathBuf) -> Self {
+    pub fn new(workspace_root: PathBuf, sandbox: Option<Arc<SandboxManager>>) -> Self {
+        let mut tools = vec![
+            ToolMeta {
+                name: "list_files".into(),
+                description: "List files in directory".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+            },
+            ToolMeta {
+                name: "read_file".into(),
+                description: "Read file contents".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+            },
+            ToolMeta {
+                name: "write_file".into(),
+                description: "Write to file".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}"#.into(),
+            },
+            // run_command stays disabled; sandbox_exec is the safe replacement.
+        ];
+
+        // Advertise sandbox_exec only when a sandbox is enabled.
+        if let Some(sb) = &sandbox {
+            if let Some(def) = sb.tool_definition() {
+                tools.push(ToolMeta {
+                    name: def.name,
+                    description: def.description,
+                    args_schema: def.args_schema,
+                });
+            }
+        }
+
         Self {
-            tools: vec![
-                ToolMeta {
-                    name: "list_files".into(),
-                    description: "List files in directory".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
-                },
-                ToolMeta {
-                    name: "read_file".into(),
-                    description: "Read file contents".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
-                },
-                ToolMeta {
-                    name: "write_file".into(),
-                    description: "Write to file".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}"#.into(),
-                },
-                // DISABLED: run_command requires allowlist-based sandboxing before re-enabling.
-                // See GitHub issue for scoped implementation plan.
-                // ToolMeta {
-                //     name: "run_command".into(),
-                //     description: "Run shell command in sandbox".into(),
-                //     args_schema: r#"{"type":"object","properties":{"cmd":{"type":"string"}}}"#.into(),
-                // },
-            ],
+            tools,
             workspace_root,
+            sandbox,
         }
     }
 
@@ -67,7 +78,6 @@ impl ToolRegistry {
         self.tools.iter().any(|t| t.name == name)
     }
 
-    /// Comma-separated list of registered tool names, for error messages.
     pub fn name_list(&self) -> String {
         self.tools
             .iter()
@@ -78,11 +88,46 @@ impl ToolRegistry {
 
     pub fn dispatch(
         &self,
+        conversation_id: String,
         request_id: String,
         tool_name: String,
         args_json: String,
         p3_tx: mpsc::Sender<InputEvent>,
     ) {
+        // ── Sandbox route ──
+        if tool_name == "sandbox_exec" {
+            match self.sandbox.clone() {
+                Some(sandbox) => {
+                    info!(id = %request_id, "dispatching sandbox_exec");
+                    tokio::spawn(async move {
+                        let content = sandbox.exec_from_json(&conversation_id, &args_json).await;
+                        let _ = p3_tx
+                            .send(InputEvent::ToolResult {
+                                request_id,
+                                tool_name,
+                                content,
+                            })
+                            .await;
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        let content =
+                            serde_json::json!({ "error": "sandbox disabled" }).to_string();
+                        let _ = p3_tx
+                            .send(InputEvent::ToolResult {
+                                request_id,
+                                tool_name,
+                                content,
+                            })
+                            .await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // ── Filesystem tools (unchanged) ──
         info!(tool = %tool_name, id = %request_id, "dispatching tool");
         let root = self.workspace_root.clone();
 
@@ -91,8 +136,6 @@ impl ToolRegistry {
                 "list_files" => exec_list_files(&root, &args_json).await,
                 "read_file" => exec_read_file(&root, &args_json).await,
                 "write_file" => exec_write_file(&root, &args_json).await,
-                // DISABLED: see tool registration above
-                // "run_command"  => exec_run_command(&root, &args_json).await,
                 other => Err(format!("unknown tool: {other}")),
             };
 
@@ -190,41 +233,4 @@ async fn exec_write_file(root: &Path, args: &str) -> Result<String, String> {
         serde_json::json!({ "written": path.display().to_string(), "bytes": content.len() })
             .to_string(),
     )
-}
-
-#[allow(dead_code)] // Disabled in registry pending allowlist sandbox; kept for re-enable.
-async fn exec_run_command(root: &Path, args: &str) -> Result<String, String> {
-    let cmd = parse_arg(args, "cmd")?;
-    let blocked = [
-        "rm -rf /",
-        "format c:",
-        "mkfs",
-        "dd if=",
-        ":(){",
-        "shutdown",
-        "reboot",
-    ];
-    for b in &blocked {
-        if cmd.contains(b) {
-            return Err(format!("blocked: {b}"));
-        }
-    }
-    let output = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-        .args(if cfg!(windows) {
-            vec!["/C", &cmd]
-        } else {
-            vec!["-c", &cmd]
-        })
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(serde_json::json!({
-        "exit_code": output.status.code().unwrap_or(-1),
-        "stdout": &stdout[..stdout.len().min(4096)],
-        "stderr": &stderr[..stderr.len().min(2048)],
-    })
-    .to_string())
 }

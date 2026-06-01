@@ -27,6 +27,7 @@ use kaguya_gateway::silence::SilenceTimers;
 use kaguya_gateway::talker::TalkerClient;
 use kaguya_gateway::tools::ToolRegistry;
 use kaguya_gateway::types::*;
+use kaguya_gateway::sandbox::SandboxManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -59,7 +60,24 @@ async fn main() -> anyhow::Result<()> {
         &config.rag,
         config.files.workspace_root.clone(),
     )?);
-    let tools = ToolRegistry::new(config.files.workspace_root.clone());
+    //let tools = ToolRegistry::new(config.files.workspace_root.clone());
+    // ── Sandbox (pluggable backend) ──
+    let sandbox = match SandboxManager::from_config(
+        &config.sandbox,
+        config.files.workspace_root.clone(),
+    ) {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            warn!("sandbox init failed ({e}); sandbox disabled");
+            Arc::new(SandboxManager::disabled())
+        }
+    };
+    sandbox.prewarm().await; // hosted Docker: build the warm pool
+
+    let tools = ToolRegistry::new(
+        config.files.workspace_root.clone(),
+        Some(Arc::clone(&sandbox)),
+    );
     let reasoner = ReasonerManager::new(config.clients.reasoner_addr.clone());
     let silence = SilenceTimers::new(
         config.silence.soft_prompt_secs,
@@ -302,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
                             }).to_string();
                             history.append_tool_result(&tr.tool_name, &err).await;
                         } else {
-                            tools.dispatch(tr.request_id, tr.tool_name, tr.args_json, input_tx.p3.clone());
+                            tools.dispatch(conversation_id.clone(), tr.request_id, tr.tool_name, tr.args_json, input_tx.p3.clone());
                         }
                     }
                     Some(proto::talker_output::Payload::DelegateRequest(dr)) => {
@@ -500,7 +518,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-
+    // Sandbox teardown: destroy this conversation's container/scratch, then
+    // any warm-pool containers (hosted Docker).
+    sandbox.cleanup(&conversation_id).await;
+    sandbox.shutdown().await;
     info!("Kaguya Gateway shutdown");
     Ok(())
 }
