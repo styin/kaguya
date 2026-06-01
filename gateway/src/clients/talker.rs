@@ -1,5 +1,13 @@
-//! Talker gRPC Client — bidi Converse stream.
-//! Barge-in is inline on the same stream (BargeInSignal → BargeInAck).
+//! gRPC client for the Talker runtime.
+//!
+//! Wraps a persistent [`TalkerServiceClient`] channel with lifecycle-aware
+//! reconnection. The main event loop calls [`TalkerClient::dispatch`] to open
+//! a bidi Converse stream and [`TalkerClient::barge_in`] to inject inline
+//! interrupts on the active stream.
+//!
+//! [`TalkerClient::run_recovery_loop`] runs as a background task: it probes
+//! the endpoint, connects, sends the current persona, and watches for
+//! [`Readiness::Degraded`] to trigger reconnection.
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -12,6 +20,11 @@ use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, Task
 use crate::proto;
 use crate::proto::talker_service_client::TalkerServiceClient;
 
+/// Persistent gRPC client for the Talker process.
+///
+/// Holds a reusable channel and the sender half of the active Converse bidi
+/// stream. Cloneable — the main event loop and the recovery loop share the
+/// same instance.
 #[derive(Clone)]
 pub struct TalkerClient {
     inner: Arc<RwLock<Option<TalkerServiceClient<Channel>>>>,
@@ -55,6 +68,9 @@ impl TalkerClient {
         self.readiness() == Readiness::Ready
     }
 
+    /// Attempt to establish a gRPC channel using the configured reconnect
+    /// policy. Returns `true` on success (readiness → Ready), `false` if all
+    /// attempts are exhausted (readiness → Degraded).
     pub async fn try_connect(&self) -> bool {
         match Self::connect_with_policy(&self.endpoint, self.connection.clone(), self.reconnect)
             .await
@@ -71,12 +87,13 @@ impl TalkerClient {
         }
     }
 
-    /// Open a bidi Converse stream, send context, receive output.
-    /// Stores stream sender for inline barge-in.
+    /// Open a bidi Converse stream, send `ctx` as the start payload, and
+    /// forward Talker outputs to `output_tx`.
     ///
-    /// The channel + sender are created and registered before spawning the
-    /// task, so a `barge_in()` call racing in immediately after this returns
-    /// finds the live sender instead of silently no-op'ing.
+    /// Returns a [`CancellationToken`] that cancels the stream when dropped.
+    /// The stream sender is registered *before* the task spawns so that a
+    /// [`barge_in`](Self::barge_in) call racing immediately after this returns
+    /// finds the live sender.
     pub async fn dispatch(
         &self,
         ctx: proto::TalkerContext,
@@ -157,6 +174,7 @@ impl TalkerClient {
         token
     }
 
+    /// Attempt connection with bounded retries and exponential backoff.
     async fn connect_with_policy(
         endpoint: &str,
         connection: ManagedConnectionHandle,
@@ -229,6 +247,7 @@ impl TalkerClient {
         }
     }
 
+    /// Hint the Talker to prefill its KV cache for the next turn.
     pub async fn prefill_cache(&self, conversation_id: &str, ctx: proto::TalkerContext) {
         let Some(mut client) = self.inner.read().await.clone() else {
             return;
@@ -245,6 +264,11 @@ impl TalkerClient {
         }
     }
 
+    /// Background loop: probe endpoint → connect → send persona → watch for
+    /// Degraded → reconnect. Runs until `shutdown` is cancelled.
+    ///
+    /// Each reconnection re-reads the shared `persona` snapshot so any
+    /// file-watcher or memory updates are picked up automatically.
     pub async fn run_recovery_loop(
         &self,
         persona: Arc<RwLock<proto::PersonaConfig>>,
@@ -298,6 +322,7 @@ impl TalkerClient {
         }
     }
 
+    /// Send an UpdatePersona RPC with the latest soul, identity, and memory.
     pub async fn update_persona(&self, config: proto::PersonaConfig) {
         let guard = self.inner.read().await;
         let Some(mut client) = guard.clone() else {
@@ -422,10 +447,7 @@ mod tests {
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(TalkerServiceServer::new(StubTalker))
-                .serve_with_incoming_shutdown(
-                    TcpListenerStream::new(listener),
-                    token.cancelled(),
-                )
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), token.cancelled())
                 .await
                 .unwrap();
         });
@@ -460,12 +482,8 @@ mod tests {
         );
     }
 
-    /// Recovery loop: probe → connect → send persona → Ready.
-    /// Kill server → set Degraded → start new server → reconnect → Ready.
-    ///
-    /// Does NOT use `tokio::time::pause()` — auto-advance races with
-    /// real I/O on the gRPC connect path. Runs in ~3-4s real time
-    /// (one watch-phase sleep cycle).
+    /// Proves the full recovery cycle: start server → Ready → kill server →
+    /// Degraded → restart server → Ready again.
     #[tokio::test]
     async fn recovery_loop_reconnects_after_degraded() {
         // Start stub gRPC server on a random port.

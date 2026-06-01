@@ -1,3 +1,13 @@
+//! Runtime topology configuration for the Supervisor.
+//!
+//! Parses `kaguya.runtime.toml` into a [`RuntimeConfig`] that describes the
+//! full process graph: which processes to launch, their restart policies,
+//! bind/endpoint port mappings, dependency ordering, and health-check URLs.
+//!
+//! Supports named profiles (e.g. `app`, `dev_standalone`) selected by the
+//! `KAGUYA_RUNTIME_PROFILE` environment variable or the `profile` field in
+//! the config file.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,6 +42,7 @@ struct RuntimeProfile {
     pub processes: BTreeMap<String, ProcessSpec>,
 }
 
+/// Declarative specification for a single process in the runtime topology.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ProcessSpec {
     #[serde(default = "default_enabled")]

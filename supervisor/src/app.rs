@@ -1,3 +1,18 @@
+//! Application-level process orchestration.
+//!
+//! [`SupervisorApp`] is the top-level owner of the Kaguya process graph. It
+//! starts, monitors, and restarts managed processes according to their
+//! [`RestartPolicy`], polls external process health endpoints, and exposes a
+//! status API consumed by the dev console.
+//!
+//! Key behaviours:
+//! - Eager processes are launched in dependency order on [`start_app`](SupervisorApp::start_app).
+//! - A sliding-window restart limit (`max_restarts` / `restart_window_secs`)
+//!   prevents infinite crash loops — exhausted processes enter `Errored` and
+//!   stop restarting until manually started again.
+//! - Gateway shutdown uses a two-phase drain: gRPC graceful shutdown request,
+//!   then SIGTERM after a timeout.
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -18,6 +33,11 @@ const MONITOR_INTERVAL: Duration = Duration::from_millis(250);
 const RESTART_BASE_DELAY: Duration = Duration::from_millis(500);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(5);
 
+/// Top-level process orchestrator.
+///
+/// Owns the full process graph and exposes start/stop/restart operations for
+/// individual processes and the application as a whole. Cloneable — shared
+/// between the HTTP server and the monitor loop.
 #[derive(Clone)]
 pub struct SupervisorApp {
     inner: std::sync::Arc<Mutex<SupervisorInner>>,
@@ -343,7 +363,9 @@ impl SupervisorApp {
 
             if let Some(max_restarts) = state.spec.max_restarts {
                 let window = Duration::from_secs(state.spec.restart_window_secs.unwrap_or(300));
-                state.restart_timestamps.retain(|t| now.duration_since(*t) < window);
+                state
+                    .restart_timestamps
+                    .retain(|t| now.duration_since(*t) < window);
                 state.restart_timestamps.push(now);
                 if state.restart_timestamps.len() as u32 > max_restarts {
                     state.restart_exhausted = true;

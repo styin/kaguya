@@ -1,3 +1,8 @@
+//! Endpoint probing utilities for gRPC connection readiness.
+//!
+//! Used by the Talker and Listener recovery loops to poll an endpoint until
+//! it becomes reachable before attempting a full client connection.
+
 use std::time::Duration;
 
 use tonic::transport::Channel;
@@ -5,6 +10,12 @@ use tracing::{debug, info, warn};
 
 use crate::lifecycle::{Readiness, ReconnectPolicy};
 
+/// Block until `endpoint` accepts a gRPC connection, updating readiness via
+/// `set_readiness` on each probe cycle.
+///
+/// For managed runtimes (`expected_runtime = true`), readiness stays
+/// [`Readiness::Starting`] while probing. For unmanaged/external runtimes,
+/// readiness is set to [`Readiness::Degraded`] on the first failure.
 pub async fn wait_for_grpc_endpoint<F>(
     name: &str,
     endpoint: &str,
@@ -46,6 +57,8 @@ pub async fn wait_for_grpc_endpoint<F>(
     }
 }
 
+/// Single-shot probe: attempt to open a gRPC channel within the default
+/// reconnect policy timeout.
 pub async fn probe_grpc_endpoint(endpoint: &str) -> anyhow::Result<()> {
     let timeout = ReconnectPolicy::default().attempt_timeout();
     tokio::time::timeout(timeout, async {
@@ -58,6 +71,8 @@ pub async fn probe_grpc_endpoint(endpoint: &str) -> anyhow::Result<()> {
     .map_err(|_| anyhow::anyhow!("probe timed out after {}ms", timeout.as_millis()))?
 }
 
+/// Sleep for the default probe interval (the last retry delay in the default
+/// reconnect policy).
 pub async fn sleep_probe_interval() {
     let delay = ReconnectPolicy::default()
         .retry_delays()

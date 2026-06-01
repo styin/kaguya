@@ -1,3 +1,9 @@
+//! Gateway-local configuration.
+//!
+//! [`GatewayConfig`] is loaded from `gateway.toml` and covers server addresses,
+//! persona file paths, history depth, silence timer tuning, RAG settings, and
+//! the runtime topology section that resolves client endpoint addresses.
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;

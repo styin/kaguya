@@ -1,6 +1,21 @@
-//! Listener gRPC Client + raw audio socket forwarder.
-//! Gateway = client, Listener = server.
-//! Audio bypasses gRPC — raw TCP socket with length-prefixed frames.
+//! gRPC client and raw audio forwarder for the Listener runtime.
+//!
+//! The Listener exposes two server endpoints that the Gateway connects to as
+//! a client:
+//!
+//! - **gRPC bidi stream** — delivers ASR events (VAD edges, partial/final
+//!   transcripts) into the Gateway's priority input stream.
+//! - **Raw TCP socket** — receives length-prefixed audio frames forwarded
+//!   from the WebSocket endpoint. Audio bypasses gRPC to avoid protobuf
+//!   serialization overhead at 50 fps.
+//!
+//! Unlike [`TalkerClient`](super::talker::TalkerClient), there is no
+//! persistent client instance — each recovery cycle creates a fresh
+//! [`ListenerClient`], establishes new streams, and installs a new audio
+//! sender into the shared [`ListenerAudioSink`](super::audio_sink::ListenerAudioSink).
+//!
+//! [`run_recovery_loop`] runs as a background task and handles endpoint
+//! probing, connection setup, and automatic reconnection on stream loss.
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -15,6 +30,11 @@ use crate::proto;
 use crate::proto::listener_service_client::ListenerServiceClient;
 use crate::types::InputEvent;
 
+/// Single-use gRPC + audio client for one Listener connection lifecycle.
+///
+/// Created fresh by [`run_recovery_loop`] on each reconnection cycle.
+/// [`start`](Self::start) establishes both the gRPC bidi stream and the
+/// audio TCP socket, spawning background tasks for each.
 pub struct ListenerClient {
     grpc_endpoint: String,
     audio_addr: String,
@@ -55,8 +75,9 @@ impl ListenerClient {
         }
     }
 
-    /// Start bidi gRPC stream for ASR events + raw TCP forwarder for audio.
-    /// Returns the audio sender — caller (main.rs) passes it to EndpointState.
+    /// Establish the gRPC bidi stream and audio TCP socket, spawning
+    /// background receiver/forwarder tasks. Returns the audio sender for
+    /// installation into [`ListenerAudioSink`](super::audio_sink::ListenerAudioSink).
     pub async fn start(
         &self,
         p1_tx: mpsc::Sender<InputEvent>,
@@ -158,6 +179,7 @@ impl ListenerClient {
         Ok(audio_tx)
     }
 
+    /// Open a gRPC bidi stream with bounded retries and exponential backoff.
     async fn connect_stream_with_policy(
         endpoint: &str,
         connection: ManagedConnectionHandle,
@@ -214,6 +236,7 @@ impl ListenerClient {
         Ok(client.stream(outbound).await?.into_inner())
     }
 
+    /// Open the raw audio TCP socket with bounded retries.
     async fn connect_audio_with_policy(
         audio_addr: &str,
         connection: ManagedConnectionHandle,
@@ -257,6 +280,13 @@ impl ListenerClient {
     }
 }
 
+/// Background loop: probe endpoint → create [`ListenerClient`] → start
+/// streams → install audio sink → watch for Degraded → clear sink →
+/// reconnect. Runs until `shutdown` is cancelled.
+///
+/// Each cycle creates a fresh client because the Listener has no persistent
+/// channel — `start()` establishes new gRPC and TCP connections, and the
+/// previous cycle's spawned tasks exit naturally when their streams end.
 pub async fn run_recovery_loop(
     grpc_endpoint: String,
     audio_addr: String,
@@ -428,10 +458,7 @@ mod tests {
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(ListenerServiceServer::new(StubListener))
-                .serve_with_incoming_shutdown(
-                    TcpListenerStream::new(listener),
-                    token.cancelled(),
-                )
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), token.cancelled())
                 .await
                 .unwrap();
         });
@@ -475,12 +502,8 @@ mod tests {
         );
     }
 
-    /// Recovery loop: probe → connect gRPC + audio → Ready.
-    /// Set Degraded → recovery loop reconnects → Ready (twice).
-    ///
-    /// Keeps stub servers alive for the whole test (no port rebinding).
-    /// The recovery loop creates a fresh ListenerClient on each cycle,
-    /// reconnecting to the same running server.
+    /// Proves repeatable recovery: connect → Degraded → reconnect → Ready,
+    /// twice in a row against the same running stub servers.
     #[tokio::test]
     async fn recovery_loop_reconnects_after_stream_loss() {
         // Start stub servers (kept alive for the whole test).

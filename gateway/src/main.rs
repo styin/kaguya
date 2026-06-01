@@ -1,5 +1,9 @@
-//! Kaguya Gateway — main event loop.
-//! Uses RagEngine (not Memory), bidi Listener/Talker clients.
+//! Kaguya Gateway entry point.
+//!
+//! Boots the lifecycle supervisor, spawns recovery loops for voice-stack
+//! connections (Talker, Listener), and runs the priority-ordered main event
+//! loop that routes control signals, ASR events, tool results, and silence
+//! timeouts through the Talker's bidi Converse stream.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Runtime readiness bootstrap owns Talker/Listener connection startup.
+    // ── Voice-stack connections (Talker + Listener recovery loops) ──
     let mut last_memory_md = rag.export_memory_md().await;
     let listener_audio = ListenerAudioSink::new();
     let listener_enabled = config.listener_enabled();
@@ -179,7 +183,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── WebSocket endpoint (dev-console feature) ──
-    // Listener audio is installed once the runtime readiness task connects it.
     #[cfg(feature = "dev-console")]
     {
         let endpoint_state = Arc::new(endpoint::EndpointState {
@@ -337,17 +340,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Some(proto::talker_output::Payload::ToolRequest(tr)) => {
                         info!(tool = %tr.tool_name, "→ [TOOL]");
-                        // B14: gate at the dispatch site to avoid the
-                        // hallucinated-tool → P3 ToolResult → re-dispatch loop.
-                        // qwen3.5 sometimes invents tool names not in the
-                        // registry; the previous path round-tripped the
-                        // "unknown tool" error through P3 and produced a
-                        // second narrated turn after a preamble sentence,
-                        // doubling the assistant response. Reject inline,
-                        // record the synthetic error in history so the next
-                        // turn shows the LLM what it did, and let the
-                        // current turn complete without firing a
-                        // continuation dispatch.
+                        // Reject unknown tool names inline instead of
+                        // round-tripping through P3 ToolResult, which would
+                        // produce a spurious continuation dispatch.
                         if !tools.has(&tr.tool_name) {
                             warn!(tool = %tr.tool_name, "rejecting unknown tool (likely hallucinated)");
                             let err = serde_json::json!({
@@ -395,7 +390,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
-                            // FIX #3: only push UpdatePersona when memory actually changed
+                            // Only push UpdatePersona when memory actually changed.
                             let new_memory_md = rag.export_memory_md().await;
                             if new_memory_md != last_memory_md {
                                 last_memory_md = new_memory_md;
@@ -556,9 +551,7 @@ async fn main() -> anyhow::Result<()> {
             Some(event) = input_rx.p4.recv() => {
                 if let InputEvent::SilenceExceeded { duration } = event {
                     debug!(secs = duration.as_secs(), "P4: silence");
-                    // B9: tier timers keep ticking for telemetry, but the
-                    // proactive LLM call is gated. Re-enable once B10 reworks
-                    // the silence prompt to let the LLM stay quiet.
+                    // Proactive silence dispatch is gated behind config.
                     if !config.silence.enabled {
                         debug!(secs = duration.as_secs(), "P4: silence dispatch suppressed (silence.enabled=false)");
                     } else if active_gen.is_none() {
@@ -590,10 +583,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn dispatch_talker_if_ready(
-    talker: &TalkerClient,
-    kind: DispatchKind,
-) -> bool {
+/// Guard: log and skip dispatch if the Talker connection is not Ready.
+fn dispatch_talker_if_ready(talker: &TalkerClient, kind: DispatchKind) -> bool {
     if !talker.is_ready() {
         warn!(
             readiness = ?talker.readiness(),
