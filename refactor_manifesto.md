@@ -17,8 +17,7 @@ The high-level sequence remains:
 3. Gateway TurnPipeline
 4. PluginSystem
 
-The first two are now partially implemented. The next serious engineering slice
-is capability rebinding inside Gateway.
+Items 1–3 are implemented. PluginSystem is next.
 
 ## Design Inspirations
 
@@ -173,92 +172,41 @@ SHUTDOWN has two meanings by layer:
 
 Console app shutdown should call Supervisor, not Gateway directly.
 
-## Remaining Lifecycle Work
+## Completed Lifecycle Work
 
-### Capability Bindings
+### Capability Bindings — Implemented
 
-Add Gateway-owned capability bindings.
+Recovery loops on `TalkerClient` and `ListenerClient` cover the binding
+responsibilities originally planned for a separate `bindings.rs` layer:
 
-This is not process management. It is the client-side attachment layer between
-Gateway and capability endpoints.
-
-Proposed minimal shape:
-
-```text
-gateway/src/clients/
-  talker.rs      transport-level RPC wrapper
-  listener.rs    transport-level gRPC/TCP wrapper
-  reasoner.rs    transport-level RPC wrapper
-
-gateway/src/bindings.rs
-  TalkerBinding
-  ListenerBinding
-  ReasonerBinding
-```
-
-Clients should know endpoints, proto methods, sockets, and transport errors.
-
-Bindings should know Gateway semantics:
-
-- reconnect/rebind loop;
-- readiness state;
+- reconnect/rebind after connection loss;
 - persona resend after Talker reconnect;
-- Listener ASR stream recreation;
-- Listener audio sink install/clear/reinstall;
-- P1/P2/P3 queue wiring;
-- stale channel replacement after runtime restart;
-- whether a capability is expected, external, stopped, degraded, or ready.
-
-This is the next lifecycle milestone.
-
-### Readiness Semantics
-
-Keep three states conceptually separate:
-
-- process state: whether Supervisor-owned process is running;
-- endpoint state: whether a socket/HTTP/gRPC endpoint is reachable;
-- capability state: whether Gateway can use the capability correctly.
-
-Current UI aggregation masks some stale Gateway readiness when the parent
-process is stopped, but Gateway still needs stronger binding-level truth.
-
-### Reconnect Policy
-
-Current reconnect attempts are bounded per attempt and visible through
-readiness, but the policy still needs a cleaner long-running model:
-
+- Listener ASR stream recreation and audio sink install/clear;
+- readiness tracking (Starting → Ready → Degraded → Stopped);
 - startup grace for expected app-owned runtimes;
-- lower-noise polling for external or standalone runtimes;
-- rebind loops for stale channels after runtime restart;
-- backoff reset rules after a successful connection;
-- tests that simulate runtime disappearance and reappearance.
+- bounded exponential backoff with degradation after policy exhaustion.
 
-### Lifecycle Tests Still Needed
+The separate `Binding` abstraction was deferred — recovery logic lives
+directly on client structs in `gateway/src/clients/`.
 
-Add focused tests for:
+### Reconnect Policy — Implemented
 
-- Talker binding reconnects and resends persona after endpoint restart;
-- Listener binding recreates ASR stream after stream end;
-- Listener audio sender is cleared on disconnect and reinstalled on reconnect;
-- readiness moves through starting, ready, degraded, stopped without stale
-  ready states;
-- Gateway drain exits local tasks without killing external runtimes.
+Recovery loops implement bounded exponential backoff, startup grace for
+expected runtimes, lower-noise polling for external runtimes, and tests
+that simulate runtime disappearance and reappearance.
+
+### Lifecycle Tests — Implemented
+
+All five originally listed tests are covered by recovery loop integration
+tests (`recovery_loop_reconnects_after_degraded`,
+`recovery_loop_reconnects_after_stream_loss`, etc.).
 
 ## Remaining Config Work
 
-### Remove Fallback Policy From Gateway Runtime Topology
+### Remove Fallback Policy — Done
 
-`FallbackPolicy` still exists in Gateway config code. The newer model is cleaner:
-
-```text
-enabled
-launch
-criticality
-capability enablement
-```
-
-Reasoner fallback to stub should become explicit behavior in the Reasoner
-binding or Reasoner manager, not a broad topology fallback field.
+`FallbackPolicy` removed from Gateway config. Reasoner fallback to stub is
+now explicit behavior in `ReasonerManager` (policy exhaustion → stub mode).
 
 ### Finalize Profile Semantics
 
@@ -301,16 +249,11 @@ Add or keep tests for:
 
 ## Remaining Process Supervision Work
 
-### Restart Exhaustion
+### Restart Exhaustion — Done
 
-Supervisor has restart policy and backoff, but it still needs a circuit breaker.
-
-Add:
-
-- max restart attempts per window;
-- terminal errored state after exhaustion;
-- manual reset through start/restart;
-- clear UI/log reason for crash-loop suppression.
+Supervisor circuit breaker implemented: sliding-window max restarts, terminal
+errored state after exhaustion, manual reset via start/restart, clear log
+reason for crash-loop suppression.
 
 ### On-Demand Runtime Startup
 
@@ -354,85 +297,106 @@ Supervisor dependency and health behavior still needs a sharper policy:
 - decide how failed external dependencies affect app state;
 - expose clear `blockedBy` reasons without expanding unrelated cards in the UI.
 
-### Process Supervision Tests Still Needed
+### Process Supervision Tests
 
-Add or keep tests for:
+Implemented:
 
-- manual stop suppresses restart;
-- app shutdown disables restarts before stopping children;
-- Gateway drain unavailable still tears down app-owned children;
-- external runtimes are never killed;
-- restart exhaustion enters terminal errored state;
-- on-demand runtime can be started and stopped through API;
-- sandbox provider `none` is accepted and unsupported required providers fail
-  clearly.
+- `manual_stop_suppresses_restart`;
+- `shutdown_app_stops_children_when_gateway_drain_unavailable`;
+- `restart_exhaustion_enters_errored_state`;
+- `manual_start_resets_restart_exhaustion`.
 
-## TurnPipeline Plan
+Still needed:
 
-TurnPipeline is not implemented yet.
+- on-demand runtime start/stop through API;
+- sandbox provider validation (unsupported required provider fails clearly).
 
-Current priority semantics remain authoritative:
+## TurnPipeline — Implemented
 
-- P0: control signals, bypassing the input queue.
-- TalkerOutput: handled before normal queued input, preserving the current
-  biased select behavior.
+The Gateway event loop is now structured as handlers + executor, living in
+`gateway/src/core/pipeline/`.
+
+### Architecture
+
+Three layers:
+
+1. **Handlers** (`handlers.rs`) — sync, pure decision functions. Each takes
+   `&mut TurnState` plus pre-fetched data, returns `Vec<PipelineAction>`.
+   Unit-testable without gRPC, SQLite, or tokio runtime.
+2. **Executor** (`executor.rs`) — thin `ActionExecutor` struct that maps each
+   `PipelineAction` to a real component call. Holds references to all Gateway
+   components.
+3. **Orchestrator** (`main.rs`) — unchanged `tokio::select! { biased; … }`
+   loop. Receives events, pre-fetches async data, calls handlers, feeds
+   actions to the executor.
+
+P0 control signals remain inline in the select loop — they bypass the
+pipeline entirely.
+
+### Design Decisions
+
+**No `GatewayEvent` envelope.** The manifesto originally proposed a unified
+`GatewayEvent` / `InputPriority` enum. This was dropped because the biased
+select loop already discriminates events by channel, and handlers are
+separate functions per event variant. A unified envelope would be dead
+ceremony unless a plugin system later needs a single event queue with
+middleware.
+
+**Free functions, not traits.** No plugin hooks yet → traits are premature
+abstraction. Each handler is a standalone `pub fn` in `handlers.rs`.
+
+**18 fine-grained `PipelineAction` variants** instead of the manifesto's
+original 9. Each variant maps to exactly one I/O call, making test
+assertions precise. The full set:
+
+```rust
+enum PipelineAction {
+    DispatchTalker { context, kind },
+    BargeIn,
+    SendResponseStarted { turn_id },
+    SendSentence { text },
+    SendEmotion { emotion },
+    SendResponseComplete { turn_id, was_interrupted },
+    SendUserInput { text },
+    MuteOutput,
+    UnmuteOutput,
+    AppendUserHistory { text },
+    AppendAssistantHistory { text },
+    AppendAssistantPartialHistory { spoken_text },
+    AppendToolResultHistory { tool_name, content },
+    DispatchTool { request_id, tool_name, args_json },
+    StartReasoner { task_id, description },
+    EvaluateAndStoreMemory { user_input, assistant_response, turn_id },
+    UpdatePersonaIfChanged,
+    PrefillCache,
+    StartSilenceTimers,
+}
+```
+
+**`TurnState`** holds the mutable per-conversation state that was previously
+scattered as local variables in `main()`: `active_gen`, `active_silence`,
+`current_response`, `last_turn_id`, `current_dispatch_kind`,
+`last_memory_md`, `conversation_id`.
+
+**Context assembly has sync variants.** `context::assemble_from_data()` etc.
+take pre-fetched `Vec<ChatMessage>` and `Vec<ToolDefinition>` so handlers
+can build `TalkerContext` without holding `&History` or `&ToolRegistry`.
+
+### Priority semantics (unchanged)
+
+- P0: control signals, bypassing the pipeline.
+- TalkerOutput: handled before normal queued input (biased select).
 - P1: user intent.
 - P2: ASR/VAD states.
 - P3: tool and Reasoner callbacks.
 - P4: silence.
 - P5: telemetry.
 
-Introduce an internal event envelope:
+### Test coverage
 
-```rust
-enum GatewayEvent {
-    TalkerOutput(proto::TalkerOutput),
-    Input { priority: InputPriority, event: InputEvent },
-}
-
-enum InputPriority {
-    P1UserIntent,
-    P2AsrState,
-    P3Callback,
-    P4ConversationState,
-    P5Telemetry,
-}
-```
-
-The queue decides what runs next. The pipeline decides how the selected event
-is handled.
-
-Initial built-in stages:
-
-- BargeInStage;
-- UserIntentStage;
-- RetrievalStage;
-- TalkerDispatchStage;
-- TalkerOutputStage;
-- ToolResultStage;
-- ReasonerStage;
-- PostTurnStage;
-- SilenceStage.
-
-Pipeline actions should be explicit and testable:
-
-```rust
-enum PipelineAction {
-    DispatchTalker { context: proto::TalkerContext, kind: DispatchKind },
-    DispatchTool { request_id: String, tool_name: String, args_json: String },
-    StartReasoner { task_id: String, description: String },
-    CancelActiveGeneration,
-    StartSilenceTimers,
-    UpdatePersonaIfChanged,
-    PersistTurnMemory,
-    MuteOutput,
-    UnmuteOutput,
-}
-```
-
-The first TurnPipeline pass should not expose public plugin hooks. It should
-extract the current Gateway main-loop behavior into built-in stages and prove
-equivalent behavior.
+28 handler unit tests covering all event variants, edge cases (talker not
+ready, narration filtered, generation active, interrupted response, memory
+persistence gating by dispatch kind).
 
 ## PluginSystem Plan
 
@@ -495,9 +459,9 @@ transport.
 
 ## Near-Term Recommended Sequence
 
-1. Commit the current runtime config and Supervisor cleanup slice after review.
-2. Add Gateway capability bindings and rebind loops.
-3. Remove or replace Gateway `FallbackPolicy`.
-4. Add Supervisor restart exhaustion.
-5. Start TurnPipeline extraction from `gateway/src/main.rs`.
+1. ~~Runtime config and Supervisor cleanup.~~ Done.
+2. ~~Gateway capability bindings and rebind loops.~~ Done (recovery loops).
+3. ~~Remove Gateway FallbackPolicy.~~ Done.
+4. ~~Supervisor restart exhaustion.~~ Done.
+5. ~~TurnPipeline extraction from main.rs.~~ Done.
 6. Introduce RAG provider trait and registry.
