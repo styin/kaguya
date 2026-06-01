@@ -8,14 +8,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use kaguya_gateway::audio_sink::ListenerAudioSink;
 use kaguya_gateway::config::GatewayConfig;
-use kaguya_gateway::context;
 use kaguya_gateway::control::ControlServiceImpl;
 #[cfg(feature = "dev-console")]
 use kaguya_gateway::endpoint;
@@ -25,6 +23,7 @@ use kaguya_gateway::lifecycle::{LifecycleSupervisor, Readiness, ShutdownReason};
 use kaguya_gateway::narration::NarrationFilter;
 use kaguya_gateway::output::OutputManager;
 use kaguya_gateway::persona::Persona;
+use kaguya_gateway::pipeline::{handlers, ActionExecutor, TurnState};
 use kaguya_gateway::proto;
 use kaguya_gateway::rag::RagEngine;
 use kaguya_gateway::reasoner::ReasonerManager;
@@ -126,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // ── Voice-stack connections (Talker + Listener recovery loops) ──
-    let mut last_memory_md = rag.export_memory_md().await;
+    let last_memory_md = rag.export_memory_md().await;
     let listener_audio = ListenerAudioSink::new();
     let listener_enabled = config.listener_enabled();
     if !listener_enabled {
@@ -279,38 +278,34 @@ async fn main() -> anyhow::Result<()> {
     info!("Kaguya Gateway ready");
 
     // ── Event Loop State ──
-    let mut active_gen: Option<CancellationToken> = None;
-    let mut active_silence: Option<CancellationToken> = None;
-    let mut current_response = String::new();
-    let mut last_turn_id = String::new();
-    // Tracks what kind of round triggered the active dispatch. Read on
-    // `ResponseComplete` to gate `evaluate_and_store` — only `UserIntent`
-    // rounds carry a fresh user statement that pairs with the assistant
-    // response into a memory. See `DispatchKind::should_persist_memory`.
-    let mut current_dispatch_kind: Option<DispatchKind> = None;
+    let mut turn = TurnState::new(conversation_id.clone(), last_memory_md);
 
     // ══════════════════════════════════════
     //  MAIN EVENT LOOP
     // ══════════════════════════════════════
+    //
+    // Priority-ordered biased select. P0 bypasses the pipeline (inline
+    // control handling). All other branches route through handlers →
+    // executor for testability.
     loop {
         tokio::select! {
             biased;
 
-            // ── P0: Control ──
+            // ── P0: Control (inline — bypasses pipeline) ──
             Some(ctrl) = control_rx.recv() => {
                 match ctrl {
                     ControlSignal::Stop => {
                         info!("P0: STOP");
-                        if let Some(t) = active_gen.take() { t.cancel(); }
-                        if let Some(t) = active_silence.take() { t.cancel(); }
+                        turn.cancel_active_gen();
+                        turn.cancel_active_silence();
                         reasoner.cancel_all().await;
                         output.mute_audio();
-                        talker.barge_in(&conversation_id).await;
+                        talker.barge_in(&turn.conversation_id).await;
                     }
                     ControlSignal::Shutdown => {
                         info!("P0: SHUTDOWN");
-                        if let Some(t) = active_gen.take() { t.cancel(); }
-                        if let Some(t) = active_silence.take() { t.cancel(); }
+                        turn.cancel_active_gen();
+                        turn.cancel_active_silence();
                         reasoner.cancel_all().await;
                         lifecycle.shutdown(ShutdownReason::ControlShutdown).await;
                         break;
@@ -323,116 +318,63 @@ async fn main() -> anyhow::Result<()> {
 
             // ── Talker Output ──
             Some(out) = talker_output_rx.recv() => {
-                match out.payload {
+                let actions = match out.payload {
                     Some(proto::talker_output::Payload::ResponseStarted(rs)) => {
                         debug!(turn = %rs.turn_id, "response started");
-                        current_response.clear();
-                        output.send_response_started(&rs.turn_id).await;
+                        handlers::handle_response_started(&mut turn, &rs.turn_id)
                     }
                     Some(proto::talker_output::Payload::Sentence(se)) => {
                         debug!(text = %se.text, "→ [SENTENCE]");
-                        current_response.push_str(&se.text);
-                        current_response.push(' ');
-                        output.send_sentence(&se.text).await;
+                        handlers::handle_sentence(&mut turn, &se.text)
                     }
                     Some(proto::talker_output::Payload::Emotion(em)) => {
-                        output.send_emotion(&em.emotion).await;
+                        handlers::handle_emotion(&em.emotion)
                     }
                     Some(proto::talker_output::Payload::ToolRequest(tr)) => {
                         info!(tool = %tr.tool_name, "→ [TOOL]");
-                        // Reject unknown tool names inline instead of
-                        // round-tripping through P3 ToolResult, which would
-                        // produce a spurious continuation dispatch.
-                        if !tools.has(&tr.tool_name) {
+                        let tool_exists = tools.has(&tr.tool_name);
+                        if !tool_exists {
                             warn!(tool = %tr.tool_name, "rejecting unknown tool (likely hallucinated)");
-                            let err = serde_json::json!({
-                                "error": format!(
-                                    "Unknown tool '{}'. Available tools: {}",
-                                    tr.tool_name, tools.name_list(),
-                                ),
-                            }).to_string();
-                            history.append_tool_result(&tr.tool_name, &err).await;
-                        } else {
-                            tools.dispatch(tr.request_id, tr.tool_name, tr.args_json, input_tx.p3.clone());
                         }
+                        handlers::handle_tool_request(
+                            &tr.tool_name, &tr.request_id, &tr.args_json,
+                            tool_exists, &tools.name_list(),
+                        )
                     }
                     Some(proto::talker_output::Payload::DelegateRequest(dr)) => {
                         info!(task = %dr.task_id, "→ [DELEGATE]");
-                        reasoner.start(dr.task_id, dr.description, input_tx.p3.clone()).await;
+                        handlers::handle_delegate_request(&dr.task_id, &dr.description)
                     }
                     Some(proto::talker_output::Payload::BargeInAck(ack)) => {
                         debug!("← BargeInAck");
-                        if !ack.spoken_text.is_empty() {
-                            history.append_assistant_partial(&ack.spoken_text).await;
-                        }
-                        output.unmute_audio();
+                        handlers::handle_barge_in_ack(&ack.spoken_text)
                     }
                     Some(proto::talker_output::Payload::ResponseComplete(rc)) => {
                         debug!(interrupted = rc.was_interrupted, "response complete");
-
-                        if !rc.was_interrupted {
-                            let text = current_response.trim().to_string();
-                            if !text.is_empty() {
-                                history.append_assistant(&text).await;
-                            }
-                            // Only persist a memory pair if THIS round was a
-                            // direct user statement. Tool / reasoner /
-                            // narration / silence rounds run on top of an
-                            // older user turn — pairing assistant text from
-                            // these with `last_user_input()` would fabricate
-                            // a misattributed Q/A memory. See `DispatchKind`.
-                            let persist = current_dispatch_kind
-                                .map(|k| k.should_persist_memory())
-                                .unwrap_or(false);
-                            if persist {
-                                if let Some(ui) = history.last_user_input().await {
-                                    rag.evaluate_and_store(&ui, &text, &last_turn_id).await;
-                                }
-                            }
-
-                            // Only push UpdatePersona when memory actually changed.
-                            let new_memory_md = rag.export_memory_md().await;
-                            if new_memory_md != last_memory_md {
-                                last_memory_md = new_memory_md;
-                                let new_persona = proto::PersonaConfig {
-                                    soul_md: persona.soul().await,
-                                    identity_md: persona.identity().await,
-                                    memory_md: last_memory_md.clone(),
-                                };
-                                *shared_persona.write().await = new_persona.clone();
-                                talker.update_persona(new_persona).await;
-                            }
-
-                            let tasks = reasoner.active_tasks().await;
-                            let pctx = context::for_prefill(
-                                &conversation_id, &history, &last_memory_md, &tools, &tasks,
-                            ).await;
-                            talker.prefill_cache(&conversation_id, pctx).await;
-                        }
-
-                        if let Some(t) = active_silence.take() { t.cancel(); }
-                        active_silence = Some(silence.start());
-                        output.unmute_audio();
-                        active_gen = None;
-                        current_dispatch_kind = None;
-                        current_response.clear();
-                        output.send_response_complete(&rc.turn_id, rc.was_interrupted).await;
+                        let last_user = history.last_user_input().await;
+                        handlers::handle_response_complete(
+                            &mut turn, &rc.turn_id, rc.was_interrupted, last_user,
+                        )
                     }
-                    None => {}
-                }
+                    None => continue,
+                };
+                let mut exec = ActionExecutor {
+                    talker: &talker, history: &history, output: &output,
+                    tools: &tools, reasoner: &reasoner, rag: &rag,
+                    silence: &silence, persona: &persona,
+                    shared_persona: &shared_persona,
+                    talker_output_tx: talker_output_tx.clone(),
+                    p3_tx: input_tx.p3.clone(),
+                    state: &mut turn,
+                };
+                exec.execute_all(actions).await;
             }
 
             // ── P1: User Intent ──
             Some(event) = input_rx.p1.recv() => {
-                // Voice transcripts get echoed to the WS as `user_input` so the
-                // dev console can render them. Typed prompts already appear
-                // locally via `handleSend`, so we don't double-emit.
-                let text = match event {
-                    InputEvent::FinalTranscript { text, .. } => {
-                        output.send_user_input(&text).await;
-                        text
-                    }
-                    InputEvent::TextCommand { text } => text,
+                let (text, is_voice) = match event {
+                    InputEvent::FinalTranscript { text, .. } => (text, true),
+                    InputEvent::TextCommand { text } => (text, false),
                     _ => continue,
                 };
                 info!(text = %text, "P1: user intent");
@@ -443,36 +385,44 @@ async fn main() -> anyhow::Result<()> {
                     );
                     continue;
                 }
-                if let Some(t) = active_silence.take() { t.cancel(); }
-                history.append_user(&text).await;
 
-                let turn_id = Uuid::new_v4().to_string();
-                last_turn_id = turn_id.clone();
                 let tasks = reasoner.active_tasks().await;
                 let retrieval = rag.retrieve(&text).await;
-                let ctx = context::assemble(
-                    &conversation_id, &turn_id, &text,
-                    &history, &last_memory_md, retrieval, &tools, &tasks,
-                ).await;
+                let recent = history.recent().await;
+                let tool_defs = tools.definitions();
 
-                if let Some(t) = active_gen.take() { t.cancel(); }
-                output.unmute_audio();
-                current_dispatch_kind = Some(DispatchKind::UserIntent);
-                if dispatch_talker_if_ready(&talker, DispatchKind::UserIntent) {
-                    active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
-                } else {
-                    current_dispatch_kind = None;
-                }
+                let actions = handlers::handle_user_intent(
+                    &mut turn, &text, is_voice, true,
+                    retrieval, recent, tool_defs, &tasks,
+                );
+                let mut exec = ActionExecutor {
+                    talker: &talker, history: &history, output: &output,
+                    tools: &tools, reasoner: &reasoner, rag: &rag,
+                    silence: &silence, persona: &persona,
+                    shared_persona: &shared_persona,
+                    talker_output_tx: talker_output_tx.clone(),
+                    p3_tx: input_tx.p3.clone(),
+                    state: &mut turn,
+                };
+                exec.execute_all(actions).await;
             }
 
             // ── P2: ASR States ──
             Some(event) = input_rx.p2.recv() => {
                 match event {
                     InputEvent::VadSpeechStart => {
-                        debug!("P2: vad_speech_start → BARGE-IN (inline)");
-                        talker.barge_in(&conversation_id).await;
-                        output.mute_audio();
-                        if let Some(t) = active_silence.take() { t.cancel(); }
+                        debug!("P2: vad_speech_start → BARGE-IN");
+                        let actions = handlers::handle_vad_speech_start(&mut turn);
+                        let mut exec = ActionExecutor {
+                            talker: &talker, history: &history, output: &output,
+                            tools: &tools, reasoner: &reasoner, rag: &rag,
+                            silence: &silence, persona: &persona,
+                            shared_persona: &shared_persona,
+                            talker_output_tx: talker_output_tx.clone(),
+                            p3_tx: input_tx.p3.clone(),
+                            state: &mut turn,
+                        };
+                        exec.execute_all(actions).await;
                     }
                     InputEvent::PartialTranscript { text } => {
                         debug!(text = %text, "P2: partial");
@@ -486,64 +436,55 @@ async fn main() -> anyhow::Result<()> {
 
             // ── P3: Tool/Reasoner Results ──
             Some(event) = input_rx.p3.recv() => {
-                match event {
+                let actions = match event {
                     InputEvent::ToolResult { request_id, tool_name, content } => {
                         info!(id = %request_id, tool = %tool_name, "P3: tool result");
-                        history.append_tool_result(&tool_name, &content).await;
-                        let turn_id = Uuid::new_v4().to_string();
+                        let recent = history.recent().await;
+                        let tool_defs = tools.definitions();
                         let tasks = reasoner.active_tasks().await;
-                        let ctx = context::with_tool_result(
-                            &conversation_id, &turn_id, &request_id, &content,
-                            &history, &last_memory_md, &tools, &tasks,
-                        ).await;
-                        if let Some(t) = active_gen.take() { t.cancel(); }
-                        output.unmute_audio();
-                        current_dispatch_kind = Some(DispatchKind::ToolResult);
-                        if dispatch_talker_if_ready(&talker, DispatchKind::ToolResult) {
-                            active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
-                        } else {
-                            current_dispatch_kind = None;
-                        }
+                        let ready = talker.is_ready();
+                        handlers::handle_tool_result(
+                            &mut turn, &request_id, &tool_name, &content,
+                            ready, recent, tool_defs, &tasks,
+                        )
                     }
                     InputEvent::ReasonerStep { task_id: _, description } => {
-                        if narration.should_narrate(&description) {
-                            let turn_id = Uuid::new_v4().to_string();
-                            let ctx = context::for_narration(
-                                &conversation_id, &turn_id,
-                                &description, &history, &last_memory_md,
-                            ).await;
-                            if active_gen.is_none() {
-                                current_dispatch_kind = Some(DispatchKind::ReasonerNarration);
-                                if dispatch_talker_if_ready(&talker, DispatchKind::ReasonerNarration) {
-                                    active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
-                                } else {
-                                    current_dispatch_kind = None;
-                                }
-                            }
-                        }
+                        let should_narrate = narration.should_narrate(&description);
+                        let recent = history.recent().await;
+                        let ready = talker.is_ready();
+                        handlers::handle_reasoner_step(
+                            &mut turn, &description,
+                            should_narrate, ready, recent,
+                        )
                     }
                     InputEvent::ReasonerCompleted { task_id, summary } => {
                         info!(task_id = %task_id, "P3: reasoner done");
-                        history.append_tool_result(&task_id, &summary).await;
-                        let turn_id = Uuid::new_v4().to_string();
+                        let recent = history.recent().await;
+                        let tool_defs = tools.definitions();
                         let tasks = reasoner.active_tasks().await;
-                        let ctx = context::with_reasoner_result(
-                            &conversation_id, &turn_id, &task_id, &summary,
-                            &history, &last_memory_md, &tools, &tasks,
-                        ).await;
-                        if let Some(t) = active_gen.take() { t.cancel(); }
-                        output.unmute_audio();
-                        current_dispatch_kind = Some(DispatchKind::ReasonerResult);
-                        if dispatch_talker_if_ready(&talker, DispatchKind::ReasonerResult) {
-                            active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
-                        } else {
-                            current_dispatch_kind = None;
-                        }
+                        let ready = talker.is_ready();
+                        handlers::handle_reasoner_completed(
+                            &mut turn, &task_id, &summary,
+                            ready, recent, tool_defs, &tasks,
+                        )
                     }
                     InputEvent::ReasonerError { task_id, message, .. } => {
                         warn!(task_id = %task_id, err = %message, "P3: reasoner error");
+                        continue;
                     }
-                    _ => {}
+                    _ => continue,
+                };
+                if !actions.is_empty() {
+                    let mut exec = ActionExecutor {
+                        talker: &talker, history: &history, output: &output,
+                        tools: &tools, reasoner: &reasoner, rag: &rag,
+                        silence: &silence, persona: &persona,
+                        shared_persona: &shared_persona,
+                        talker_output_tx: talker_output_tx.clone(),
+                        p3_tx: input_tx.p3.clone(),
+                        state: &mut turn,
+                    };
+                    exec.execute_all(actions).await;
                 }
             }
 
@@ -551,21 +492,24 @@ async fn main() -> anyhow::Result<()> {
             Some(event) = input_rx.p4.recv() => {
                 if let InputEvent::SilenceExceeded { duration } = event {
                     debug!(secs = duration.as_secs(), "P4: silence");
-                    // Proactive silence dispatch is gated behind config.
-                    if !config.silence.enabled {
-                        debug!(secs = duration.as_secs(), "P4: silence dispatch suppressed (silence.enabled=false)");
-                    } else if active_gen.is_none() {
-                        let turn_id = Uuid::new_v4().to_string();
-                        let ctx = context::for_silence(
-                            &conversation_id, &turn_id,
-                            duration, &history, &last_memory_md, &tools,
-                        ).await;
-                        current_dispatch_kind = Some(DispatchKind::Silence);
-                        if dispatch_talker_if_ready(&talker, DispatchKind::Silence) {
-                            active_gen = Some(talker.dispatch(ctx, talker_output_tx.clone()).await);
-                        } else {
-                            current_dispatch_kind = None;
-                        }
+                    let recent = history.recent().await;
+                    let tool_defs = tools.definitions();
+                    let ready = talker.is_ready();
+                    let actions = handlers::handle_silence(
+                        &mut turn, duration, config.silence.enabled,
+                        ready, recent, tool_defs,
+                    );
+                    if !actions.is_empty() {
+                        let mut exec = ActionExecutor {
+                            talker: &talker, history: &history, output: &output,
+                            tools: &tools, reasoner: &reasoner, rag: &rag,
+                            silence: &silence, persona: &persona,
+                            shared_persona: &shared_persona,
+                            talker_output_tx: talker_output_tx.clone(),
+                            p3_tx: input_tx.p3.clone(),
+                            state: &mut turn,
+                        };
+                        exec.execute_all(actions).await;
                     }
                 }
             }
@@ -581,17 +525,4 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Kaguya Gateway shutdown");
     Ok(())
-}
-
-/// Guard: log and skip dispatch if the Talker connection is not Ready.
-fn dispatch_talker_if_ready(talker: &TalkerClient, kind: DispatchKind) -> bool {
-    if !talker.is_ready() {
-        warn!(
-            readiness = ?talker.readiness(),
-            dispatch_kind = ?kind,
-            "Talker dispatch skipped because runtime is not ready"
-        );
-        return false;
-    }
-    true
 }

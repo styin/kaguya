@@ -40,6 +40,7 @@ pub mod core {
     pub mod narration;
     pub mod output;
     pub mod persona;
+    pub mod pipeline;
     pub mod silence;
     pub mod types;
 }
@@ -52,7 +53,9 @@ pub mod services {
 }
 
 pub use clients::{audio_sink, listener, probe, reasoner, talker};
-pub use core::{context, history, input_stream, narration, output, persona, silence, types};
+pub use core::{
+    context, history, input_stream, narration, output, persona, pipeline, silence, types,
+};
 pub use services::control;
 #[cfg(feature = "dev-console")]
 pub use services::endpoint;
