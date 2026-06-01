@@ -5,6 +5,7 @@ Requires: pydantic-settings, opuslib, grpcio. Proto stubs are committed — grpc
 not needed to run tests. Does NOT require RealtimeSTT, RealtimeTTS, or llama.cpp.
 """
 
+
 def test_config_defaults():
     from config import TalkerConfig
 
