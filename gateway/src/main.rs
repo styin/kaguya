@@ -23,7 +23,7 @@ use kaguya_gateway::lifecycle::{LifecycleSupervisor, Readiness, ShutdownReason};
 use kaguya_gateway::narration::NarrationFilter;
 use kaguya_gateway::output::OutputManager;
 use kaguya_gateway::persona::Persona;
-use kaguya_gateway::pipeline::{handlers, ActionExecutor, TurnState};
+use kaguya_gateway::pipeline::{handlers, PipelineComponents, TurnState};
 use kaguya_gateway::proto;
 use kaguya_gateway::rag::RagEngine;
 use kaguya_gateway::reasoner::ReasonerManager;
@@ -279,6 +279,19 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Event Loop State ──
     let mut turn = TurnState::new(conversation_id.clone(), last_memory_md);
+    let pipeline = PipelineComponents {
+        talker: &talker,
+        history: &history,
+        output: &output,
+        tools: &tools,
+        reasoner: &reasoner,
+        rag: &rag,
+        silence: &silence,
+        persona: &persona,
+        shared_persona: &shared_persona,
+        talker_output_tx: talker_output_tx.clone(),
+        p3_tx: input_tx.p3.clone(),
+    };
 
     // ══════════════════════════════════════
     //  MAIN EVENT LOOP
@@ -358,16 +371,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     None => continue,
                 };
-                let mut exec = ActionExecutor {
-                    talker: &talker, history: &history, output: &output,
-                    tools: &tools, reasoner: &reasoner, rag: &rag,
-                    silence: &silence, persona: &persona,
-                    shared_persona: &shared_persona,
-                    talker_output_tx: talker_output_tx.clone(),
-                    p3_tx: input_tx.p3.clone(),
-                    state: &mut turn,
-                };
-                exec.execute_all(actions).await;
+                pipeline.executor(&mut turn).execute_all(actions).await;
             }
 
             // ── P1: User Intent ──
@@ -378,33 +382,31 @@ async fn main() -> anyhow::Result<()> {
                     _ => continue,
                 };
                 info!(text = %text, "P1: user intent");
-                if !talker.is_ready() {
+                let ready = talker.is_ready();
+                if !ready {
                     warn!(
                         readiness = ?talker.readiness(),
-                        "P1 user intent skipped because Talker runtime is not ready"
+                        "P1 user intent: Talker not ready"
                     );
-                    continue;
                 }
 
-                let tasks = reasoner.active_tasks().await;
-                let retrieval = rag.retrieve(&text).await;
-                let recent = history.recent().await;
-                let tool_defs = tools.definitions();
+                // Skip expensive async fetches when Talker can't accept a dispatch.
+                let (retrieval, recent, tool_defs, tasks) = if ready {
+                    (
+                        rag.retrieve(&text).await,
+                        history.recent().await,
+                        tools.definitions(),
+                        reasoner.active_tasks().await,
+                    )
+                } else {
+                    (vec![], vec![], vec![], vec![])
+                };
 
                 let actions = handlers::handle_user_intent(
-                    &mut turn, &text, is_voice, true,
+                    &mut turn, &text, is_voice, ready,
                     retrieval, recent, tool_defs, &tasks,
                 );
-                let mut exec = ActionExecutor {
-                    talker: &talker, history: &history, output: &output,
-                    tools: &tools, reasoner: &reasoner, rag: &rag,
-                    silence: &silence, persona: &persona,
-                    shared_persona: &shared_persona,
-                    talker_output_tx: talker_output_tx.clone(),
-                    p3_tx: input_tx.p3.clone(),
-                    state: &mut turn,
-                };
-                exec.execute_all(actions).await;
+                pipeline.executor(&mut turn).execute_all(actions).await;
             }
 
             // ── P2: ASR States ──
@@ -413,16 +415,7 @@ async fn main() -> anyhow::Result<()> {
                     InputEvent::VadSpeechStart => {
                         debug!("P2: vad_speech_start → BARGE-IN");
                         let actions = handlers::handle_vad_speech_start(&mut turn);
-                        let mut exec = ActionExecutor {
-                            talker: &talker, history: &history, output: &output,
-                            tools: &tools, reasoner: &reasoner, rag: &rag,
-                            silence: &silence, persona: &persona,
-                            shared_persona: &shared_persona,
-                            talker_output_tx: talker_output_tx.clone(),
-                            p3_tx: input_tx.p3.clone(),
-                            state: &mut turn,
-                        };
-                        exec.execute_all(actions).await;
+                        pipeline.executor(&mut turn).execute_all(actions).await;
                     }
                     InputEvent::PartialTranscript { text } => {
                         debug!(text = %text, "P2: partial");
@@ -475,16 +468,7 @@ async fn main() -> anyhow::Result<()> {
                     _ => continue,
                 };
                 if !actions.is_empty() {
-                    let mut exec = ActionExecutor {
-                        talker: &talker, history: &history, output: &output,
-                        tools: &tools, reasoner: &reasoner, rag: &rag,
-                        silence: &silence, persona: &persona,
-                        shared_persona: &shared_persona,
-                        talker_output_tx: talker_output_tx.clone(),
-                        p3_tx: input_tx.p3.clone(),
-                        state: &mut turn,
-                    };
-                    exec.execute_all(actions).await;
+                    pipeline.executor(&mut turn).execute_all(actions).await;
                 }
             }
 
@@ -500,16 +484,7 @@ async fn main() -> anyhow::Result<()> {
                         ready, recent, tool_defs,
                     );
                     if !actions.is_empty() {
-                        let mut exec = ActionExecutor {
-                            talker: &talker, history: &history, output: &output,
-                            tools: &tools, reasoner: &reasoner, rag: &rag,
-                            silence: &silence, persona: &persona,
-                            shared_persona: &shared_persona,
-                            talker_output_tx: talker_output_tx.clone(),
-                            p3_tx: input_tx.p3.clone(),
-                            state: &mut turn,
-                        };
-                        exec.execute_all(actions).await;
+                        pipeline.executor(&mut turn).execute_all(actions).await;
                     }
                 }
             }

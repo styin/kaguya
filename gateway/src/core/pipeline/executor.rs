@@ -23,8 +23,48 @@ use crate::types::InputEvent;
 
 use super::types::{PipelineAction, TurnState};
 
+/// All Gateway component references needed by the executor, minus
+/// `TurnState`. Constructed once before the event loop; lends short-lived
+/// [`ActionExecutor`] instances per select-branch via [`executor()`](Self::executor).
+pub struct PipelineComponents<'a> {
+    pub talker: &'a TalkerClient,
+    pub history: &'a History,
+    pub output: &'a OutputManager,
+    pub tools: &'a ToolRegistry,
+    pub reasoner: &'a ReasonerManager,
+    pub rag: &'a Arc<RagEngine>,
+    pub silence: &'a SilenceTimers,
+    pub persona: &'a Persona,
+    pub shared_persona: &'a Arc<RwLock<proto::PersonaConfig>>,
+    pub talker_output_tx: mpsc::Sender<proto::TalkerOutput>,
+    pub p3_tx: mpsc::Sender<InputEvent>,
+}
+
+impl<'a> PipelineComponents<'a> {
+    /// Borrow `TurnState` to produce a ready-to-run executor.
+    pub fn executor<'b>(&'b self, state: &'b mut TurnState) -> ActionExecutor<'b>
+    where
+        'a: 'b,
+    {
+        ActionExecutor {
+            talker: self.talker,
+            history: self.history,
+            output: self.output,
+            tools: self.tools,
+            reasoner: self.reasoner,
+            rag: self.rag,
+            silence: self.silence,
+            persona: self.persona,
+            shared_persona: self.shared_persona,
+            talker_output_tx: self.talker_output_tx.clone(),
+            p3_tx: self.p3_tx.clone(),
+            state,
+        }
+    }
+}
+
 /// Bridges [`PipelineAction`] values to real component calls.
-/// Constructed per select-branch in the event loop.
+/// Produced by [`PipelineComponents::executor()`] per select-branch.
 pub struct ActionExecutor<'a> {
     pub talker: &'a TalkerClient,
     pub history: &'a History,

@@ -9,5 +9,5 @@ pub mod executor;
 pub mod handlers;
 pub mod types;
 
-pub use executor::ActionExecutor;
+pub use executor::{ActionExecutor, PipelineComponents};
 pub use types::{PipelineAction, TurnState};
