@@ -394,59 +394,118 @@ can build `TalkerContext` without holding `&History` or `&ToolRegistry`.
 
 ### Test coverage
 
-28 handler unit tests covering all event variants, edge cases (talker not
+43 handler unit tests covering all event variants, edge cases (talker not
 ready, narration filtered, generation active, interrupted response, memory
-persistence gating by dispatch kind).
+persistence gating by dispatch kind, cancellation token signalling, silence
+timer lifecycle across readiness transitions).
 
-## PluginSystem Plan
+## Capability System — Implemented (v1: RAG)
 
-The v1 public plugin slot remains RAG only.
+The capability model separates **contracts** (trait interfaces in
+`gateway/src/capabilities/`) from **providers** (implementations in their
+respective modules: `rag/`, `clients/`, `tools.rs`).
 
-V1 runtime:
+### Architecture
 
-- in-process Rust capability, compiled into Gateway or derivative products;
-- no dynamic sidecar loading yet;
-- no Python plugin loading in Gateway;
-- no dual-track public API yet.
+Two layers:
 
-Core interface shape:
+```text
+capabilities/           contracts only (traits)
+  rag.rs                RagCapability trait
+
+rag/                    default RagCapability provider
+  mod.rs                RagEngine + impl RagCapability for RagEngine
+  store.rs, ...         unchanged internals
+```
+
+The executor and orchestrator consume capabilities through `dyn` trait
+objects (`Arc<dyn RagCapability>`), never concrete types. This makes
+providers swappable without touching pipeline code.
+
+### RagCapability Trait
 
 ```rust
-#[async_trait]
-pub trait RagProvider: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn name(&self) -> &'static str;
-
-    async fn retrieve(&self, request: RetrievalRequest) -> anyhow::Result<Vec<RetrievalHit>>;
-    async fn evaluate_and_store(&self, request: MemoryWriteRequest) -> anyhow::Result<MemoryWriteResult>;
-    async fn export_memory_md(&self) -> anyhow::Result<String>;
-    async fn health(&self) -> CapabilityHealth;
+#[tonic::async_trait]
+pub trait RagCapability: Send + Sync {
+    fn id(&self) -> &str;
+    async fn retrieve(&self, query: &str) -> Vec<proto::RetrievalResult>;
+    async fn evaluate_and_store(&self, user_input: &str, assistant_response: &str, turn_id: &str);
+    async fn export_memory_md(&self) -> String;
+    fn readiness(&self) -> Readiness;
 }
 ```
 
-Community maintainer flow for v1:
+All capability traits use the shared `Readiness` enum from
+`lifecycle` — no separate health type. This enables the generalized
+pattern `if capability.readiness().is_ready()` across all capability
+types.
 
-1. Implement a Rust crate or workspace module exposing a `RagProvider`.
-2. Provide manifest-like metadata: id, version, description, config schema, and
-   capability type.
-3. Register through `CapabilityRegistry::register_rag_provider`.
-4. Select the provider by config or compile-time feature in Gateway or a
-   derivative product.
+Proto types are used directly in v1 for pragmatism. A separate
+`kaguya-capabilities` API crate with its own types is deferred to
+Phase 2 (community plugins).
 
-Future plugin expansion:
+### Trait Erasure in main.rs
 
-- `tool_provider` and `reasoner_adapter` next, because they operate on
-  Gateway-owned structured objects.
-- `llm_provider`, `tts_provider`, `stt_provider`, and `vad_provider` later,
-  selected by runtime config but executed inside Talker or Listener.
-- Sidecar plugins only after v1 succeeds, with lazy startup, exclusive-slot
-  enforcement, idle shutdown, resource limits, health checks, and Supervisor
-  ownership.
+```rust
+let rag_engine = RagEngine::new(&config.rag, ...)?;
+let rag_embedder = rag_engine.embedder.clone();   // extract before erasure
+let rag: Arc<dyn RagCapability> = Arc::new(rag_engine);
+```
 
-Important rule: bindings are framework infrastructure, not per-plugin burden.
-Community plugins should implement known capability contracts. They should not
-need custom Gateway binding code unless they introduce a new capability kind or
-transport.
+Implementation-specific references (e.g. `embedder`) are extracted
+before the concrete type is wrapped in `Arc<dyn RagCapability>`.
+After erasure, only trait methods are callable.
+
+### Test Coverage
+
+- `MockRagCapability` in `capabilities/rag.rs` — configurable results,
+  call counter, trait-object dispatch test.
+- `rag_engine_implements_capability_trait` — compile-time proof.
+- 94 total Gateway tests pass with the capability wiring.
+
+### Future Capability Extraction Order
+
+| Capability | Provider | Complexity |
+|-----------|----------|-----------|
+| RAG | RagEngine | Done (this PR) |
+| Tools | ToolRegistry | Low — in-process, similar pattern |
+| Reasoner | ReasonerManager | Medium — gRPC, per-task lifecycle |
+| Talker | TalkerClient | Medium — gRPC, recovery loop |
+| Listener | ListenerClient | High — gRPC + TCP audio |
+
+Each follows the same pattern: trait in `capabilities/xxx.rs`, impl on
+existing struct, swap executor reference to `dyn XxxCapability`.
+
+### Config-Driven Capability Wiring (Future — Issue #62)
+
+The trait boundary IS the wiring point. When multiple providers exist for
+the same capability, `kaguya.runtime.toml` selects the active provider
+and `main.rs` constructs the chosen concrete type before erasing to `dyn`.
+Deferred until a second RAG (or other capability) implementation exists.
+
+### Community Plugin Path (Phase 2)
+
+When community plugins become real:
+
+1. Extract `kaguya-capabilities` crate — traits + own types (no
+   proto/tonic dependency).
+2. Define stable request/response types (`RetrievalRequest`,
+   `RetrievalHit`, etc.).
+3. Gateway converts between capability types and proto types at the
+   boundary.
+4. Plugin authors depend on `kaguya-capabilities` only, implement trait,
+   publish crate.
+5. Gateway or derivative product compiles plugin in, constructs in
+   `main.rs`.
+
+Sidecar plugins only after v1 succeeds, with lazy startup,
+exclusive-slot enforcement, idle shutdown, resource limits, health
+checks, and Supervisor ownership.
+
+Important rule: bindings are framework infrastructure, not per-plugin
+burden. Community plugins implement known capability contracts. They
+should not need custom Gateway binding code unless they introduce a new
+capability kind or transport.
 
 ## Non-Goals For The Current Slice
 
@@ -464,4 +523,4 @@ transport.
 3. ~~Remove Gateway FallbackPolicy.~~ Done.
 4. ~~Supervisor restart exhaustion.~~ Done.
 5. ~~TurnPipeline extraction from main.rs.~~ Done.
-6. Introduce RAG provider trait and registry.
+6. ~~Introduce RAG capability trait.~~ Done.

@@ -443,6 +443,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                     InputEvent::ReasonerStep { task_id: _, description } => {
                         let should_narrate = narration.should_narrate(&description);
+                        // Skip the async history fetch when the handler will
+                        // short-circuit anyway (narration filtered or already
+                        // generating). Avoids unnecessary RwLock contention on
+                        // the high-frequency reasoner step path.
+                        if !should_narrate || turn.is_generating() {
+                            continue;
+                        }
                         let recent = history.recent().await;
                         let ready = talker.is_ready();
                         handlers::handle_reasoner_step(

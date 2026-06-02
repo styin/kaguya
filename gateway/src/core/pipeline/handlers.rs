@@ -132,7 +132,7 @@ pub fn handle_response_complete(
     state.cancel_active_silence();
     actions.push(PipelineAction::StartSilenceTimers);
     actions.push(PipelineAction::UnmuteOutput);
-    state.active_gen = None;
+    state.cancel_active_gen();
     state.current_dispatch_kind = None;
     state.current_response.clear();
 
@@ -166,11 +166,13 @@ pub fn handle_user_intent(
         });
     }
 
+    // Cancel silence regardless of Talker readiness — the user spoke,
+    // so a stale silence timer must not fire a proactive response.
+    state.cancel_active_silence();
+
     if !talker_ready {
         return actions;
     }
-
-    state.cancel_active_silence();
     actions.push(PipelineAction::AppendUserHistory {
         text: text.to_string(),
     });
@@ -1126,6 +1128,61 @@ mod tests {
             "rejected tool must not trigger a continuation dispatch"
         );
         assert_eq!(actions.len(), 1, "only AppendToolResultHistory expected");
+    }
+
+    #[test]
+    fn response_complete_cancels_active_gen_token() {
+        // Regression: line 135 used `state.active_gen = None` which drops the
+        // CancellationToken without calling .cancel(). Any child_token() clone
+        // held by a dispatch task is never signalled. In a race where an old
+        // ResponseComplete arrives after a new dispatch started, this would
+        // silently drop the NEW dispatch's token, orphaning the generation.
+        let mut state = fresh_state();
+        let token = tokio_util::sync::CancellationToken::new();
+        let child = token.clone();
+        state.active_gen = Some(token);
+        state.current_response = "some text ".into();
+        state.current_dispatch_kind = Some(DispatchKind::ToolResult);
+
+        let _ = handle_response_complete(&mut state, "turn-cancel", false, None);
+
+        assert!(state.active_gen.is_none());
+        assert!(
+            child.is_cancelled(),
+            "token must be cancelled, not just dropped"
+        );
+    }
+
+    #[test]
+    fn user_intent_cancels_silence_even_when_talker_not_ready() {
+        // Regression: handle_user_intent returned early at the !talker_ready
+        // guard (line 169) BEFORE calling cancel_active_silence (line 173).
+        // A running silence timer could fire a proactive response after Talker
+        // reconnects, while the user's actual message was dropped.
+        let mut state = fresh_state();
+        let token = tokio_util::sync::CancellationToken::new();
+        let child = token.clone();
+        state.active_silence = Some(token);
+
+        let _ = handle_user_intent(
+            &mut state,
+            "hello",
+            true,
+            false, // talker NOT ready
+            vec![],
+            vec![],
+            vec![],
+            &[],
+        );
+
+        assert!(
+            state.active_silence.is_none(),
+            "silence must be cancelled even when Talker is down"
+        );
+        assert!(
+            child.is_cancelled(),
+            "silence token must be cancelled, not just dropped"
+        );
     }
 
     #[test]
