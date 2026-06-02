@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use kaguya_gateway::audio_sink::ListenerAudioSink;
+use kaguya_gateway::capabilities::RagCapability;
 use kaguya_gateway::config::GatewayConfig;
 use kaguya_gateway::control::ControlServiceImpl;
 #[cfg(feature = "dev-console")]
@@ -72,10 +73,9 @@ async fn main() -> anyhow::Result<()> {
     let conversation_id = Uuid::new_v4().to_string();
     let history = History::new(config.history.max_recent_turns);
     let persona = Persona::load(&config.files.soul_path, &config.files.identity_path).await?;
-    let rag = Arc::new(RagEngine::new(
-        &config.rag,
-        config.files.workspace_root.clone(),
-    )?);
+    let rag_engine = RagEngine::new(&config.rag, config.files.workspace_root.clone())?;
+    let rag_embedder = rag_engine.embedder.clone();
+    let rag: Arc<dyn RagCapability> = Arc::new(rag_engine);
     let task_spawner = lifecycle.spawner();
     let talker_connection = lifecycle.register_connection("talker");
     let listener_connection = lifecycle.register_connection("listener");
@@ -102,8 +102,8 @@ async fn main() -> anyhow::Result<()> {
     let output = OutputManager::new(audio_out_tx, metadata_out_tx);
     let mut narration = NarrationFilter::new(5);
 
-    // ── Start RAG embedder background task ──
-    if let Some(ref embedder) = rag.embedder {
+    // ── Start RAG embedder background task (RagEngine-specific, before trait erasure) ──
+    if let Some(ref embedder) = rag_embedder {
         let emb = embedder.clone();
         lifecycle.spawn("rag_embedder", async move { emb.run().await });
     }

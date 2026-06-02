@@ -9,12 +9,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info};
 
+use crate::capabilities::RagCapability;
 use crate::context;
 use crate::history::History;
 use crate::output::OutputManager;
 use crate::persona::Persona;
 use crate::proto;
-use crate::rag::RagEngine;
 use crate::reasoner::ReasonerManager;
 use crate::silence::SilenceTimers;
 use crate::talker::TalkerClient;
@@ -32,7 +32,7 @@ pub struct PipelineComponents<'a> {
     pub output: &'a OutputManager,
     pub tools: &'a ToolRegistry,
     pub reasoner: &'a ReasonerManager,
-    pub rag: &'a Arc<RagEngine>,
+    pub rag: &'a Arc<dyn RagCapability>,
     pub silence: &'a SilenceTimers,
     pub persona: &'a Persona,
     pub shared_persona: &'a Arc<RwLock<proto::PersonaConfig>>,
@@ -71,7 +71,7 @@ pub struct ActionExecutor<'a> {
     pub output: &'a OutputManager,
     pub tools: &'a ToolRegistry,
     pub reasoner: &'a ReasonerManager,
-    pub rag: &'a Arc<RagEngine>,
+    pub rag: &'a Arc<dyn RagCapability>,
     pub silence: &'a SilenceTimers,
     pub persona: &'a Persona,
     pub shared_persona: &'a Arc<RwLock<proto::PersonaConfig>>,

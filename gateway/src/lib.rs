@@ -17,6 +17,7 @@
 //! - [`rag`] — Retrieval-augmented generation (embedding, retrieval, memory store).
 //! - [`tools`] — Tool registry and dispatch for the Talker's tool-use protocol.
 
+pub mod capabilities;
 pub mod config;
 pub mod error;
 pub mod lifecycle;
