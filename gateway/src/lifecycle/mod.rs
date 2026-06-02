@@ -354,6 +354,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_prunes_completed_tasks() {
+        let supervisor = LifecycleSupervisor::new();
+
+        // Spawn a task that completes immediately.
+        supervisor.spawn("short-lived", async {});
+        assert_eq!(supervisor.task_count(), 1);
+
+        // Let the runtime poll the task to completion.
+        tokio::task::yield_now().await;
+
+        // Spawning another task should prune the finished one.
+        supervisor.spawn("second", async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        assert_eq!(
+            supervisor.task_count(),
+            1,
+            "finished task should have been pruned on spawn"
+        );
+    }
+
+    #[tokio::test]
     async fn task_spawned_after_shutdown_sees_cancelled_token_and_can_be_drained() {
         let ran = Arc::new(AtomicBool::new(false));
         let ran_task = Arc::clone(&ran);

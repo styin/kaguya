@@ -39,9 +39,11 @@ impl TaskSpawner {
             }
         });
 
-        self.tasks
+        let mut guard = self
+            .tasks
             .lock()
-            .expect("managed task registry lock poisoned")
-            .push(ManagedTask { name, handle });
+            .expect("managed task registry lock poisoned");
+        guard.retain(|t| !t.handle.is_finished());
+        guard.push(ManagedTask { name, handle });
     }
 }
