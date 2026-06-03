@@ -145,8 +145,8 @@ pub fn handle_response_complete(
 }
 
 /// P1: Process a user intent (voice transcript or text command).
-/// Cancels silence, appends to history, builds context with RAG
-/// retrieval, and dispatches to Talker. No-ops if Talker is not ready.
+/// Echoes voice input and cancels silence regardless of Talker readiness.
+/// Appends history, builds context, and dispatches only when Talker is ready.
 pub fn handle_user_intent(
     state: &mut TurnState,
     text: &str,
@@ -624,6 +624,33 @@ mod tests {
         );
 
         // No dispatch, no history append.
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, PipelineAction::DispatchTalker { .. })));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, PipelineAction::AppendUserHistory { .. })));
+        assert!(state.current_dispatch_kind.is_none());
+    }
+
+    #[test]
+    fn voice_user_intent_echoes_when_talker_not_ready() {
+        let mut state = fresh_state();
+
+        let actions = handle_user_intent(
+            &mut state,
+            "voice hello",
+            true,  // is_voice
+            false, // talker NOT ready
+            vec![],
+            vec![],
+            vec![],
+            &[],
+        );
+
+        assert!(actions.contains(&PipelineAction::SendUserInput {
+            text: "voice hello".into(),
+        }));
         assert!(!actions
             .iter()
             .any(|a| matches!(a, PipelineAction::DispatchTalker { .. })));
