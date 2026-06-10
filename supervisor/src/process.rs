@@ -443,7 +443,7 @@ async fn terminate_process(pid: u32) -> std::io::Result<()> {
     let pid = pid.to_string();
     if cfg!(windows) {
         Command::new("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
+            .args(["/PID", &pid, "/T"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -548,6 +548,36 @@ mod tests {
         assert_eq!(snapshot.restart_count, 0);
 
         stop_managed_process(process, Duration::from_millis(500)).await;
+    }
+
+    /// BUG-SCOPING: On Windows, `terminate_process` uses `taskkill /F` (force kill),
+    /// making it identical to `force_kill_process`. The graceful shutdown escalation
+    /// path (terminate → wait → force_kill) has no real grace because the first
+    /// step already force-kills the process tree.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_should_not_force_kill_on_windows() {
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().expect("child should have a PID");
+
+        terminate_process(pid).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let exited = child.try_wait().unwrap();
+        assert!(
+            exited.is_none(),
+            "terminate_process force-killed the process (taskkill /F); \
+             graceful termination should allow the process to shut down on its own"
+        );
+
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 
     #[tokio::test]

@@ -240,15 +240,13 @@ pub fn handle_tool_result(
 
     state.cancel_active_gen();
     actions.push(PipelineAction::UnmuteOutput);
-    state.current_dispatch_kind = Some(DispatchKind::ToolResult);
 
     if talker_ready {
+        state.current_dispatch_kind = Some(DispatchKind::ToolResult);
         actions.push(PipelineAction::DispatchTalker {
             context: ctx,
             kind: DispatchKind::ToolResult,
         });
-    } else {
-        state.current_dispatch_kind = None;
     }
 
     actions

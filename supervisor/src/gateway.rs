@@ -31,7 +31,12 @@ pub async fn fetch_capability_status(endpoint: &str) -> Option<serde_json::Value
         .unwrap_or(endpoint)
         .trim_end_matches('/');
     let url = format!("{base}/capabilities/status");
-    let response = reqwest::get(url).await.ok()?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let response = client.get(url).send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -43,4 +48,42 @@ async fn _channel(endpoint: &str) -> anyhow::Result<Channel> {
     Ok(Channel::from_shared(endpoint.to_string())?
         .connect()
         .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BUG-SCOPING: `fetch_capability_status` uses `reqwest::get` without any
+    /// timeout. If the endpoint stalls (accepts TCP but never responds), the
+    /// call hangs indefinitely, blocking the supervisor's status refresh path.
+    #[tokio::test]
+    async fn fetch_capability_status_should_not_hang_on_stalled_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Accept connections but never respond — simulates a half-open endpoint.
+        tokio::spawn(async move {
+            loop {
+                if let Ok((socket, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let _hold = socket;
+                        tokio::time::sleep(Duration::from_secs(300)).await;
+                    });
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_capability_status(&format!("http://{addr}")),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "fetch_capability_status hung for >5s on a stalled endpoint; \
+             it should have an internal timeout"
+        );
+    }
 }
