@@ -4,15 +4,14 @@ import {
   selectWsOutCount,
   useStore,
 } from "../../store";
-import type { IngressMessage } from "../../types";
 import "./topbar.css";
 
 /**
  * Top bar.
  *
- * Wired today: brand + version chip, WS status pill, WS uptime, ↓/↑
- * message counters, Reconnect (calls `ws.reconnect()`), Shutdown
- * (sends `{type:"control", command:"shutdown"}`).
+ * Wired today: brand + version chip, WS status pill, WS uptime,
+ * message counters, Reconnect (calls `ws.reconnect()`), Start App /
+ * Shutdown (call Supervisor app lifecycle endpoints).
  *
  * Deliberately omitted: server-authoritative session ID. The gateway
  * mints `conversation_id` at startup but never sends it; rather than
@@ -21,10 +20,8 @@ import "./topbar.css";
  * lands (see console/README.md → Future work).
  */
 export function TopBar({
-  onSend,
   onReconnect,
 }: {
-  onSend: (msg: IngressMessage) => void;
   onReconnect: () => void;
 }) {
   const wsStatus = useStore((s) => s.wsStatus);
@@ -63,9 +60,17 @@ export function TopBar({
       </button>
       <button
         type="button"
+        className="top-btn"
+        onClick={() => void fetch("/api/app/start", { method: "POST" })}
+        title="Start the supervised app runtime"
+      >
+        Start App
+      </button>
+      <button
+        type="button"
         className="top-btn danger"
-        onClick={() => onSend({ type: "control", command: "shutdown" })}
-        title="Send shutdown control message"
+        onClick={() => void fetch("/api/app/shutdown", { method: "POST" })}
+        title="Shutdown the supervised app runtime"
       >
         Shutdown
       </button>

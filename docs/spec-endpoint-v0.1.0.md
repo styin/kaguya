@@ -256,7 +256,7 @@ Each section is independently collapsible to reduce noise. Sections auto-scroll 
 | ------- | ------------- | ----------- | ------------ |
 | Gateway | `cargo run --features dev-console` (from `gateway/`) | SIGTERM (graceful) or WS shutdown command | `/health` HTTP endpoint (200 OK) |
 | Talker  | `python -m talker.main` (from `talker/`, in conda env `kaguya`) | SIGTERM | gRPC health or process alive check |
-| LLM Server | N/A (started externally via LM Studio) | N/A | HTTP GET to configured `llm_base_url` (e.g., `http://localhost:8080/health`) |
+| LLM Server | N/A (started externally via LM Studio) | N/A | HTTP GET to configured `llm_base_url` (e.g., `http://localhost:1234/v1/models`) |
 
 ### 6.2 Process Supervisor
 
@@ -302,7 +302,7 @@ The supervisor is a small Express/Fastify sidecar (or integrated into Vite's dev
     },
     "llm_server": {
       "managed": false,
-      "health_url": "http://localhost:8080/health",
+      "health_url": "http://localhost:1234/v1/models",
       "poll_interval_ms": 5000
     }
   }
@@ -485,7 +485,7 @@ export const config = {
 ### 11.2 Gateway Config Addition
 
 ```toml
-# config/gateway.toml — new section
+# gateway/gateway.toml — new section
 [console]
 ws_debug_addr = "127.0.0.1:8080"  # shares addr with /ws; just a new route
 ```

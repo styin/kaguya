@@ -3,22 +3,28 @@
 //! Handles a single connected browser client at a time (§2.4).
 //! Phase 2 targets OpenPod protocol integration.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
     response::IntoResponse,
     routing::get,
-    Router,
+    Json, Router,
 };
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::audio_sink::ListenerAudioSink;
+use crate::lifecycle::{LifecycleSnapshot, LifecycleSupervisor};
 use crate::types::*;
+
+const CLOSE_SUPERSEDED: u16 = 4001;
 
 pub struct EndpointState {
     pub control_tx: mpsc::Sender<ControlSignal>,
@@ -26,14 +32,37 @@ pub struct EndpointState {
     pub audio_out_rx: tokio::sync::Mutex<mpsc::Receiver<bytes::Bytes>>,
     pub metadata_rx: tokio::sync::Mutex<mpsc::Receiver<MetadataEvent>>,
     pub active_client: std::sync::Mutex<Option<CancellationToken>>,
-    pub listener_audio_tx: mpsc::Sender<bytes::Bytes>,
+    pub listener_audio: ListenerAudioSink,
+    pub runtime_status: RuntimeStatusState,
+}
+
+#[derive(Clone)]
+pub struct RuntimeStatusState {
+    pub lifecycle: LifecycleSupervisor,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeStatusResponse {
+    pub lifecycle: LifecycleSnapshot,
 }
 
 pub fn router(state: Arc<EndpointState>) -> Router {
     Router::new()
         .route("/ws", get(ws_upgrade))
         .route("/health", get(|| async { "OK" }))
+        .route("/capabilities/status", get(runtime_status))
+        .route("/runtime/status", get(runtime_status))
         .with_state(state)
+}
+
+async fn runtime_status(State(state): State<Arc<EndpointState>>) -> Json<RuntimeStatusResponse> {
+    Json(runtime_status_response(&state.runtime_status))
+}
+
+fn runtime_status_response(state: &RuntimeStatusState) -> RuntimeStatusResponse {
+    RuntimeStatusResponse {
+        lifecycle: state.lifecycle.snapshot(),
+    }
 }
 
 async fn ws_upgrade(
@@ -67,6 +96,12 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
 
             _ = token.cancelled() => {
                 info!("dev console superseded by new client");
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_SUPERSEDED,
+                        reason: Cow::from("superseded by another dev console client"),
+                    })))
+                    .await;
                 break;
             }
 
@@ -77,7 +112,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
                     }
                     Some(Ok(Message::Binary(data))) => {
                         // G4: forward raw audio bytes to Listener via Unix socket
-                        let _ = state.listener_audio_tx.send(bytes::Bytes::from(data)).await;
+                        state.listener_audio.send(bytes::Bytes::from(data)).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
@@ -133,5 +168,27 @@ async fn handle_text_message(json: &str, state: &EndpointState) {
             _ => {}
         },
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lifecycle::Readiness;
+
+    #[test]
+    fn runtime_status_response_includes_lifecycle_snapshot() {
+        let lifecycle = LifecycleSupervisor::new();
+        let talker = lifecycle.register_connection("talker");
+        talker.set_readiness(Readiness::Ready);
+
+        let response = runtime_status_response(&RuntimeStatusState { lifecycle });
+
+        assert_eq!(response.lifecycle.connections.len(), 1);
+        assert_eq!(response.lifecycle.connections[0].name, "talker");
+        assert_eq!(
+            response.lifecycle.connections[0].readiness,
+            Readiness::Ready
+        );
     }
 }

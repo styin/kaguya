@@ -5,6 +5,7 @@
 //! 30s → context shift
 //! Cancelled on speech start (vad_speech_start) or new dispatch
 
+use crate::lifecycle::TaskSpawner;
 use crate::types::InputEvent;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -15,6 +16,7 @@ pub struct SilenceTimers {
     follow_up_secs: u64,
     context_shift_secs: u64,
     p4_tx: mpsc::Sender<InputEvent>,
+    tasks: TaskSpawner,
 }
 
 impl SilenceTimers {
@@ -23,12 +25,14 @@ impl SilenceTimers {
         follow_up: u64,
         context_shift: u64,
         p4_tx: mpsc::Sender<InputEvent>,
+        tasks: TaskSpawner,
     ) -> Self {
         Self {
             soft_secs: soft,
             follow_up_secs: follow_up,
             context_shift_secs: context_shift,
             p4_tx,
+            tasks,
         }
     }
 
@@ -39,7 +43,7 @@ impl SilenceTimers {
         let targets = [self.soft_secs, self.follow_up_secs, self.context_shift_secs];
         let tx = self.p4_tx.clone();
 
-        tokio::spawn(async move {
+        self.tasks.spawn("silence_timers", async move {
             let mut elapsed = 0u64;
             for &target in &targets {
                 let wait = target.saturating_sub(elapsed);

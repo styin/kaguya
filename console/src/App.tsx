@@ -33,9 +33,8 @@ export default function App() {
     actions.recordWsIn(msg);
   }, []);
 
-  // Shared send channel for region components (PromptBar in LogsPanel,
-  // TopBar Shutdown). Process control routes use POST /api/process/...
-  // directly and do not flow through here.
+  // Shared send channel for conversational ingress. Process/app control
+  // routes use POST /api/... directly and do not flow through here.
   const sendIngress = useCallback((msg: IngressMessage) => {
     actions.recordWsOut(msg);
     wsRef.current?.send(msg);
@@ -98,7 +97,7 @@ export default function App() {
   return (
     <div className={"app" + (logsCollapsed ? " logs-collapsed" : "")}>
       <header className="region-topbar">
-        <TopBar onSend={sendIngress} onReconnect={reconnect} />
+        <TopBar onReconnect={reconnect} />
       </header>
       <aside className="region-leftrail">
         <LeftRail />

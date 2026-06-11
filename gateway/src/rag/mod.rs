@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::capabilities::RagCapability;
 use crate::config::RagConfig;
+use crate::lifecycle::Readiness;
 use crate::proto;
 use embedder::Embedder;
 use retriever::HybridRetriever;
@@ -145,6 +147,29 @@ impl RagEngine {
     }
 }
 
+#[tonic::async_trait]
+impl RagCapability for RagEngine {
+    fn id(&self) -> &str {
+        "sqlite-hybrid"
+    }
+
+    async fn retrieve(&self, query: &str) -> Vec<proto::RetrievalResult> {
+        self.retriever.retrieve(query).await
+    }
+
+    async fn evaluate_and_store(&self, user_input: &str, assistant_response: &str, turn_id: &str) {
+        RagEngine::evaluate_and_store(self, user_input, assistant_response, turn_id).await
+    }
+
+    async fn export_memory_md(&self) -> String {
+        RagEngine::export_memory_md(self).await
+    }
+
+    fn readiness(&self) -> Readiness {
+        Readiness::Ready
+    }
+}
+
 /// Truncate `s` to at most `max_chars` Unicode characters, never splitting a
 /// multi-byte char. Plain `&s[..n]` panics when `n` falls inside a UTF-8
 /// sequence, which happens routinely on Chinese / emoji input.
@@ -162,6 +187,12 @@ pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rag_engine_implements_capability_trait() {
+        fn assert_cap<T: RagCapability>() {}
+        assert_cap::<RagEngine>();
+    }
 
     #[test]
     fn truncate_chars_handles_multibyte_boundaries() {

@@ -183,8 +183,11 @@ function useLogStream(): {
   }, [paused]);
 
   useEffect(() => {
-    const es = new EventSource("/api/logs/stream");
-    es.onmessage = (ev) => {
+    const streams = [
+      new EventSource("/api/logs/stream"),
+      new EventSource("/api/standalone/logs/stream"),
+    ];
+    const onMessage = (ev: MessageEvent) => {
       if (pausedRef.current) return;
       try {
         const entry: LogEntry = JSON.parse(ev.data);
@@ -198,7 +201,10 @@ function useLogStream(): {
         // malformed SSE payload — ignore
       }
     };
-    return () => es.close();
+    for (const es of streams) {
+      es.onmessage = onMessage;
+    }
+    return () => streams.forEach((es) => es.close());
   }, []);
 
   return {

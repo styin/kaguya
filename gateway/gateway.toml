@@ -2,12 +2,6 @@
 ws_addr   = "127.0.0.1:8080"
 grpc_addr = "0.0.0.0:50051"
 
-[clients]
-talker_addr        = "http://127.0.0.1:50053"
-reasoner_addr      = "http://127.0.0.1:50054"
-listener_grpc_addr = "http://127.0.0.1:50055"
-listener_audio_addr = "127.0.0.1:50056"
-
 [files]
 # Paths are resolved relative to the Gateway's cwd (`<repo>/gateway`).
 soul_path      = "../config/SOUL.md"
@@ -22,7 +16,7 @@ soft_prompt_secs   = 3
 follow_up_secs     = 8
 context_shift_secs = 30
 # Disabled until B10 reworks the silence prompt to let the LLM stay silent.
-# The timers still tick (tier semantics preserved) — only the proactive
+# The timers still tick (tier semantics preserved) only the proactive
 # LLM dispatch is suppressed.
 enabled            = false
 
@@ -34,7 +28,7 @@ top_k = 10
 # never approach this; guards against pathological pastes (REF-010).
 max_storage_chars = 4096
 # Output-side caps (chars) applied at retrieval / export time. Defaults
-# unlimited — let the model context budget govern. Set to bound per-turn
+# unlimited; let the model context budget govern. Set to bound per-turn
 # prompt cost when many retrievals fire (REF-010).
 # max_chars_per_result = 400
 # max_chars_per_md_entry = 300

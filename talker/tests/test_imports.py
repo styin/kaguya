@@ -5,21 +5,18 @@ Requires: pydantic-settings, opuslib, grpcio. Proto stubs are committed — grpc
 not needed to run tests. Does NOT require RealtimeSTT, RealtimeTTS, or llama.cpp.
 """
 
-import pytest
 
-
-# TODO: Re-enable once temporary TCP fallback is removed and defaults revert to unix sockets.
-@pytest.mark.skip(
-    reason="config defaults changed by temporary TCP fallback for Windows dev"
-)
 def test_config_defaults():
     from config import TalkerConfig
 
     c = TalkerConfig()
-    assert c.gateway_socket == "/tmp/kaguya-gateway.sock"
     assert c.silence_threshold_ms == 800
     assert c.syntax_silence_threshold_ms == 300
-    assert c.llm_base_url == "http://localhost:8080"
+    assert c.llm_base_url == "http://localhost:1234"
+    assert c.talker_listen_addr == "0.0.0.0:50053"
+    assert c.listener_grpc_addr == "0.0.0.0:50055"
+    assert c.listener_audio_addr == "0.0.0.0"
+    assert c.listener_audio_port == 50056
 
 
 def test_turn_detector_instantiates():

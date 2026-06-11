@@ -3,6 +3,8 @@ import type { IngressMessage, EgressMessage } from "./types";
 
 export type WsStatus = "connecting" | "connected" | "disconnected";
 
+const CLOSE_SUPERSEDED = 4001;
+
 export type WsCallbacks = {
   onStatus: (status: WsStatus) => void;
   onMessage: (msg: EgressMessage) => void;
@@ -53,9 +55,14 @@ export function createWsClient(callbacks: WsCallbacks) {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       ws = null;
       callbacks.onStatus("disconnected");
+      if (ev.code === CLOSE_SUPERSEDED) {
+        closed = true;
+        cancelPending();
+        return;
+      }
       scheduleReconnect();
     };
 
@@ -98,7 +105,12 @@ export function createWsClient(callbacks: WsCallbacks) {
   function close() {
     closed = true;
     cancelPending();
-    ws?.close();
+    if (ws) {
+      ws.onclose = null;
+      ws.close();
+      ws = null;
+    }
+    callbacks.onStatus("disconnected");
   }
 
   connect();

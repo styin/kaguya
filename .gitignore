@@ -12,6 +12,7 @@ Thumbs.db
 
 # Gateway (Rust)
 /gateway/target/
+/supervisor/target/
 **/*.rs.bk
 
 # Talker (Python)

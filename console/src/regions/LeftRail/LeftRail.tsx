@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { actions, useStore } from "../../store";
-import type { ProcessInfo } from "../../types";
+import type { AppStatusSnapshot, ProcessInfo } from "../../types";
 import { AudioStrip } from "./AudioStrip";
 import { ProcessCard } from "./ProcessCard";
 import "./leftrail.css";
@@ -25,7 +25,14 @@ export function LeftRail() {
           className={"mic-toggle-btn" + (micActive ? " active" : "")}
           onClick={() => actions.setMicActive(!micActive)}
         >
-          {micActive ? (<><span className="mic-live-dot" />open mic live</>) : "turn mic on"}
+          {micActive ? (
+            <>
+              <span className="mic-live-dot" />
+              open mic live
+            </>
+          ) : (
+            "turn mic on"
+          )}
         </button>
       </div>
 
@@ -44,21 +51,34 @@ export function LeftRail() {
 
 function useProcesses(): ProcessInfo[] {
   const [list, setList] = useState<ProcessInfo[]>([]);
+
   useEffect(() => {
     let alive = true;
+
     async function poll() {
       try {
-        const res = await fetch("/api/process/status");
-        if (alive && res.ok) setList(await res.json());
+        const app = await fetchAppStatus();
+        if (alive) setList(app.processes);
       } catch {
-        // supervisor not ready — leave the last good list
+        // Supervisor not ready: leave the last good list visible.
       }
     }
+
     poll();
     const id = setInterval(poll, POLL_MS);
-    return () => { alive = false; clearInterval(id); };
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   }, []);
+
   return list;
+}
+
+async function fetchAppStatus(): Promise<AppStatusSnapshot> {
+  const res = await fetch("/api/app/status");
+  if (!res.ok) throw new Error("app status unavailable");
+  return res.json();
 }
 
 function processAction(name: string, action: "start" | "stop" | "restart"): void {

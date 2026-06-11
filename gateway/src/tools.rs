@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::lifecycle::TaskSpawner;
 use crate::proto;
 use crate::types::InputEvent;
 
@@ -19,10 +20,11 @@ struct ToolMeta {
 pub struct ToolRegistry {
     tools: Vec<ToolMeta>,
     workspace_root: PathBuf,
+    tasks: TaskSpawner,
 }
 
 impl ToolRegistry {
-    pub fn new(workspace_root: PathBuf) -> Self {
+    pub fn new(workspace_root: PathBuf, tasks: TaskSpawner) -> Self {
         Self {
             tools: vec![
                 ToolMeta {
@@ -49,6 +51,7 @@ impl ToolRegistry {
                 // },
             ],
             workspace_root,
+            tasks,
         }
     }
 
@@ -86,32 +89,33 @@ impl ToolRegistry {
         info!(tool = %tool_name, id = %request_id, "dispatching tool");
         let root = self.workspace_root.clone();
 
-        tokio::spawn(async move {
-            let result = match tool_name.as_str() {
-                "list_files" => exec_list_files(&root, &args_json).await,
-                "read_file" => exec_read_file(&root, &args_json).await,
-                "write_file" => exec_write_file(&root, &args_json).await,
-                // DISABLED: see tool registration above
-                // "run_command"  => exec_run_command(&root, &args_json).await,
-                other => Err(format!("unknown tool: {other}")),
-            };
+        self.tasks
+            .spawn(format!("tool_dispatch:{tool_name}"), async move {
+                let result = match tool_name.as_str() {
+                    "list_files" => exec_list_files(&root, &args_json).await,
+                    "read_file" => exec_read_file(&root, &args_json).await,
+                    "write_file" => exec_write_file(&root, &args_json).await,
+                    // DISABLED: see tool registration above
+                    // "run_command"  => exec_run_command(&root, &args_json).await,
+                    other => Err(format!("unknown tool: {other}")),
+                };
 
-            let content = match result {
-                Ok(o) => o,
-                Err(e) => {
-                    error!(tool = %tool_name, err = %e, "tool failed");
-                    serde_json::json!({ "error": e }).to_string()
-                }
-            };
+                let content = match result {
+                    Ok(o) => o,
+                    Err(e) => {
+                        error!(tool = %tool_name, err = %e, "tool failed");
+                        serde_json::json!({ "error": e }).to_string()
+                    }
+                };
 
-            let _ = p3_tx
-                .send(InputEvent::ToolResult {
-                    request_id,
-                    tool_name,
-                    content,
-                })
-                .await;
-        });
+                let _ = p3_tx
+                    .send(InputEvent::ToolResult {
+                        request_id,
+                        tool_name,
+                        content,
+                    })
+                    .await;
+            });
     }
 }
 

@@ -40,6 +40,7 @@ body {
   border-right: 1px solid var(--hairline);
   background: var(--panel);
   overflow-y: auto;
+  overflow-anchor: none;
 }
 
 .region-turns {
@@ -58,6 +59,7 @@ body {
   border-left: 1px solid var(--hairline);
   background: var(--panel);
   overflow-y: auto;
+  overflow-anchor: none;
 }
 
 /* Row 3: logs (spans 3 cols) */

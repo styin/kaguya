@@ -6,7 +6,8 @@ conversation turn.
 ## Modules
 
 - **main.py** — asyncio entrypoint: starts both gRPC servers + Listener task.
-- **config.py** — `TalkerConfig` (pydantic-settings, `KAGUYA_*` env vars).
+- **config.py** — `TalkerConfig` (pydantic-settings, direct-run defaults,
+  `KAGUYA_*` env vars injected by launchers).
 - **server.py** — `TalkerServiceServicer`: bidi `Converse` for inference +
   inline barge-in, plus unary `PrefillCache` and `UpdatePersona`.
 - **voice/opus_decoder.py** — Opus → 16 kHz mono PCM (opuslib wrapper). Loads
@@ -35,10 +36,9 @@ Implementation plan: [`../docs/implementation-plan-v0.1.0.md`](../docs/implement
 ## Prerequisites
 
 - **LLM server** — OpenAI-compatible `/v1/completions` endpoint, default
-  `http://localhost:8080`. llama.cpp, LM Studio, or vLLM all work.
-- **Gateway** — running on `127.0.0.1:50051` (control gRPC). Not required
-  to bring up the Talker process for testing — it runs standalone and
-  waits for the Gateway to connect.
+  `http://localhost:1234`. llama.cpp, LM Studio, or vLLM all work.
+- **Gateway** — not required to bring up the Talker process for testing.
+  Talker/Listener expose local endpoints and wait for Gateway to connect.
 
 ---
 
@@ -127,13 +127,17 @@ uv run python main.py
 uv run python main.py
 ```
 
-Configuration via `KAGUYA_*` env vars or a `.env` file in the repo root.
-Common ones:
+When launched by the Kaguya Supervisor or dev console, runtime bind settings
+come from `../config/kaguya.runtime.toml` and are injected as `KAGUYA_*`
+environment variables. `config.py` defaults and `.env` are direct-run
+fallbacks only, useful for `uv run python main.py`.
+
+Common direct-run overrides:
 
 | Var                            | Default              | Notes                              |
 | ------------------------------ | -------------------- | ---------------------------------- |
 | `KAGUYA_LOG_LEVEL`             | `INFO`               | Logger level                       |
-| `KAGUYA_LLM_BASE_URL`          | `http://localhost:8080` | OpenAI-compatible endpoint      |
+| `KAGUYA_LLM_BASE_URL`          | `http://localhost:1234` | OpenAI-compatible endpoint      |
 | `KAGUYA_TALKER_LISTEN_ADDR`    | `0.0.0.0:50053`      | TalkerService gRPC bind address    |
 | `KAGUYA_LISTENER_GRPC_ADDR`    | `0.0.0.0:50055`      | ListenerService gRPC bind address  |
 | `KAGUYA_LISTENER_AUDIO_ADDR`   | `0.0.0.0`            | Raw TCP audio socket bind address  |
@@ -155,8 +159,9 @@ KAGUYA_LISTENER_AUDIO_ADDR=127.0.0.1 \
 uv run python main.py
 ```
 
-Phase 1 is local-only anyway, and the Gateway already dials Talker on
-loopback (`config/gateway.toml`'s `clients.*_addr`).
+Phase 1 is local-only anyway. Gateway connect-side addresses live in
+`../config/kaguya.runtime.toml` under the active profile's
+`processes.voice_stack.endpoints`.
 
 ---
 

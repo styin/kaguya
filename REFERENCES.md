@@ -305,7 +305,7 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 - **Token budget:** Kaguya memories are short (capped at ~200 characters by `truncate_chars` in [gateway/src/rag/mod.rs](gateway/src/rag/mod.rs)). 10 retrieved entries ≈ 2000 chars ≈ 500–700 tokens — fits inside `TalkerContext` without crowding history or persona.
 - **Why over-fetch then fuse:** Pulling `top_k * 2` from each modality before RRF gives the fusion stage signal from items that might rank low in one source but high in the other. Truncating to `top_k` post-fusion preserves the diversity benefit.
 
-**Configurability:** Adjust `[rag] top_k` in `config/gateway.toml` if context length budgets change.
+**Configurability:** Adjust `[rag] top_k` in `gateway/gateway.toml` if context length budgets change.
 
 **Sources:**
 
@@ -337,7 +337,7 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 
 **Decision:** The RAG store keeps full-fidelity memory content. Truncation only happens at *output* time — when retrieval results or the exported `memory_md` document are assembled for the Talker prompt. The store side has only a defensive sanity bound.
 
-**Configuration ([gateway/src/config.rs](gateway/src/config.rs#L48), `[rag]` block in `config/gateway.toml`):**
+**Configuration ([gateway/src/config.rs](gateway/src/config.rs#L48), `[rag]` block in `gateway/gateway.toml`):**
 
 | Knob                       | Default     | Layer       | Purpose                                                                                                |
 | -------------------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------ |
@@ -394,3 +394,54 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 - `reqwest` features documentation: https://docs.rs/reqwest/0.12/reqwest/#optional-features
 - `openssl-sys` build requirements: https://docs.rs/openssl/latest/openssl/#building
 - `rustls` vs `native-tls` trade-offs: https://github.com/rustls/rustls#project-goals (modern-only TLS, no OS keychain integration by default)
+
+---
+
+## REF-012 - Gateway Lifecycle Module Split (Gateway, lifecycle refactor)
+
+**Decision:** Gateway lifecycle supervision remains exported as `crate::lifecycle`, but the implementation is split into submodules by ownership concern:
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `gateway/src/lifecycle/mod.rs` | `LifecycleSupervisor`, shutdown orchestration, public re-exports |
+| `gateway/src/lifecycle/task.rs` | `TaskSpawner` and supervised Tokio task handles |
+| `gateway/src/lifecycle/connection.rs` | connection readiness state and shared handles |
+| `gateway/src/lifecycle/process.rs` | managed child-process launch, log forwarding, and termination |
+| `gateway/src/lifecycle/reconnect.rs` | bounded reconnect policy |
+
+**Rationale:**
+
+1. **Lifecycle is an infrastructure subsystem, not conversational core.** It owns task/process/connection resources and shutdown behavior. Keeping it under `gateway/src/lifecycle/` preserves the `crate::lifecycle` API while avoiding a misleading move into `gateway/src/core/`, whose existing modules model turn, persona, history, silence, and other conversation-domain concerns.
+
+2. **Split by owned resource.** Tasks, connections, processes, and reconnect policies have different failure modes and test surfaces. Keeping each resource type in its own file makes the next lifecycle work, especially runtime health snapshots and process monitoring, easier to review without changing external imports.
+
+3. **Public API stability.** `gateway/src/lib.rs` continues to expose `pub mod lifecycle;`, and `mod.rs` re-exports the existing public types. Existing callers keep using `crate::lifecycle::{...}` / `kaguya_gateway::lifecycle::{...}`.
+
+**Sources:**
+
+- Rust module system convention: directory modules with `mod.rs` preserve the same module path as a single `lifecycle.rs` file.
+- Kaguya Gateway source organization: `gateway/src/core/` is already domain-oriented, while lifecycle supervision is process/runtime infrastructure.
+
+---
+
+## REF-013 - Runtime Supervisor Package Boundary (Runtime supervisor refactor)
+
+**Decision:** Process ownership is extracted from Gateway into the standalone `supervisor/` Rust package. Gateway lifecycle now owns Tokio tasks, connection readiness, reconnect policy, and Gateway shutdown only. Runtime process launch, process-tree termination, child log forwarding, restart policy, and future sandbox wrapping belong to the supervisor package. Runtime launch policy lives in `config/kaguya.runtime.toml`; Gateway keeps only capability endpoint/readiness configuration.
+
+**Rationale:**
+
+1. **Separate lifecycle domains.** Gateway P0 `STOP` is an agent behavior path: cancel active generation, timers, reasoners, and output. Runtime shutdown/restart is an application process path. Keeping both inside Gateway made the Gateway lifecycle layer grow into a process orchestrator instead of a routing/control component.
+
+2. **Sandboxing is a process-launch concern.** Future sandbox providers such as `none`, OS-level wrappers, or platform-specific resource isolation wrap runtime processes, not Gateway turn stages. Locating process ownership in `supervisor/` leaves Gateway free of sandbox-specific branching and keeps untrusted sidecar capability providers outside Gateway's address space.
+
+3. **Preserve Rust process hardening.** The cross-platform process-tree shutdown, stdout/stderr forwarding, snapshots, and restart-policy tests were already implemented in Rust under Gateway. Moving that code outward keeps the stronger implementation while changing the owner.
+
+4. **Frontend telemetry can compose cleanly.** Supervisor remains authoritative for process health/logs/restarts; Gateway remains authoritative for capability connection readiness. The console can display both layers without Gateway exposing child-process snapshots.
+
+**Supersedes:** REF-012's process row for `gateway/src/lifecycle/process.rs`; Gateway no longer contains that module.
+
+**Sources:**
+
+- Kaguya architecture invariant: Gateway owns filesystem/capability routing, while runtime processes provide capabilities over IPC.
+- Kaguya supervisor extraction target: `supervisor/src/process.rs` owns managed child-process primitives and restart policy.
+- Gateway lifecycle source after extraction: `gateway/src/lifecycle/` contains task, connection, and reconnect modules only.

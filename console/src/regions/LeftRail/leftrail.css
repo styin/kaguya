@@ -146,9 +146,9 @@
 
 .process-card {
   display: grid;
-  grid-template-columns: 8px 1fr auto;
-  gap: 8px;
-  align-items: center;
+  grid-template-columns: 8px 1fr;
+  gap: 6px 8px;
+  align-items: start;
   padding: 8px 10px;
   background: var(--panel-2);
   border: 1px solid var(--hairline);
@@ -160,6 +160,7 @@
   height: 6px;
   border-radius: 50%;
   background: var(--ink-4);
+  margin-top: 6px;
 }
 .process-dot.running  { background: var(--mint); }
 .process-dot.starting { background: var(--amber); animation: live-pulse 1.6s ease-in-out infinite; }
@@ -176,12 +177,11 @@
   font-size: 12px;
   font-weight: 500;
   color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 .process-unmanaged {
   font-family: var(--font-mono);
@@ -194,6 +194,17 @@
   border-radius: 3px;
   padding: 0 4px;
 }
+.process-group {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--blue-2);
+  background: var(--blue-mist);
+  border: 1px solid var(--blue-pale);
+  border-radius: 3px;
+  padding: 0 4px;
+}
 .process-status-row {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -201,8 +212,11 @@
 }
 
 .process-actions {
+  grid-column: 2;
   display: inline-flex;
   gap: 4px;
+  justify-content: flex-start;
+  min-width: 0;
 }
 .process-action {
   padding: 2px 8px;
@@ -220,3 +234,58 @@
   border-color: var(--ink-4);
 }
 .process-action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.process-children {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 3px;
+}
+
+.process-child-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+
+.process-child-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink-4);
+}
+.process-child-dot.running  { background: var(--mint); }
+.process-child-dot.starting { background: var(--amber); animation: live-pulse 1.6s ease-in-out infinite; }
+.process-child-dot.errored  { background: var(--terra); }
+
+.process-child-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+.process-child-kind {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--ink-4);
+  background: var(--paper-2);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.process-child-status {
+  grid-column: 2 / 4;
+  padding-left: 13px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-3);
+}

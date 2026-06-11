@@ -13,7 +13,7 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.12"
 prost = "0.13"
 prost-types = "0.13"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
