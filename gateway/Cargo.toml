@@ -38,4 +38,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "htt
 dev-console = []
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14"
