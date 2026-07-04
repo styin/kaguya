@@ -28,6 +28,7 @@ use kaguya_gateway::pipeline::{handlers, PipelineComponents, TurnState};
 use kaguya_gateway::proto;
 use kaguya_gateway::rag::RagEngine;
 use kaguya_gateway::reasoner::ReasonerManager;
+use kaguya_gateway::sandbox::SandboxManager;
 use kaguya_gateway::silence::SilenceTimers;
 use kaguya_gateway::talker::TalkerClient;
 use kaguya_gateway::tools::ToolRegistry;
@@ -81,7 +82,27 @@ async fn main() -> anyhow::Result<()> {
     let listener_connection = lifecycle.register_connection("listener");
     let reasoner_connection = lifecycle.register_connection("reasoner");
     reasoner_connection.set_readiness(Readiness::Stopped);
-    let tools = ToolRegistry::new(config.files.workspace_root.clone(), task_spawner.clone());
+
+    // ── Sandbox (pluggable code-execution backend) ──
+    // Backend init can fail (e.g. `docker` selected but daemon down); fall back
+    // to a disabled manager so the gateway still boots without sandbox_exec.
+    let sandbox = match SandboxManager::from_config(
+        &config.sandbox,
+        config.files.workspace_root.clone(),
+    ) {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            warn!("sandbox init failed ({e}); sandbox disabled");
+            Arc::new(SandboxManager::disabled())
+        }
+    };
+    sandbox.prewarm().await; // hosted Docker: build the warm pool
+
+    let tools = ToolRegistry::new(
+        config.files.workspace_root.clone(),
+        task_spawner.clone(),
+        Some(Arc::clone(&sandbox)),
+    );
     let reasoner = ReasonerManager::new(
         clients.reasoner_addr.clone(),
         task_spawner.clone(),
@@ -504,6 +525,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Sandbox teardown: destroy this conversation's container/scratch, then
+    // any warm-pool containers (hosted Docker). No-ops when disabled.
+    sandbox.cleanup(&conversation_id).await;
+    sandbox.shutdown().await;
 
     info!("Kaguya Gateway shutdown");
     Ok(())

@@ -4,11 +4,13 @@
 //! Results sent back to Talker via P3 channel.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::lifecycle::TaskSpawner;
 use crate::proto;
+use crate::sandbox::SandboxManager;
 use crate::types::InputEvent;
 
 struct ToolMeta {
@@ -21,37 +23,51 @@ pub struct ToolRegistry {
     tools: Vec<ToolMeta>,
     workspace_root: PathBuf,
     tasks: TaskSpawner,
+    sandbox: Option<Arc<SandboxManager>>,
 }
 
 impl ToolRegistry {
-    pub fn new(workspace_root: PathBuf, tasks: TaskSpawner) -> Self {
+    pub fn new(
+        workspace_root: PathBuf,
+        tasks: TaskSpawner,
+        sandbox: Option<Arc<SandboxManager>>,
+    ) -> Self {
+        let mut tools = vec![
+            ToolMeta {
+                name: "list_files".into(),
+                description: "List files in directory".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+            },
+            ToolMeta {
+                name: "read_file".into(),
+                description: "Read file contents".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+            },
+            ToolMeta {
+                name: "write_file".into(),
+                description: "Write to file".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}"#.into(),
+            },
+            // run_command stays disabled; sandbox_exec is the safe replacement.
+        ];
+
+        // Advertise sandbox_exec only when a sandbox is enabled, so the LLM is
+        // never told about a tool it can't use.
+        if let Some(sb) = &sandbox {
+            if let Some(def) = sb.tool_definition() {
+                tools.push(ToolMeta {
+                    name: def.name,
+                    description: def.description,
+                    args_schema: def.args_schema,
+                });
+            }
+        }
+
         Self {
-            tools: vec![
-                ToolMeta {
-                    name: "list_files".into(),
-                    description: "List files in directory".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
-                },
-                ToolMeta {
-                    name: "read_file".into(),
-                    description: "Read file contents".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
-                },
-                ToolMeta {
-                    name: "write_file".into(),
-                    description: "Write to file".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}"#.into(),
-                },
-                // DISABLED: run_command requires allowlist-based sandboxing before re-enabling.
-                // See GitHub issue for scoped implementation plan.
-                // ToolMeta {
-                //     name: "run_command".into(),
-                //     description: "Run shell command in sandbox".into(),
-                //     args_schema: r#"{"type":"object","properties":{"cmd":{"type":"string"}}}"#.into(),
-                // },
-            ],
+            tools,
             workspace_root,
             tasks,
+            sandbox,
         }
     }
 
@@ -81,11 +97,36 @@ impl ToolRegistry {
 
     pub fn dispatch(
         &self,
+        conversation_id: String,
         request_id: String,
         tool_name: String,
         args_json: String,
         p3_tx: mpsc::Sender<InputEvent>,
     ) {
+        // ── Sandbox route ──
+        // `sandbox_exec` runs through the per-conversation SandboxManager so
+        // files persist across calls within a session. Same P3 ToolResult path.
+        if tool_name == "sandbox_exec" {
+            let sandbox = self.sandbox.clone();
+            info!(id = %request_id, "dispatching sandbox_exec");
+            self.tasks
+                .spawn(format!("tool_dispatch:{tool_name}"), async move {
+                    let content = match sandbox {
+                        Some(sb) => sb.exec_from_json(&conversation_id, &args_json).await,
+                        None => serde_json::json!({ "error": "sandbox disabled" }).to_string(),
+                    };
+                    let _ = p3_tx
+                        .send(InputEvent::ToolResult {
+                            request_id,
+                            tool_name,
+                            content,
+                        })
+                        .await;
+                });
+            return;
+        }
+
+        // ── Filesystem tools ──
         info!(tool = %tool_name, id = %request_id, "dispatching tool");
         let root = self.workspace_root.clone();
 

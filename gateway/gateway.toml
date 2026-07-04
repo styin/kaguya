@@ -32,3 +32,31 @@ max_storage_chars = 4096
 # prompt cost when many retrievals fire (REF-010).
 # max_chars_per_result = 400
 # max_chars_per_md_entry = 300
+
+[sandbox]
+# Pluggable code-execution sandbox, exposed to the Talker as `sandbox_exec`.
+# When enabled=false the tool is not advertised at all (REF-014).
+enabled = true
+# Backend: "native" | "docker" | "bubblewrap" | "job_object".
+#   native     — run interpreters directly on the host. Zero deps, sub-ms
+#                startup, NO isolation beyond cwd + timeout + tree-kill.
+#                Best for self-hosting where you trust your own LLM.
+#   docker     — per-conversation container, strongest isolation.
+#   bubblewrap — Linux namespace isolation via `bwrap`, no daemon.
+#   job_object — Windows Job Object (needs `--features sandbox-jobobject`).
+backend = "native"
+# Docker only: "single_user" (lazy, no pool) or "hosted" (warm pool).
+mode = "single_user"
+default_timeout_secs = 30
+# LLM-facing cap on captured stdout/stderr (bytes feed the next prompt).
+max_output_bytes = 16384
+allowed_languages = ["python", "node", "bash"]
+
+# ── Docker-specific (ignored by other backends) ──
+image = "kaguya-sandbox:latest"
+# Warm-pool size for mode="hosted". 0 = lazy create on first use.
+pool_size = 0
+memory_limit_mb = 512
+pids_limit = 128
+# Whether the container has network access. Off by default.
+network = false

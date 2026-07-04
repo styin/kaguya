@@ -445,3 +445,42 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 - Kaguya architecture invariant: Gateway owns filesystem/capability routing, while runtime processes provide capabilities over IPC.
 - Kaguya supervisor extraction target: `supervisor/src/process.rs` owns managed child-process primitives and restart policy.
 - Gateway lifecycle source after extraction: `gateway/src/lifecycle/` contains task, connection, and reconnect modules only.
+
+---
+
+## REF-014 — `sandbox_exec` Tool: Pluggable Code-Execution Sandbox (Gateway, tools)
+
+**Decision:** LLM-generated code execution is exposed as a normal Gateway tool, `sandbox_exec`, backed by a swappable `SandboxBackend` trait (`gateway/src/sandbox/`). Backend and resource limits are config-driven (`[sandbox]` in `gateway.toml`). Defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | When `false`, the tool is not advertised to the Talker at all. |
+| `backend` | `native` | `native` \| `docker` \| `bubblewrap` \| `job_object`. |
+| `mode` | `single_user` | Docker only: `single_user` (lazy, no pool) vs `hosted` (warm pool). |
+| `default_timeout_secs` | `30` | Per-execution wall-clock limit, enforced by tree-kill (native/bwrap/job) or in-container `timeout` (Docker). |
+| `max_output_bytes` | `16384` (16 KiB) | Cap on captured stdout/stderr; the bytes feed the next LLM prompt, so this bounds per-turn context cost. |
+| `memory_limit_mb` | `512` | Docker `--memory`/`--memory-swap` and Job Object `JobMemoryLimit`. |
+| `pids_limit` | `128` | Docker `--pids-limit` and Job Object `ActiveProcessLimit`. |
+| `network` | `false` | Docker: `--network=none` unless enabled. bubblewrap: always offline (`--unshare-all`). |
+
+**Rationale:**
+
+1. **Sandbox is just a tool.** From the dialog flow's view, `sandbox_exec` is indistinguishable from `read_file` or `list_files`: the LLM emits a `ToolRequest`, the Gateway executes it, a JSON string flows back through the normal P3 `ToolResult` path. No new proto messages, no new priority channel, no pipeline changes. This is why it lives under `tools.rs` dispatch rather than as a separate service or event stream. **This is distinct from REF-013's process-launch sandboxing** — REF-013 concerns wrapping *runtime component processes* (Talker/Reasoner) at launch, which is a supervisor concern; REF-014 concerns *executing LLM-authored code* mid-conversation, which is a Gateway tool concern.
+
+2. **Pluggable backend, native default.** Most self-hosting users already have a local Python/Node toolchain and accept running LLM code on their own machine. `native` gives zero extra dependencies and sub-millisecond startup (interpreter in a per-session scratch dir, isolation limited to cwd + timeout + tree-kill). Users who want isolation opt into `docker` (strongest), `bubblewrap` (Linux namespaces, no daemon), or `job_object` (Windows resource limits + kill-on-close). Advertising the tool only when enabled means the LLM is never told about a capability it can't use.
+
+3. **Per-conversation affinity.** Within one conversation the LLM may call the sandbox repeatedly (create a file, then read it, then modify it). All calls for a given `conversation_id` share filesystem state — a fixed Docker container or a stable scratch dir — and are torn down on conversation cleanup/shutdown. Backends key their session map on `conversation_id`.
+
+4. **Numeric defaults are conservative and reversible.** 30 s bounds a runaway loop without truncating typical analysis; 16 KiB output keeps a single tool result from blowing the prompt budget (cf. REF-010's RAG output caps); 512 MB / 128 PIDs are generous for scripting yet cap fork bombs and memory blowups. All are overridable per deployment.
+
+5. **`network=false` by default** because most `sandbox_exec` uses are local computation; opening the network is an explicit opt-in given the code is model-authored.
+
+**Windows Job Object note:** the `job_object` backend is feature-gated (`--features sandbox-jobobject`, off by default) and requires the `windows` crate with `Win32_Security` (for `SECURITY_ATTRIBUTES` referenced by `CreateJobObjectW`). Its `HANDLE` is held across `.await` via a `SendHandle` newtype — a Job Object is a process-wide kernel object whose handle validity is independent of the tokio worker thread polling the future.
+
+**Supersedes:** none. Replaces the previously-disabled `run_command` tool (removed from the registry) as the safe, isolatable code-execution path.
+
+**Sources:**
+
+- Docker resource limits: https://docs.docker.com/engine/containers/resource_constraints/ (`--memory`, `--pids-limit`, `--network=none`, `--cap-drop`).
+- Bubblewrap sandboxing model: https://github.com/containers/bubblewrap (`--unshare-all`, `--ro-bind`, `--die-with-parent`).
+- Windows Job Objects: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, memory/active-process limits) — the pattern Chromium uses for renderer resource containment.
