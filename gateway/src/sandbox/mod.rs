@@ -7,12 +7,12 @@
 //! The execution mechanism is swappable behind `SandboxBackend`. Backend choice
 //! and resource limits are config-driven (`[sandbox]` in gateway.toml).
 
-mod native;
-mod docker;
 #[cfg(unix)]
 mod bubblewrap;
+mod docker;
 #[cfg(all(windows, feature = "sandbox-jobobject"))]
 mod job_object;
+mod native;
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -21,9 +21,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tracing::info;
+use tracing::{info, warn};
+use uuid::Uuid;
 
-use crate::config::{SandboxBackendKind, SandboxConfig};
+use crate::config::{SandboxBackendKind, SandboxConfig, SandboxModeKind};
 use crate::proto;
 
 // ──────────────────────────────────────────
@@ -176,17 +177,40 @@ impl SandboxManager {
             SandboxBackendKind::JobObject => {
                 #[cfg(all(windows, feature = "sandbox-jobobject"))]
                 {
-                    Box::new(job_object::JobObjectBackend::new(workspace_root)?)
+                    Box::new(job_object::JobObjectBackend::new(cfg, workspace_root)?)
                         as Box<dyn SandboxBackend>
                 }
                 #[cfg(not(all(windows, feature = "sandbox-jobobject")))]
                 {
+                    let _ = workspace_root;
                     anyhow::bail!(
                         "job_object backend requires Windows + `--features sandbox-jobobject`"
                     );
                 }
             }
         };
+
+        // Fail-safe posture warnings for hosting. The native backend runs
+        // LLM-authored code with NO isolation from the host, so combining it
+        // with a multi-tenant deployment is dangerous unless each Gateway
+        // process is itself confined (one container / VM per user session).
+        if cfg.backend == SandboxBackendKind::Native && cfg.mode == SandboxModeKind::Hosted {
+            warn!(
+                "Sandbox: backend=native + mode=hosted runs model-authored code with NO \
+                 host isolation. Only safe if each Gateway process is confined per user \
+                 (one container/VM per session). For shared multi-tenant hosts, use \
+                 backend=docker."
+            );
+        }
+        // A non-empty allow-list that parsed to nothing is almost certainly a
+        // typo; the empty list otherwise means "allow all" (see exec_from_json).
+        if allowed.is_empty() && !cfg.allowed_languages.is_empty() {
+            warn!(
+                "Sandbox: allowed_languages={:?} parsed to zero known languages; \
+                 ALL languages will be permitted. Valid values: python, node, bash.",
+                cfg.allowed_languages
+            );
+        }
 
         info!(
             "Sandbox: backend={} mode={:?} enabled={}",
@@ -241,11 +265,15 @@ impl SandboxManager {
         }
         Some(proto::ToolDefinition {
             name: "sandbox_exec".into(),
-            description: "Execute code in an isolated sandbox; returns stdout, stderr, \
-                          exit_code. Files persist within the conversation. \
-                          Languages: python, node, bash."
+            // Deliberately does not claim "isolated": the native backend runs on
+            // the host. Isolation is a deployment property of the chosen backend.
+            description: "Execute code in a sandboxed subprocess and return \
+                          {stdout, stderr, exit_code}. Files written under the working \
+                          directory persist across calls within the same conversation. \
+                          Optional 'stdin' is fed to the program. Languages: python, \
+                          node, bash."
                 .into(),
-            args_schema: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","node","bash"]},"code":{"type":"string"}},"required":["language","code"]}"#
+            args_schema: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","node","bash"]},"code":{"type":"string"},"stdin":{"type":"string"}},"required":["language","code"]}"#
                 .into(),
         })
     }
@@ -257,9 +285,14 @@ impl SandboxManager {
         }
         let v: serde_json::Value = match serde_json::from_str(args_json) {
             Ok(v) => v,
-            Err(e) => return ExecResult::backend_error(format!("bad args JSON: {e}")).to_tool_json(),
+            Err(e) => {
+                return ExecResult::backend_error(format!("bad args JSON: {e}")).to_tool_json()
+            }
         };
-        let lang_s = v.get("language").and_then(|x| x.as_str()).unwrap_or("python");
+        let lang_s = v
+            .get("language")
+            .and_then(|x| x.as_str())
+            .unwrap_or("python");
         let language = match Language::parse(lang_s) {
             Some(l) => l,
             None => {
@@ -302,6 +335,14 @@ pub(crate) fn sanitize_session(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Unique hidden runner-script filename for a single execution. Concurrent
+/// `sandbox_exec` calls in the same session share a scratch dir, so a fixed
+/// name would race; only this transient script is per-exec — files the user's
+/// code creates still persist across calls.
+pub(crate) fn script_name(ext: &str) -> String {
+    format!(".kaguya-run-{}.{}", Uuid::new_v4(), ext)
 }
 
 /// Read a pipe to EOF, retaining at most `cap` bytes. Keeps draining past the

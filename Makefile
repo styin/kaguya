@@ -44,10 +44,23 @@ format:
 	cd talker  && uv run ruff format .
 	buf format -w $(PROTO_DIR)
 
+# ── Sandbox (Docker backend) ──
+# Build the base image used by the `docker` sandbox backend. Only needed when
+# gateway.toml sets [sandbox] backend = "docker". The native backend (default)
+# needs none of this.
+SANDBOX_IMAGE ?= kaguya-sandbox:latest
+sandbox-image:
+	docker build -t $(SANDBOX_IMAGE) -f docker/sandbox.Dockerfile docker
+
+# Reap orphaned sandbox containers left by a hard crash (graceful shutdown
+# already cleans up). Safe to run anytime; matches the `kaguya.sandbox` label.
+sandbox-clean:
+	docker ps -aq --filter label=kaguya.sandbox=1 | xargs -r docker rm -f
+
 # ── Clean ──
 clean:
 	cd gateway && cargo clean
 	rm -rf talker/.venv
 	rm -rf reasoner/node_modules
 
-.PHONY: proto proto-py proto-rs test lint format clean
+.PHONY: proto proto-py proto-rs test lint format clean sandbox-image sandbox-clean

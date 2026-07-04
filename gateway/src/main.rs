@@ -86,16 +86,14 @@ async fn main() -> anyhow::Result<()> {
     // ── Sandbox (pluggable code-execution backend) ──
     // Backend init can fail (e.g. `docker` selected but daemon down); fall back
     // to a disabled manager so the gateway still boots without sandbox_exec.
-    let sandbox = match SandboxManager::from_config(
-        &config.sandbox,
-        config.files.workspace_root.clone(),
-    ) {
-        Ok(m) => Arc::new(m),
-        Err(e) => {
-            warn!("sandbox init failed ({e}); sandbox disabled");
-            Arc::new(SandboxManager::disabled())
-        }
-    };
+    let sandbox =
+        match SandboxManager::from_config(&config.sandbox, config.files.workspace_root.clone()) {
+            Ok(m) => Arc::new(m),
+            Err(e) => {
+                warn!("sandbox init failed ({e}); sandbox disabled");
+                Arc::new(SandboxManager::disabled())
+            }
+        };
     sandbox.prewarm().await; // hosted Docker: build the warm pool
 
     let tools = ToolRegistry::new(

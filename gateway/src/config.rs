@@ -435,6 +435,9 @@ pub struct SandboxConfig {
     pub memory_limit_mb: u64,
     #[serde(default = "sb_pids")]
     pub pids_limit: u64,
+    /// Docker only: CPU quota (`--cpus`). Fractions allowed (e.g. 0.5).
+    #[serde(default = "sb_cpus")]
+    pub cpus: f64,
     #[serde(default)]
     pub network: bool,
     #[serde(default = "sb_langs")]
@@ -459,6 +462,9 @@ fn sb_mem() -> u64 {
 fn sb_pids() -> u64 {
     128
 }
+fn sb_cpus() -> f64 {
+    1.0
+}
 fn sb_langs() -> Vec<String> {
     vec!["python".into(), "node".into(), "bash".into()]
 }
@@ -475,6 +481,7 @@ impl Default for SandboxConfig {
             pool_size: 0,
             memory_limit_mb: sb_mem(),
             pids_limit: sb_pids(),
+            cpus: sb_cpus(),
             network: false,
             allowed_languages: sb_langs(),
         }

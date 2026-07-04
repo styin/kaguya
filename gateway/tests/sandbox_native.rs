@@ -58,7 +58,10 @@ async fn native_backend_executes_python_and_persists_files() {
 #[tokio::test]
 async fn disabled_manager_hides_tool_and_refuses_exec() {
     let mgr = SandboxManager::disabled();
-    assert!(mgr.tool_definition().is_none(), "disabled ⇒ tool not advertised");
+    assert!(
+        mgr.tool_definition().is_none(),
+        "disabled ⇒ tool not advertised"
+    );
 
     let out = mgr
         .exec_from_json("s", r#"{"language":"python","code":"print(1)"}"#)
@@ -71,6 +74,43 @@ async fn disabled_manager_hides_tool_and_refuses_exec() {
 }
 
 #[tokio::test]
+async fn concurrent_execs_in_one_session_do_not_clobber() {
+    // Regression for the shared-runner-script race: two overlapping calls in the
+    // same session must both run their own code (unique per-exec script names).
+    let cfg = SandboxConfig::default();
+    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
+    let session = "test-conv-concurrent";
+
+    let a = mgr.exec_from_json(session, r#"{"language":"python","code":"print('AAA')"}"#);
+    let b = mgr.exec_from_json(session, r#"{"language":"python","code":"print('BBB')"}"#);
+    let (ra, rb) = tokio::join!(a, b);
+    let va: serde_json::Value = serde_json::from_str(&ra).unwrap();
+    let vb: serde_json::Value = serde_json::from_str(&rb).unwrap();
+    assert_eq!(va["exit_code"], 0, "{ra}");
+    assert_eq!(vb["exit_code"], 0, "{rb}");
+    assert!(va["stdout"].as_str().unwrap().contains("AAA"), "{ra}");
+    assert!(vb["stdout"].as_str().unwrap().contains("BBB"), "{rb}");
+
+    mgr.cleanup(session).await;
+}
+
+#[tokio::test]
+async fn stdin_is_fed_to_the_program() {
+    let cfg = SandboxConfig::default();
+    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
+    let out = mgr
+        .exec_from_json(
+            "test-conv-stdin",
+            r#"{"language":"python","code":"import sys; print(sys.stdin.read().strip().upper())","stdin":"hello"}"#,
+        )
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["exit_code"], 0, "{out}");
+    assert!(v["stdout"].as_str().unwrap().contains("HELLO"), "{out}");
+    mgr.cleanup("test-conv-stdin").await;
+}
+
+#[tokio::test]
 async fn rejects_unknown_language() {
     let cfg = SandboxConfig::default();
     let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
@@ -78,5 +118,8 @@ async fn rejects_unknown_language() {
         .exec_from_json("s", r#"{"language":"ruby","code":"puts 1"}"#)
         .await;
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(v["error"].as_str().unwrap().contains("unsupported language"));
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported language"));
 }

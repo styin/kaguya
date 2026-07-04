@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use super::{run_spawned, sanitize_session, ExecRequest, ExecResult, SandboxBackend};
+use super::{run_spawned, sanitize_session, script_name, ExecRequest, ExecResult, SandboxBackend};
 
 pub struct BubblewrapBackend {
     root: PathBuf,
@@ -61,8 +61,8 @@ impl SandboxBackend for BubblewrapBackend {
         }
         self.sessions.lock().await.insert(session.to_string());
 
-        let script_name = format!(".run.{}", req.language.ext());
-        if let Err(e) = tokio::fs::write(dir.join(&script_name), &req.code).await {
+        let script = script_name(req.language.ext());
+        if let Err(e) = tokio::fs::write(dir.join(&script), &req.code).await {
             return ExecResult::backend_error(format!("write script failed: {e}"));
         }
 
@@ -112,15 +112,18 @@ impl SandboxBackend for BubblewrapBackend {
             .arg("1")
             .arg("--")
             .arg(interp)
-            .arg(format!("/home/sandbox/{script_name}"))
+            .arg(format!("/home/sandbox/{script}"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        match cmd.spawn() {
+        let result = match cmd.spawn() {
             Ok(child) => run_spawned(child, req.stdin, req.timeout, req.max_output_bytes).await,
             Err(e) => ExecResult::backend_error(format!("bwrap spawn: {e}")),
-        }
+        };
+        // Best-effort remove the transient runner script; user-created files stay.
+        let _ = tokio::fs::remove_file(dir.join(&script)).await;
+        result
     }
 
     async fn cleanup(&self, session: &str) {

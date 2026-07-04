@@ -456,11 +456,12 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 | --- | --- | --- |
 | `enabled` | `true` | When `false`, the tool is not advertised to the Talker at all. |
 | `backend` | `native` | `native` \| `docker` \| `bubblewrap` \| `job_object`. |
-| `mode` | `single_user` | Docker only: `single_user` (lazy, no pool) vs `hosted` (warm pool). |
+| `mode` | `single_user` | Docker only: `single_user` (lazy create on first use) vs `hosted` (prewarm `pool_size` containers at startup to hide cold-start). |
 | `default_timeout_secs` | `30` | Per-execution wall-clock limit, enforced by tree-kill (native/bwrap/job) or in-container `timeout` (Docker). |
 | `max_output_bytes` | `16384` (16 KiB) | Cap on captured stdout/stderr; the bytes feed the next LLM prompt, so this bounds per-turn context cost. |
 | `memory_limit_mb` | `512` | Docker `--memory`/`--memory-swap` and Job Object `JobMemoryLimit`. |
 | `pids_limit` | `128` | Docker `--pids-limit` and Job Object `ActiveProcessLimit`. |
+| `cpus` | `1.0` | Docker `--cpus` quota (fractions allowed). |
 | `network` | `false` | Docker: `--network=none` unless enabled. bubblewrap: always offline (`--unshare-all`). |
 
 **Rationale:**
@@ -474,6 +475,12 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 4. **Numeric defaults are conservative and reversible.** 30 s bounds a runaway loop without truncating typical analysis; 16 KiB output keeps a single tool result from blowing the prompt budget (cf. REF-010's RAG output caps); 512 MB / 128 PIDs are generous for scripting yet cap fork bombs and memory blowups. All are overridable per deployment.
 
 5. **`network=false` by default** because most `sandbox_exec` uses are local computation; opening the network is an explicit opt-in given the code is model-authored.
+
+6. **One Gateway process = one conversation ⇒ one-Gateway-per-user is the hosting model.** `main.rs` mints a single `conversation_id` per process, so "session end" == process shutdown, and `cleanup` runs there. Rather than bolt speculative multi-tenancy onto the Gateway, hosting runs one Gateway (hence one sandbox scope) per user session — users are then isolated by construction, with no shared container/scratch state to leak. Consequently the Docker backend does **not** replenish the warm pool on cleanup (there is no next in-process session to serve; that would be pure churn), and `hosted` mode simply prewarms `pool_size` containers at startup (`pool_size=1` suffices to hide first-call latency in the per-user shape).
+
+7. **Fail-loud posture, not fail-open.** `native` runs model-authored code with no host isolation; combining it with `mode=hosted` logs a prominent startup warning (safe only when each Gateway is itself confined per user). It is a warning rather than a hard refusal because a per-user-containerized Gateway legitimately uses `native` (the container *is* the sandbox). The `sandbox_exec` tool description deliberately avoids the word "isolated" since that is a property of the chosen backend, not the tool. A misconfigured `allowed_languages` that parses to zero known languages also warns (empty otherwise means "allow all").
+
+8. **Crash-safe container reaping.** Every Docker container carries two labels: `kaguya.sandbox=1` (all Kaguya sandboxes) and `kaguya.sandbox.instance=<uuid>` (this process only). Graceful `shutdown()` reaps by the instance label — safe even when several Gateways share one Docker host — as a belt-and-suspenders beyond the tracked container ids. After a hard crash, `make sandbox-clean` reaps the global label. Per-exec runner scripts use unique names (`.kaguya-run-<uuid>.<ext>`) and are removed after the interpreter exits, so concurrent calls in one session never clobber each other while user-created files still persist.
 
 **Windows Job Object note:** the `job_object` backend is feature-gated (`--features sandbox-jobobject`, off by default) and requires the `windows` crate with `Win32_Security` (for `SECURITY_ATTRIBUTES` referenced by `CreateJobObjectW`). Its `HANDLE` is held across `.await` via a `SendHandle` newtype — a Job Object is a process-wide kernel object whose handle validity is independent of the tokio worker thread polling the future.
 

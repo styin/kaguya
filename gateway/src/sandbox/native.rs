@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use super::{run_spawned, sanitize_session, ExecRequest, ExecResult, SandboxBackend};
+use super::{run_spawned, sanitize_session, script_name, ExecRequest, ExecResult, SandboxBackend};
 
 pub struct NativeBackend {
     root: PathBuf,
@@ -38,12 +38,13 @@ impl SandboxBackend for NativeBackend {
         }
         self.sessions.lock().await.insert(session.to_string());
 
-        let script = dir.join(format!(".run.{}", req.language.ext()));
+        let script = dir.join(script_name(req.language.ext()));
         if let Err(e) = tokio::fs::write(&script, &req.code).await {
             return ExecResult::backend_error(format!("write script failed: {e}"));
         }
 
         let mut last = String::new();
+        let mut result = None;
         for cand in req.language.native_candidates() {
             let mut cmd = Command::new(cand);
             cmd.arg(&script)
@@ -53,16 +54,28 @@ impl SandboxBackend for NativeBackend {
                 .stderr(Stdio::piped());
             match cmd.spawn() {
                 Ok(child) => {
-                    return run_spawned(child, req.stdin, req.timeout, req.max_output_bytes).await
+                    result = Some(
+                        run_spawned(child, req.stdin, req.timeout, req.max_output_bytes).await,
+                    );
+                    break;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     last = format!("{cand} not found");
                     continue;
                 }
-                Err(e) => return ExecResult::backend_error(format!("spawn {cand} failed: {e}")),
+                Err(e) => {
+                    result = Some(ExecResult::backend_error(format!(
+                        "spawn {cand} failed: {e}"
+                    )));
+                    break;
+                }
             }
         }
-        ExecResult::backend_error(format!("no interpreter for {:?} ({last})", req.language))
+        // Best-effort remove the transient runner script; user-created files stay.
+        let _ = tokio::fs::remove_file(&script).await;
+        result.unwrap_or_else(|| {
+            ExecResult::backend_error(format!("no interpreter for {:?} ({last})", req.language))
+        })
     }
 
     async fn cleanup(&self, session: &str) {

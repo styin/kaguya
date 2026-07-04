@@ -13,13 +13,15 @@ use tracing::warn;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
-use super::{read_capped, sanitize_session, ExecRequest, ExecResult, SandboxBackend};
+use crate::config::SandboxConfig;
+
+use super::{read_capped, sanitize_session, script_name, ExecRequest, ExecResult, SandboxBackend};
 
 /// A `HANDLE` is `!Send` because it is a raw pointer, but a Job Object is a
 /// process-wide kernel object identified by an opaque handle whose validity is
@@ -36,12 +38,14 @@ pub struct JobObjectBackend {
 }
 
 impl JobObjectBackend {
-    pub fn new(_workspace_root: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(cfg: &SandboxConfig, _workspace_root: PathBuf) -> anyhow::Result<Self> {
         Ok(Self {
             root: std::env::temp_dir().join("kaguya-sandbox"),
             sessions: Mutex::new(HashSet::new()),
-            mem_bytes: 512 * 1024 * 1024,
-            pids: 64,
+            // Honor the same [sandbox] limits as the Docker backend so config
+            // behaves consistently across backends.
+            mem_bytes: (cfg.memory_limit_mb as usize) * 1024 * 1024,
+            pids: cfg.pids_limit as u32,
         })
     }
     fn session_dir(&self, session: &str) -> PathBuf {
@@ -57,7 +61,7 @@ impl SandboxBackend for JobObjectBackend {
             return ExecResult::backend_error(format!("mkdir: {e}"));
         }
         self.sessions.lock().await.insert(session.to_string());
-        let script = dir.join(format!(".run.{}", req.language.ext()));
+        let script = dir.join(script_name(req.language.ext()));
         if let Err(e) = tokio::fs::write(&script, &req.code).await {
             return ExecResult::backend_error(format!("write: {e}"));
         }
@@ -135,14 +139,18 @@ impl SandboxBackend for JobObjectBackend {
             Ok(Ok(s)) => s.code().unwrap_or(-1),
             Ok(Err(e)) => {
                 if !job.0.is_invalid() {
-                    unsafe { let _ = CloseHandle(job.0); }
+                    unsafe {
+                        let _ = CloseHandle(job.0);
+                    }
                 }
                 return ExecResult::backend_error(format!("wait: {e}"));
             }
             Err(_) => {
                 timed_out = true;
                 if !job.0.is_invalid() {
-                    unsafe { let _ = TerminateJobObject(job.0, 1); }
+                    unsafe {
+                        let _ = TerminateJobObject(job.0, 1);
+                    }
                 }
                 let _ = child.wait().await;
                 -1
@@ -150,11 +158,15 @@ impl SandboxBackend for JobObjectBackend {
         };
         if !job.0.is_invalid() {
             // KILL_ON_JOB_CLOSE reaps any stragglers when the handle closes.
-            unsafe { let _ = CloseHandle(job.0); }
+            unsafe {
+                let _ = CloseHandle(job.0);
+            }
         }
 
         let (out, ot) = out_task.await.unwrap_or_default();
         let (err, et) = err_task.await.unwrap_or_default();
+        // Best-effort remove the transient runner script; user-created files stay.
+        let _ = tokio::fs::remove_file(&script).await;
         ExecResult {
             stdout: out,
             stderr: err,

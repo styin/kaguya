@@ -1,9 +1,21 @@
 //! Docker backend — strongest isolation. Per-session container affinity so
-//! files persist across calls in a conversation. `mode`:
-//!   single_user → lazy: create on first use, keep for the session, destroy on
-//!                 cleanup/shutdown. No warm pool.
-//!   hosted      → warm pool of `pool_size` pre-created containers; pop on
-//!                 bind, destroy + replenish on cleanup.
+//! files persist across calls in a conversation.
+//!
+//! Lifecycle note: a Gateway process owns exactly one `conversation_id`
+//! (see `main.rs`), so "session end" == process shutdown. That makes the
+//! one-Gateway-per-user shape the natural hosting model: each user gets an
+//! isolated Gateway + its own containers, and cross-user state can never leak.
+//! `mode`:
+//!   single_user → lazy: create the container on first use, destroy at shutdown.
+//!   hosted      → prewarm `pool_size` containers at startup so the first
+//!                 `sandbox_exec` pays no cold-start latency (set pool_size=1
+//!                 for the one-Gateway-per-user shape).
+//!
+//! Every container is labeled so orphans from a hard crash can be reaped:
+//!   `kaguya.sandbox=1`                    — all Kaguya sandbox containers
+//!   `kaguya.sandbox.instance=<uuid>`      — this Gateway process only
+//! Graceful `shutdown()` sweeps this instance's label; `make sandbox-clean`
+//! reaps the global label after a crash.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -13,10 +25,13 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::config::{SandboxConfig, SandboxModeKind};
 
-use super::{run_spawned, ExecRequest, ExecResult, SandboxBackend};
+use super::{run_spawned, script_name, ExecRequest, ExecResult, SandboxBackend};
+
+const LABEL_ALL: &str = "kaguya.sandbox=1";
 
 pub struct DockerBackend {
     image: String,
@@ -24,14 +39,18 @@ pub struct DockerBackend {
     pool_size: usize,
     mem_mb: u64,
     pids: u64,
+    cpus: f64,
     network: bool,
+    /// Per-process label value; lets `shutdown()` reap only our own containers,
+    /// which is safe even when several Gateways share one Docker host.
+    instance: String,
     state: Mutex<DockerState>,
 }
 
 #[derive(Default)]
 struct DockerState {
-    warm: Vec<String>,                  // idle container ids
-    sessions: HashMap<String, String>,  // conversation_id → container id
+    warm: Vec<String>,                 // idle container ids
+    sessions: HashMap<String, String>, // conversation_id → container id
 }
 
 impl DockerBackend {
@@ -52,7 +71,9 @@ impl DockerBackend {
             pool_size: cfg.pool_size,
             mem_mb: cfg.memory_limit_mb,
             pids: cfg.pids_limit,
+            cpus: cfg.cpus,
             network: cfg.network,
+            instance: Uuid::new_v4().to_string(),
             state: Mutex::new(DockerState::default()),
         })
     }
@@ -68,10 +89,12 @@ impl DockerBackend {
             "1000:1000".into(),
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
+            format!("--label={LABEL_ALL}"),
+            format!("--label=kaguya.sandbox.instance={}", self.instance),
             format!("--memory={}m", self.mem_mb),
             format!("--memory-swap={}m", self.mem_mb), // == memory ⇒ swap disabled
             format!("--pids-limit={}", self.pids),
-            "--cpus=1".into(),
+            format!("--cpus={}", self.cpus),
         ];
         if !self.network {
             args.push("--network=none".into());
@@ -101,6 +124,22 @@ impl DockerBackend {
 
     async fn destroy(id: &str) {
         let _ = Command::new("docker").args(["rm", "-f", id]).output().await;
+    }
+
+    /// Force-remove every container carrying this instance's label. Belt-and-
+    /// suspenders for `shutdown()`: catches containers we may have lost track of
+    /// (e.g. a `docker run` that succeeded but whose id we failed to record).
+    async fn reap_instance(&self) {
+        let filter = format!("label=kaguya.sandbox.instance={}", self.instance);
+        let out = Command::new("docker")
+            .args(["ps", "-aq", "--filter", &filter])
+            .output()
+            .await;
+        if let Ok(out) = out {
+            for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                Self::destroy(id).await;
+            }
+        }
     }
 
     async fn container_for(&self, session: &str) -> Result<String, String> {
@@ -140,14 +179,19 @@ impl SandboxBackend for DockerBackend {
             Err(e) => return ExecResult::backend_error(e),
         };
 
-        let ext = req.language.ext();
         let interp = req.language.unix_interp();
         let secs = req.timeout.as_secs().max(1);
-        let runfile = format!("/home/sandbox/.kaguya_run.{ext}");
+        // Unique per-exec runfile so concurrent calls in one container don't
+        // clobber each other; removed after the interpreter exits.
+        let runfile = format!("/home/sandbox/{}", script_name(req.language.ext()));
         // Code arrives on this exec's stdin; `cat` writes it to a file (no shell
         // escaping of user code), then in-container `timeout` runs it and
-        // self-enforces the limit. Program stdin = EOF.
-        let shell = format!("cat > {runfile} && exec timeout -k 2 {secs} {interp} {runfile}");
+        // self-enforces the limit; the runfile is cleaned up afterward. The
+        // interpreter's exit status is preserved via `rc`. Program stdin = EOF.
+        let shell = format!(
+            "cat > {runfile} && timeout -k 2 {secs} {interp} {runfile}; \
+             rc=$?; rm -f {runfile}; exit $rc"
+        );
 
         let mut cmd = Command::new("docker");
         cmd.args(["exec", "-i", &id, "sh", "-c", &shell])
@@ -161,7 +205,13 @@ impl SandboxBackend for DockerBackend {
 
         // Outer backstop in case docker itself hangs.
         let backstop = req.timeout + Duration::from_secs(5);
-        let mut r = run_spawned(child, Some(req.code.clone()), backstop, req.max_output_bytes).await;
+        let mut r = run_spawned(
+            child,
+            Some(req.code.clone()),
+            backstop,
+            req.max_output_bytes,
+        )
+        .await;
         if r.exit_code == 124 {
             // coreutils `timeout` ⇒ timed out
             r.timed_out = true;
@@ -170,17 +220,15 @@ impl SandboxBackend for DockerBackend {
     }
 
     async fn cleanup(&self, session: &str) {
+        // A Gateway owns one conversation, so cleanup only runs at shutdown; just
+        // destroy the session's container. (No warm-pool replenish: there is no
+        // next session in this process to serve, so it would be pure churn.)
         let id = {
             let mut st = self.state.lock().await;
             st.sessions.remove(session)
         };
         if let Some(id) = id {
             Self::destroy(&id).await;
-            if self.mode == SandboxModeKind::Hosted {
-                if let Ok(fresh) = self.create_container().await {
-                    self.state.lock().await.warm.push(fresh);
-                }
-            }
         }
     }
 
@@ -217,6 +265,8 @@ impl SandboxBackend for DockerBackend {
         for (_, id) in sessions {
             Self::destroy(&id).await;
         }
+        // Catch any container we created but lost track of.
+        self.reap_instance().await;
     }
 
     fn name(&self) -> &'static str {
