@@ -491,3 +491,83 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 - Docker resource limits: https://docs.docker.com/engine/containers/resource_constraints/ (`--memory`, `--pids-limit`, `--network=none`, `--cap-drop`).
 - Bubblewrap sandboxing model: https://github.com/containers/bubblewrap (`--unshare-all`, `--ro-bind`, `--die-with-parent`).
 - Windows Job Objects: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, memory/active-process limits) — the pattern Chromium uses for renderer resource containment.
+
+---
+
+## REF-015 — Supervisor-Owned Sandbox Provider and Opaque Handles
+
+**Decision:** Sandbox Provider ownership moves from Gateway to Supervisor. Gateway
+retains the `sandbox_exec` tool definition, request correlation, and P3
+`ToolResult` flow, but it may interact with a sandbox only through the
+Supervisor control-plane sequence:
+
+1. acquire an opaque handle for the conversation;
+2. execute using that handle;
+3. release the handle when the conversation ends.
+
+Supervisor owns backend construction, configuration, prewarming, handle/session
+mapping, resource limits, cleanup, and global shutdown. Sandbox configuration
+therefore lives in `config/kaguya.runtime.toml`, while `gateway.toml` contains
+only the Supervisor control-plane URL. The numerical defaults and backend
+semantics remain those documented by REF-014.
+
+**Rationale:**
+
+1. **One runtime owner.** Sandbox processes, containers, and OS resource handles
+   are runtime resources. The same component that constructs and monitors the
+   process graph must own their lifecycle and teardown.
+2. **Gateway remains a coordinator.** Tool meaning and conversational result
+   routing belong in Gateway; provider selection, Docker/Job Object details, and
+   warm-pool state do not.
+3. **Opaque handles preserve the boundary.** Gateway cannot depend on container
+   IDs, scratch paths, backend type, or provider implementation. Supervisor can
+   replace a backend without changing the tool protocol.
+4. **Shutdown ordering is explicit.** Gateway releases its conversation handle;
+   Supervisor remains authoritative and performs provider-wide cleanup after
+   managed processes stop. Before an initial Gateway start or restart,
+   Supervisor also clears stale conversation handles left by a crash.
+5. **Hosted pools are Supervisor-scoped.** Unlike REF-014's one-Gateway process
+   assumption, a Supervisor can serve multiple conversation handles. A released
+   Docker container is destroyed rather than reused (preventing file leakage),
+   and hosted mode replenishes a clean container up to the configured pool size.
+
+**Supersedes:** REF-014 only where it assigns Sandbox Provider implementation
+and lifecycle to `gateway/src/sandbox/`. REF-014 remains authoritative for the
+tool's behavior, supported backends, security posture, and configurable numeric
+defaults, except its item 6 no-replenishment behavior, which is replaced by the
+Supervisor-scoped clean replenishment rule above. This also completes REF-013's
+stated direction that sandbox/process launch concerns belong to Supervisor.
+
+**Sources:**
+
+- Project runtime architecture diagram `2.png`: Supervisor constructs/monitors
+  Gateway and binds to the Sandbox Provider.
+- Project sandbox sequence diagram `1.png`: Gateway → Tool Manager → Supervisor
+  → Sandbox Provider, with an opaque handle returned before execution.
+- `supervisor/src/process.rs`: existing runtime process ownership and teardown.
+- `gateway/src/core/pipeline/executor.rs`: existing P3 tool dispatch/result
+  boundary retained by this change.
+
+---
+
+## REF-016 — Vendored `protoc` for Rust Stub Generation
+
+**Decision:** Gateway and Supervisor build scripts obtain `protoc` from
+`protoc-bin-vendored` and pass that executable to `tonic-build`. Buf remains the
+schema linting workflow, and Python keeps its existing `grpcio-tools` generator.
+
+**Rationale:**
+
+1. Both Rust crates compile the same canonical proto during `cargo build`; a
+   system-level `protoc` prerequisite made clean Windows/macOS builds depend on
+   unrelated machine setup.
+2. The vendored crate selects a platform binary while preserving the existing
+   `tonic-build` output and schema source of truth.
+3. Pinning the crate version in both build dependencies keeps Gateway and
+   Supervisor generation behavior aligned and reproducible.
+
+**Sources:**
+
+- `protoc-bin-vendored` documentation: https://docs.rs/protoc-bin-vendored
+- `prost-build` documentation (`protoc` is used to parse schemas):
+  https://docs.rs/prost-build

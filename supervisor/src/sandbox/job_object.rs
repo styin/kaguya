@@ -1,6 +1,6 @@
-//! Windows Job Object backend — resource limits (memory / active-process) +
-//! reliable kill-on-close tree teardown. The pattern Chrome uses for its
-//! renderer sandbox. Feature-gated; verify windows-rs API against your version.
+//! Windows Job Object backend — memory/process limits and reliable
+//! kill-on-close tree teardown. A Job Object is a resource boundary, not
+//! filesystem or network isolation. Feature-gated behind `sandbox-jobobject`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -55,6 +55,14 @@ impl JobObjectBackend {
 
 #[async_trait]
 impl SandboxBackend for JobObjectBackend {
+    async fn acquire(&self, session: &str) -> Result<(), String> {
+        tokio::fs::create_dir_all(self.session_dir(session))
+            .await
+            .map_err(|error| format!("mkdir failed: {error}"))?;
+        self.sessions.lock().await.insert(session.to_string());
+        Ok(())
+    }
+
     async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
         let dir = self.session_dir(session);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {

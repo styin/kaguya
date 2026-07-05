@@ -1,6 +1,7 @@
-//! Native backend — runs interpreters directly on the host in a per-session
-//! scratch dir. Zero deps, sub-ms startup, NO isolation beyond cwd + timeout +
-//! tree-kill. Default for self-hosting where the user trusts their own LLM.
+//! Native backend — runs host interpreters in a per-session scratch directory.
+//! It provides no host isolation: cwd, timeout, output caps, and tree-kill are
+//! operational controls, not a security boundary. Intended only for trusted
+//! self-hosted use or when Supervisor itself is externally isolated.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -31,6 +32,14 @@ impl NativeBackend {
 
 #[async_trait]
 impl SandboxBackend for NativeBackend {
+    async fn acquire(&self, session: &str) -> Result<(), String> {
+        tokio::fs::create_dir_all(self.session_dir(session))
+            .await
+            .map_err(|error| format!("mkdir failed: {error}"))?;
+        self.sessions.lock().await.insert(session.to_string());
+        Ok(())
+    }
+
     async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
         let dir = self.session_dir(session);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {

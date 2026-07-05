@@ -24,6 +24,7 @@ proto: proto-py proto-rs
 # reasoner is currently scaffolding only.
 test:
 	cd gateway  && cargo test
+	cd supervisor && cargo test
 	cd talker   && uv run pytest
 	cd reasoner && npm test --if-present
 
@@ -32,6 +33,7 @@ test:
 # the target if it itself is failing — install the tools you use.
 lint:
 	cd gateway && cargo build
+	cd supervisor && cargo build
 	cd talker  && uv run ruff check .
 	buf lint $(PROTO_DIR)
 
@@ -41,13 +43,14 @@ lint:
 # semantics. This target is for local "fix it" runs.
 format:
 	cd gateway && cargo fmt
+	cd supervisor && cargo fmt
 	cd talker  && uv run ruff format .
 	buf format -w $(PROTO_DIR)
 
 # ── Sandbox (Docker backend) ──
 # Build the base image used by the `docker` sandbox backend. Only needed when
-# gateway.toml sets [sandbox] backend = "docker". The native backend (default)
-# needs none of this.
+# config/kaguya.runtime.toml sets [sandbox] backend = "docker". The native
+# backend (default) needs none of this.
 SANDBOX_IMAGE ?= kaguya-sandbox:latest
 sandbox-image:
 	docker build -t $(SANDBOX_IMAGE) -f docker/sandbox.Dockerfile docker

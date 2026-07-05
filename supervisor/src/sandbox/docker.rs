@@ -1,19 +1,18 @@
-//! Docker backend — strongest isolation. Per-session container affinity so
-//! files persist across calls in a conversation.
+//! Docker backend — container isolation with per-session filesystem affinity.
+//! Files persist across calls made with the same Supervisor handle.
 //!
-//! Lifecycle note: a Gateway process owns exactly one `conversation_id`
-//! (see `main.rs`), so "session end" == process shutdown. That makes the
-//! one-Gateway-per-user shape the natural hosting model: each user gets an
-//! isolated Gateway + its own containers, and cross-user state can never leak.
+//! Lifecycle note: one Supervisor may serve handles for multiple Gateway
+//! conversations. Session containers are never reused because they contain
+//! conversation files; hosted mode destroys released containers and replenishes
+//! the clean warm pool.
 //! `mode`:
-//!   single_user → lazy: create the container on first use, destroy at shutdown.
-//!   hosted      → prewarm `pool_size` containers at startup so the first
-//!                 `sandbox_exec` pays no cold-start latency (set pool_size=1
-//!                 for the one-Gateway-per-user shape).
+//!   single_user → create on handle acquisition and destroy on release.
+//!   hosted      → maintain up to `pool_size` clean containers so acquisition
+//!                 can avoid container-creation latency.
 //!
 //! Every container is labeled so orphans from a hard crash can be reaped:
 //!   `kaguya.sandbox=1`                    — all Kaguya sandbox containers
-//!   `kaguya.sandbox.instance=<uuid>`      — this Gateway process only
+//!   `kaguya.sandbox.instance=<uuid>`      — this Supervisor process only
 //! Graceful `shutdown()` sweeps this instance's label; `make sandbox-clean`
 //! reaps the global label after a crash.
 
@@ -41,16 +40,17 @@ pub struct DockerBackend {
     pids: u64,
     cpus: f64,
     network: bool,
-    /// Per-process label value; lets `shutdown()` reap only our own containers,
-    /// which is safe even when several Gateways share one Docker host.
+    /// Per-Supervisor label value. Global cleanup can therefore reap this
+    /// instance without touching containers owned by another Supervisor.
     instance: String,
     state: Mutex<DockerState>,
 }
 
 #[derive(Default)]
 struct DockerState {
+    replenishing: usize,               // clean containers currently being created
     warm: Vec<String>,                 // idle container ids
-    sessions: HashMap<String, String>, // conversation_id → container id
+    sessions: HashMap<String, String>, // provider session → container id
 }
 
 impl DockerBackend {
@@ -126,9 +126,7 @@ impl DockerBackend {
         let _ = Command::new("docker").args(["rm", "-f", id]).output().await;
     }
 
-    /// Force-remove every container carrying this instance's label. Belt-and-
-    /// suspenders for `shutdown()`: catches containers we may have lost track of
-    /// (e.g. a `docker run` that succeeded but whose id we failed to record).
+    /// Force-remove containers lost between `docker run` and state insertion.
     async fn reap_instance(&self) {
         let filter = format!("label=kaguya.sandbox.instance={}", self.instance);
         let out = Command::new("docker")
@@ -173,6 +171,10 @@ impl DockerBackend {
 
 #[async_trait]
 impl SandboxBackend for DockerBackend {
+    async fn acquire(&self, session: &str) -> Result<(), String> {
+        self.container_for(session).await.map(|_| ())
+    }
+
     async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
         let id = match self.container_for(session).await {
             Ok(i) => i,
@@ -220,15 +222,34 @@ impl SandboxBackend for DockerBackend {
     }
 
     async fn cleanup(&self, session: &str) {
-        // A Gateway owns one conversation, so cleanup only runs at shutdown; just
-        // destroy the session's container. (No warm-pool replenish: there is no
-        // next session in this process to serve, so it would be pure churn.)
         let id = {
             let mut st = self.state.lock().await;
             st.sessions.remove(session)
         };
         if let Some(id) = id {
             Self::destroy(&id).await;
+        }
+
+        // Never return a used container to the pool: it contains conversation
+        // files. Reserve a replacement slot under the lock, then create the
+        // clean container without holding the lock.
+        let replenish = {
+            let mut st = self.state.lock().await;
+            let needed = self.mode == SandboxModeKind::Hosted
+                && st.warm.len() + st.replenishing < self.pool_size;
+            if needed {
+                st.replenishing += 1;
+            }
+            needed
+        };
+        if replenish {
+            let created = self.create_container().await;
+            let mut st = self.state.lock().await;
+            st.replenishing -= 1;
+            match created {
+                Ok(id) => st.warm.push(id),
+                Err(error) => warn!("warm-pool replenishment failed: {error}"),
+            }
         }
     }
 

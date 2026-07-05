@@ -1,5 +1,5 @@
 //! Bubblewrap backend — Linux namespace isolation without a Docker daemon.
-//! `bwrap` is a single (setuid or userns) binary; lighter than Docker, no net.
+//! `bwrap` supplies the mount/process boundary and unshares networking.
 //!
 //! Minimal usable bind list (see the debugging notes in the PR description):
 //!   ro:    /usr /bin /sbin /lib /lib64 /etc   — interpreters, shared libs,
@@ -10,7 +10,7 @@
 //!   bind:  <session dir> → /home/sandbox      — the only writable workspace,
 //!                                                persistent across calls in a
 //!                                                conversation
-//! Namespaces: --unshare-all (incl. net ⇒ offline) + --die-with-parent.
+//! Namespaces: `--unshare-all` (including network) + `--die-with-parent`.
 //! Env: cleared, then a minimal known-good set so HOME/TMPDIR are writable.
 
 use std::collections::HashSet;
@@ -54,6 +54,14 @@ impl BubblewrapBackend {
 
 #[async_trait]
 impl SandboxBackend for BubblewrapBackend {
+    async fn acquire(&self, session: &str) -> Result<(), String> {
+        tokio::fs::create_dir_all(self.session_dir(session))
+            .await
+            .map_err(|error| format!("mkdir failed: {error}"))?;
+        self.sessions.lock().await.insert(session.to_string());
+        Ok(())
+    }
+
     async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
         let dir = self.session_dir(session);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {

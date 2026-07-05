@@ -3,6 +3,7 @@ pub mod config;
 pub mod gateway;
 pub mod logs;
 pub mod process;
+pub mod sandbox;
 pub mod server;
 
 pub mod proto {

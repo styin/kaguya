@@ -1,6 +1,22 @@
 profile = "app"
 supervisor_addr = "127.0.0.1:3001"
 
+[sandbox]
+# Supervisor-owned provider used by Gateway's sandbox_exec tool (REF-015).
+enabled = true
+backend = "native"
+mode = "single_user"
+workspace_root = ".."
+default_timeout_secs = 30
+max_output_bytes = 16384
+allowed_languages = ["python", "node", "bash"]
+image = "kaguya-sandbox:latest"
+pool_size = 0
+memory_limit_mb = 512
+pids_limit = 128
+cpus = 1.0
+network = false
+
 [profiles.app.processes.gateway]
 enabled = true
 label = "Gateway"
@@ -9,7 +25,6 @@ criticality = "required"
 restart = "on_failure"
 max_restarts = 5
 restart_window_secs = 300
-sandbox = { provider = "none", required = false }
 command = "source $HOME/.cargo/env && cargo run --features dev-console"
 command_win32 = "cargo run --features dev-console"
 cwd = "../gateway"
@@ -30,7 +45,6 @@ criticality = "required"
 restart = "keep_alive"
 max_restarts = 5
 restart_window_secs = 300
-sandbox = { provider = "none", required = false }
 command = ".venv/bin/python main.py"
 command_win32 = ".venv\\Scripts\\python.exe main.py"
 cwd = "../talker"
@@ -55,7 +69,6 @@ label = "Reasoner"
 launch = "on_demand"
 criticality = "degraded_usable"
 restart = "on_failure"
-sandbox = { provider = "none", required = false }
 command = "npm run dev"
 command_win32 = "npm.cmd run dev"
 cwd = "../reasoner"

@@ -1,9 +1,9 @@
 //! End-to-end smoke of the native `sandbox_exec` path: construct a manager from
 //! the default config and actually run code through it. Guards the port of the
-//! pluggable sandbox (REF-014) beyond mere compilation.
+//! Supervisor-owned sandbox provider (REF-015) beyond mere compilation.
 
-use kaguya_gateway::config::SandboxConfig;
-use kaguya_gateway::sandbox::SandboxManager;
+use kaguya_supervisor::config::SandboxConfig;
+use kaguya_supervisor::sandbox::{SandboxManager, SandboxProvider};
 
 #[tokio::test]
 async fn native_backend_executes_python_and_persists_files() {
@@ -12,7 +12,7 @@ async fn native_backend_executes_python_and_persists_files() {
         .expect("native manager should init");
 
     // The tool is advertised when enabled.
-    assert!(mgr.tool_definition().is_some());
+    assert!(mgr.is_enabled());
 
     let session = "test-conv-native";
 
@@ -56,12 +56,9 @@ async fn native_backend_executes_python_and_persists_files() {
 }
 
 #[tokio::test]
-async fn disabled_manager_hides_tool_and_refuses_exec() {
+async fn disabled_manager_refuses_exec() {
     let mgr = SandboxManager::disabled();
-    assert!(
-        mgr.tool_definition().is_none(),
-        "disabled ⇒ tool not advertised"
-    );
+    assert!(!mgr.is_enabled(), "disabled ⇒ tool not advertised");
 
     let out = mgr
         .exec_from_json("s", r#"{"language":"python","code":"print(1)"}"#)
@@ -122,4 +119,40 @@ async fn rejects_unknown_language() {
         .as_str()
         .unwrap()
         .contains("unsupported language"));
+}
+
+#[tokio::test]
+async fn opaque_handle_controls_execution_and_release() {
+    let cfg = SandboxConfig::default();
+    let provider =
+        SandboxProvider::new(SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap());
+    let handle = provider.acquire("handle-session").await.unwrap();
+    assert_eq!(
+        provider.acquire("handle-session").await.unwrap(),
+        handle,
+        "acquisition retries must return the existing opaque handle"
+    );
+
+    let output = provider
+        .execute(
+            &handle,
+            r#"{"language":"python","code":"print('through-supervisor')"}"#,
+        )
+        .await;
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["exit_code"], 0, "{output}");
+    assert!(value["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("through-supervisor"));
+
+    provider.release(&handle).await.unwrap();
+    let after_release = provider
+        .execute(&handle, r#"{"language":"python","code":"print('no')"}"#)
+        .await;
+    let value: serde_json::Value = serde_json::from_str(&after_release).unwrap();
+    assert!(value["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown or released"));
 }

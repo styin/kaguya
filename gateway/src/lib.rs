@@ -15,7 +15,7 @@
 //! - [`services`] — Inbound gRPC/WebSocket servers the Gateway exposes.
 //! - [`config`] — Gateway-local and runtime topology configuration.
 //! - [`rag`] — Retrieval-augmented generation (embedding, retrieval, memory store).
-//! - [`sandbox`] — Pluggable code-execution sandbox exposed as the `sandbox_exec` tool.
+//! - [`sandbox`] — Client for the Supervisor-owned `sandbox_exec` provider.
 //! - [`tools`] — Tool registry and dispatch for the Talker's tool-use protocol.
 
 pub mod capabilities;

@@ -17,7 +17,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub rag: RagConfig,
     #[serde(default)]
-    pub sandbox: SandboxConfig,
+    pub supervisor: SupervisorConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
 }
@@ -376,114 +376,28 @@ impl Default for GatewayConfig {
                 enabled: true,
             },
             rag: RagConfig::default(),
-            sandbox: SandboxConfig::default(),
+            supervisor: SupervisorConfig::default(),
             runtime: RuntimeConfig::default(),
         }
     }
 }
 
-// ── Sandbox ──────────────────────────────────────────────
-//
-// Pluggable code-execution sandbox. Backend and resource limits are
-// config-driven; see `crate::sandbox` for the backends. Defaults are the
-// documented values in REFERENCES.md (REF-014).
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxBackendKind {
-    /// Run interpreters directly on the host (zero deps, no isolation).
-    #[default]
-    Native,
-    /// Per-session Docker container (strong isolation).
-    Docker,
-    /// Linux namespace isolation via `bwrap`, no daemon.
-    Bubblewrap,
-    /// Windows Job Object (resource limits + kill-on-close).
-    JobObject,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxModeKind {
-    /// Lazy: create resources on first use, no warm pool.
-    #[default]
-    SingleUser,
-    /// Warm pool of `pool_size` pre-created containers (Docker only).
-    Hosted,
-}
+// ── Supervisor control plane ─────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct SandboxConfig {
-    #[serde(default = "sb_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub backend: SandboxBackendKind,
-    /// Docker only: single_user (lazy, no pool) vs hosted (warm pool).
-    #[serde(default)]
-    pub mode: SandboxModeKind,
-    #[serde(default = "sb_timeout")]
-    pub default_timeout_secs: u64,
-    /// LLM-facing cap on captured stdout/stderr (bytes feed the next prompt).
-    #[serde(default = "sb_output")]
-    pub max_output_bytes: usize,
-    // ── Docker-specific ──
-    #[serde(default = "sb_image")]
-    pub image: String,
-    #[serde(default)]
-    pub pool_size: usize,
-    #[serde(default = "sb_mem")]
-    pub memory_limit_mb: u64,
-    #[serde(default = "sb_pids")]
-    pub pids_limit: u64,
-    /// Docker only: CPU quota (`--cpus`). Fractions allowed (e.g. 0.5).
-    #[serde(default = "sb_cpus")]
-    pub cpus: f64,
-    #[serde(default)]
-    pub network: bool,
-    #[serde(default = "sb_langs")]
-    pub allowed_languages: Vec<String>,
+pub struct SupervisorConfig {
+    #[serde(default = "default_supervisor_url")]
+    pub url: String,
 }
 
-fn sb_true() -> bool {
-    true
-}
-fn sb_timeout() -> u64 {
-    30
-}
-fn sb_output() -> usize {
-    16 * 1024
-}
-fn sb_image() -> String {
-    "kaguya-sandbox:latest".into()
-}
-fn sb_mem() -> u64 {
-    512
-}
-fn sb_pids() -> u64 {
-    128
-}
-fn sb_cpus() -> f64 {
-    1.0
-}
-fn sb_langs() -> Vec<String> {
-    vec!["python".into(), "node".into(), "bash".into()]
+fn default_supervisor_url() -> String {
+    "http://127.0.0.1:3001".into()
 }
 
-impl Default for SandboxConfig {
+impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
-            enabled: sb_true(),
-            backend: SandboxBackendKind::default(),
-            mode: SandboxModeKind::default(),
-            default_timeout_secs: sb_timeout(),
-            max_output_bytes: sb_output(),
-            image: sb_image(),
-            pool_size: 0,
-            memory_limit_mb: sb_mem(),
-            pids_limit: sb_pids(),
-            cpus: sb_cpus(),
-            network: false,
-            allowed_languages: sb_langs(),
+            url: default_supervisor_url(),
         }
     }
 }

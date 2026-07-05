@@ -33,44 +33,8 @@ max_storage_chars = 4096
 # max_chars_per_result = 400
 # max_chars_per_md_entry = 300
 
-[sandbox]
-# Pluggable code-execution sandbox, exposed to the Talker as `sandbox_exec`.
-# When enabled=false the tool is not advertised at all (REF-014).
-#
-# Personal / self-host: the defaults below work out of the box — `native`
-# needs only a local python/node/bash on PATH, zero setup.
-# Hosting: prefer backend="docker" and run ONE Gateway process per user
-# session (a Gateway owns a single conversation), so users are isolated by
-# construction. First build the image once: `make sandbox-image`.
-enabled = true
-# Backend: "native" | "docker" | "bubblewrap" | "job_object".
-#   native     — run interpreters directly on the host. Zero deps, sub-ms
-#                startup, NO isolation beyond cwd + timeout + tree-kill.
-#                Best for self-hosting where you trust your own LLM. Using it
-#                with mode="hosted" logs a warning (unsafe unless each Gateway
-#                is itself confined per user).
-#   docker     — per-conversation container, strongest isolation.
-#   bubblewrap — Linux namespace isolation via `bwrap`, no daemon.
-#   job_object — Windows Job Object (needs `--features sandbox-jobobject`).
-backend = "native"
-# Docker only: "single_user" (lazy create on first use) or "hosted" (prewarm
-# `pool_size` containers at startup so the first exec has no cold-start).
-mode = "single_user"
-default_timeout_secs = 30
-# LLM-facing cap on captured stdout/stderr (bytes feed the next prompt).
-max_output_bytes = 16384
-# Empty list = allow all; a list with no recognized entry logs a warning.
-allowed_languages = ["python", "node", "bash"]
-
-# ── Docker-specific (ignored by other backends; memory/pids also apply to
-#    the Windows job_object backend) ──
-image = "kaguya-sandbox:latest"
-# Containers to prewarm at startup for mode="hosted". 0 = lazy. With one
-# Gateway per user, 1 is enough to hide first-call container latency.
-pool_size = 0
-memory_limit_mb = 512
-pids_limit = 128
-# CPU quota (docker --cpus); fractions allowed, e.g. 0.5.
-cpus = 1.0
-# Whether the container has network access. Off by default.
-network = false
+[supervisor]
+# Runtime control plane. The Gateway requests an opaque sandbox handle here;
+# backend choice, limits, prewarming, and cleanup live in kaguya.runtime.toml.
+# KAGUYA_SUPERVISOR_URL overrides this value when Supervisor launches Gateway.
+url = "http://127.0.0.1:3001"
