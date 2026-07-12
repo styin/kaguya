@@ -6,6 +6,8 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 
 - `docs/spec-agent-v0.1.0.md` — Listener + Talker Agent specification
 - `docs/spec-gateway-v0.1.0.md` — Gateway specification
+- `docs/spec-reasoner-v0.1.0.md` — Reasoner contract and adapter specification
+- `docs/kaguya-manifesto-v0.1.0.md` — root product specification
 - `docs/implementation-plan-v0.1.0.md` — Phase 1 implementation plan (single source of truth for build order)
 - `REFERENCES.md` — Algorithmic design decisions with sources (see below)
 
@@ -22,9 +24,12 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 
 ## Architecture Invariants (Do Not Violate)
 
-- Gateway is the only component that touches the filesystem.
+- Gateway has sole discretion over durable Kaguya-agent workspace and host capabilities. A
+  Reasoner backend may access only a Gateway-authorized task workspace; Supervisor supplies
+  volatile scratch space and cleanup, never independent host authority.
 - Talker Agent is fully stateless — all context arrives via gRPC from Gateway each turn.
-- Audio bytes never enter protobuf serialization at 50fps. Raw bytes over Unix socket only.
+- Audio bytes never enter protobuf serialization at 50fps. They use the dedicated raw TCP
+  stream between Gateway and Listener.
 - Tokens never cross the gRPC boundary — only complete semantic units (sentences, tags).
 - Gateway does not inspect or decode audio content.
 - P0 control signals bypass the Input Stream entirely.
@@ -43,12 +48,13 @@ Kaguya is intended to run across multiple desktop platforms, especially Windows 
 | ------------ | ----------------------------------- |
 | Gateway      | Rust (tokio, tonic)                 |
 | Talker Agent | Python (asyncio, grpcio)            |
-| Reasoner     | TypeScript (Node.js)                |
-| Toolkit      | TypeScript (Node.js)                |
-| Proto schema | buf (generates stubs for all three) |
+| Reasoner     | Adapter/service language is backend-dependent |
+| Toolkit      | Gateway-managed tool registry       |
+| Proto schema | buf; Python stubs are committed and Rust stubs build with tonic |
 
 ## Workflow
 
-- Run `make proto` to regenerate all gRPC stubs after editing `proto/kaguya/v1/kaguya.proto`.
+- Run `make proto` after editing `proto/kaguya/v1/kaguya.proto` to refresh Python stubs and
+  Rust build output. The Reasoner uses its adapter transport rather than generated stubs.
 - Proto changes must pass `buf lint proto/` before committing.
 - Implement milestones in order (M0 → M7). Each milestone produces a testable artifact.

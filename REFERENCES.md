@@ -78,11 +78,11 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 
 ## REF-003 — IPC File Organization: Separate Server and Client Files, Domain-First Naming (M2.4, §8)
 
-**Decision:** Each process uses separate files for its gRPC server role vs. client role, named by domain purpose rather than gRPC role. The Talker's ListenerService gRPC client is embedded in `voice/listener.py` (not a standalone `client.py`) because it is tightly coupled to listener logic and not shared by other components.
+**Decision:** Each process uses separate files for its gRPC server role vs. client role, named by domain purpose rather than gRPC role. The Talker's ListenerService implementation is embedded in `voice/listener.py` (not a standalone `client.py`) because it is tightly coupled to listener logic and not shared by other components.
 
 **Rationale:**
 
-1. **Lifecycle incompatibility:** A gRPC server calls `await server.wait_for_termination()` (blocking); a gRPC client runs a long-lived `stub.StreamEvents()` async generator. These are two different asyncio task lifecycles. Combining them in one file forces incompatible control flows into the same module.
+1. **Lifecycle incompatibility:** A gRPC server calls `await server.wait_for_termination()` (blocking); a bidi service implementation runs a long-lived request/response stream. These are different asyncio lifecycles. Combining unrelated service roles in one file forces incompatible control flows into the same module.
 
 2. **Google's canonical pattern:** Every gRPC Python example in `grpc/grpc/examples/python/` uses separate `*_server.py` and `*_client.py` files — `helloworld`, `route_guide`, `multiplex`, `auth`, `compression`. The grpc.io basics tutorial explicitly names these `route_guide_server.py` and `route_guide_client.py`. This is a hard convention, not a preference.
 
@@ -96,8 +96,8 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 
 | File                           | Domain role                            | gRPC role                                                                                  |
 | ------------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `talker/server.py`         | Wires inference ↔ voice ↔ Gateway per-turn | SERVER — receives `ProcessPrompt`, `Prepare`, `PrefillCache`, `UpdatePersona` from Gateway |
-| `talker/voice/listener.py` | Captures speech, detects turns         | CLIENT — dials Gateway, streams `ListenerEvent` messages                                   |
+| `talker/server.py`         | Wires inference ↔ voice ↔ Gateway per-turn | SERVER — handles bidi `Converse`, plus `PrefillCache` and `UpdatePersona` |
+| `talker/voice/listener.py` | Captures speech, detects turns         | SERVER — implements bidi `ListenerService.Stream` for the Gateway client                  |
 | `talker/main.py`           | Process entrypoint                     | Orchestrates both as `asyncio` tasks                                                       |
 
 **Sources:**
@@ -134,10 +134,10 @@ silence ≥ 800ms          → emit unconditionally regardless of syntax
 If a slow speaker or thinker pauses >800ms mid-sentence, the unconditional rule emits a `final_transcript` for the partial utterance. The turn lifecycle then proceeds:
 
 1. Partial `final_transcript` → Gateway assembles context → Talker begins generating a response.
-2. User resumes speaking → `vad_speech_start` → PREPARE → Talker is interrupted (only spoken portion appended to history).
-3. Second fragment → new `final_transcript` → fresh `ProcessPrompt` with broken context.
+2. User resumes speaking → `vad_speech_start` → inline `TalkerInput.barge_in` → Talker is interrupted (only spoken portion appended to history).
+3. Second fragment → new `final_transcript` → fresh `TalkerInput.start` with broken context.
 
-The PREPARE mechanism prevents history corruption (only spoken text is appended) but cannot prevent the response to the partial utterance from being wrong or confusing. The worst case is if the Talker _finishes_ responding before the user resumes: history then contains a full response to an incomplete thought, and the continuation arrives as a new, context-broken turn.
+The inline barge-in mechanism prevents history corruption (only spoken text is appended) but cannot prevent the response to the partial utterance from being wrong or confusing. The worst case is if the Talker _finishes_ responding before the user resumes: history then contains a full response to an incomplete thought, and the continuation arrives as a new, context-broken turn.
 
 This is a known limitation of Phase 1's rule-based approach. It is the primary motivation for the Phase 2 learned turn detection model.
 
@@ -363,6 +363,68 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 
 - "Retrieve and refine, don't truncate" — general RAG-pipeline practice; e.g. LlamaIndex / LangChain documentation on chunking-vs-truncation tradeoffs.
 - SQLite cell-size limits: https://www.sqlite.org/limits.html (default 1 GB; 4 KB is far below any practical concern).
+
+---
+
+## REF-011 - Reasoner Sandbox Leases and Native Tool Registries (Reasoner, Phase 1)
+
+**Decision:** Gateway is authoritative for durable Kaguya-agent workspace and host capabilities.
+Every delegated Reasoner task receives an opaque, task-scoped workspace lease authorized by
+Gateway. Supervisor provides the volatile scratch environment and cleanup for that lease; the
+selected agent backend runs inside it. CLI-backed adapters retain their native
+file, edit, shell, and test tools within the lease. Kaguya extends the agent loop with
+namespaced capabilities, normally through MCP, rather than replacing the CLI's tool registry.
+
+**Rationale:**
+
+1. **CLI portability.** Agent CLIs have materially different built-in tool loops and permission
+   interfaces. Replacing those registries would require Kaguya to emulate each agent's core
+   coding workflow and would make the adapter boundary less, rather than more, portable.
+2. **A real security boundary.** A backend's tool approval UI is not a cross-backend security
+   contract. Gateway authorizes durable workspace and host capabilities; Supervisor enforces
+   the volatile task environment, process policy, and cleanup. The actual authority stays
+   outside the model-authored agent process.
+3. **Clear separation of extension from execution.** MCP-style `kaguya.*` tools add Kaguya
+   capabilities without colliding with native tool names or requiring Kaguya to proxy every
+   file read and shell command.
+4. **Opaque leases preserve implementation freedom.** Gateway and Reasoner carry a lease ID,
+   never a host path or container identifier. Supervisor can choose a scratch directory,
+   container, or another volatile execution backend without changing the Reasoner wire contract.
+
+**Sources:**
+
+- Kaguya sandbox design branch `lyf_sandbox_new`: Supervisor-owned provider, opaque handles,
+  backend selection, resource ownership, and cleanup.
+- Anthropic, Claude Code CLI reference: https://docs.anthropic.com/en/docs/claude-code/cli-usage
+- OpenAI, Codex CLI overview: https://help.openai.com/en/articles/11096431
+
+---
+
+## REF-012 - Phase 1 Reasoner Adapter Contracts (Reasoner, Phase 1)
+
+**Decision:** Phase 1 implements only Codex through app-server and Grok/Kimi through
+ACP-style adapters. All map to one Kaguya internal adapter contract; the mapping is transport
+specific, not a separate task model. Claude and Qwen are deferred to Phase 2.
+
+**Rationale:**
+
+1. **Codex app-server is not ACP.** Its thread, turn, item, and approval JSON-RPC surface can
+   yield richer structured lifecycle activity, but needs a dedicated mapper.
+2. **ACP collapses two backends into one transport adapter.** An ACP client can use the same
+   initialize, session, prompt, update, permission, cancellation, and optional resume paths
+   for Grok and Kimi, while honoring each agent's declared capabilities.
+3. **Capability declaration prevents fictional parity.** Plan, approval, resume, and MCP
+   support are normalized only when the external contract declares and emits them. Every
+   backend still passes the common lifecycle and cancellation conformance suite.
+
+**Sources:**
+
+- Kimi Code CLI ACP reference: `kimi acp` uses JSON-RPC over stdin/stdout, starts with
+  `initialize`, and advertises its capabilities. https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp
+- Kimi Code IDE integration guide: ACP sessions, prompts, and IDE-provided MCP configuration.
+  https://www.kimi.com/help/kimi-code/cli-ides
+- Codex app-server contract selected by project design; its exact installed-version methods are
+  validated by the Phase 1 adapter conformance probe before implementation.
 
 ---
 

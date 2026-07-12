@@ -30,15 +30,15 @@ architectural choices made during design; do not relitigate them. Notes marked
 │  - Silence timers, prefix prefill orchestration                   │
 │  - Phase 1 endpoint: dev-GUI/TUI via local WebSocket              │
 └────────────────────────────┬─────────────────────────────────────┘
-              gRPC (Unix socket)          gRPC (Unix socket)
+              gRPC (TCP)                   gRPC (TCP)
          ┌────────────────────┘          └──────────────────────┐
          ▼                                                       ▼
 ┌────────────────────────────────┐          ┌───────────────────────────┐
 │  Process 2: Talker Agent (Python)│          │  Process 4+: Reasoner(s)  │
 │  Shared asyncio event loop      │          │  (TypeScript, on-demand)  │
-│  ├── voice/listener.py          │          │  One process per task_id  │
+│  ├── voice/listener.py          │          │  One service, task sessions│
 │  │   RealtimeSTT (faster-       │          │  Adapter pattern:         │
-│  │   whisper + Silero VAD)      │          │  OpenClaw / Claude Code   │
+│  │   whisper + Silero VAD)      │          │  Codex app-server / ACP   │
 │  │   + custom turn detection    │          └───────────────────────────┘
 │  ├── voice/speaker.py           │
 │  │   RealtimeTTS (Kokoro)       │
@@ -57,9 +57,11 @@ architectural choices made during design; do not relitigate them. Notes marked
 
 **Key invariants:**
 
-- The Gateway is the only component that touches the filesystem (RAG SQLite store, SOUL.md, IDENTITY.md, workspace tools).
+- Gateway has sole discretion over durable Kaguya-agent workspace and host capabilities. A
+  Reasoner may touch only a Gateway-authorized, task-scoped workspace lease; Supervisor provides
+  volatile scratch space and cleanup. No host path crosses the Reasoner gRPC boundary (REF-011).
 - The Talker is fully stateless. It receives all context via gRPC every turn.
-- Audio frames never enter protobuf serialization at 50fps. Raw bytes over Unix socket.
+- Audio frames never enter protobuf serialization at 50fps. Raw bytes over the dedicated TCP stream.
 - Tokens never cross the gRPC boundary. The soul container absorbs them; only complete semantic units (sentences, tags) exit via gRPC.
 
 ---
@@ -123,7 +125,7 @@ service RouterControlService {
 Key shape changes versus the original draft:
 
 - **Listener role flipped.** The Listener is now a gRPC server inside Process 2 (Talker). Audio bytes ride a separate raw TCP socket — Opus frames never enter protobuf serialization at 50fps.
-- **`Converse` replaces `ProcessPrompt` + `Prepare`.** Bidi stream. `TalkerInput.start` carries the `TalkerContext`; `TalkerInput.barge_in` interrupts mid-stream and the Talker replies inline with `TalkerOutput.barge_in_ack { spoken_text, unspoken_text }`.
+- **`Converse` is the bidi turn stream.** `TalkerInput.start` carries the `TalkerContext`; `TalkerInput.barge_in` interrupts mid-stream and the Talker replies inline with `TalkerOutput.barge_in_ack { spoken_text, unspoken_text }`.
 - **`Delegate` / `Interrupt` / `Telemetry` replace `ExecuteTask` / `CancelTask`.** `Delegate` is bidi (Gateway can push context updates mid-task). `Interrupt` is unary with a oneof for `cancel(task_id)`, `stop`, or `shutdown`. `Telemetry` is server-streaming and stub-only in Phase 1.
 - **`TalkerContext` gained `retrieval_results: repeated RetrievalResult`.** Each entry carries `{id, content, source ("bm25" | "vector"), score}`. Populated per turn by `RagEngine::retrieve`.
 - **`PersonaConfig.memory_md` is synthesized.** No longer the contents of an on-disk `MEMORY.md` file — produced by `RagEngine::export_memory_md()` from the SQLite store.
@@ -229,7 +231,7 @@ Work in this order. Each milestone produces a runnable/testable artifact.
 - [ ] Define `GatewayState` struct:
   - `conversation_history: Vec<ChatMessage>` (in-memory rolling log)
   - `persona: PersonaConfig` (cached, delivered to Talker on connect)
-  - `active_tasks: HashMap<String, TaskState>` (task_id → state)
+  - `active_tasks: HashMap<String, TaskState>` (task_id → state; projected as repeated `TaskState`)
   - `pending_tool_requests: HashMap<String, ToolRequest>` (request_id → request)
   - `silence_timers: SilenceTimers` — three named handles for the three semantic tiers (see M1.6)
 - [ ] Implement history compaction stub (no LLM call yet — just truncate at N turns for Phase 1).
@@ -244,7 +246,7 @@ Work in this order. Each milestone produces a runnable/testable artifact.
 #### M1.5 — gRPC server (tonic)
 
 - [ ] Implement Listener gRPC client (`ListenerClient::start`): open bidi `Stream`, push `ListenerOutput` events into Input Stream at correct priority level. Open the raw TCP audio socket separately for outbound Opus frames.
-- [ ] Implement gRPC client stub for `TalkerService` (Gateway is the _client_ calling the Talker): connect to Talker's Unix socket, stubs return empty at this stage.
+- [ ] Implement gRPC client for `TalkerService` (Gateway is the _client_ calling the Talker) over the configured TCP address.
 - [ ] Implement `RouterControlServer`: handle `StopSignal`, `ShutdownSignal` directly (P0 bypass).
 - [ ] Configure Unix domain socket transport for all services.
 
@@ -268,7 +270,7 @@ Work in this order. Each milestone produces a runnable/testable artifact.
 - [ ] Implement `assemble_context(user_input, history, persona, active_tasks, tool_result?) -> TalkerContext`.
 - [ ] History window: include last N turns in full (Phase 1: N=20, configurable).
 - [ ] Include `memory_contents` from cached `persona.memory_md`.
-- [ ] Include `active_tasks_json` summarising ongoing Reasoner tasks.
+- [ ] Include `repeated TaskState` for ongoing Reasoner tasks; Gateway folds backend events into this projection.
 - [ ] Set `tool_request_id` and `tool_result_content` when this is a tool-result round.
 
 **Done when:** Gateway starts, loads persona files, accepts gRPC connections, and routes events through the Input Stream. Verified with integration test using a stub Talker that echoes requests.
@@ -331,7 +333,7 @@ Phase 1 rule-based implementation (~50-100 lines):
 
 #### M2.4 — gRPC client (Listener side)
 
-- [ ] Implement async gRPC client connecting to Gateway's `ListenerService` via Unix socket.
+- [ ] Implement the async `ListenerService` server; Gateway connects over TCP and controls the bidi stream.
 - [ ] `Stream()` servicer coroutine: async generator of `ListenerOutput` messages, plus a reader for inbound `ListenerInput` control signals.
 - [ ] Reconnect with exponential backoff on connection loss.
 
@@ -360,7 +362,7 @@ Phase 1 rule-based implementation (~50-100 lines):
   2. System: structured output instructions (emotion tags, tool tags, delegate tags)
   3. System: available tools list (from `ctx.tools`)
   4. System: tool use examples (few-shot)
-  5. System: current context (timestamp, active tasks from `ctx.active_tasks_json`)
+  5. System: current context (timestamp, active tasks from `ctx.active_tasks`)
   6. Memory: `ctx.memory_contents` (synthesized memory_md from RAG store) + `ctx.retrieval_results` (per-turn hybrid hits)
   7. Conversation history: `ctx.history` formatted as alternating user/assistant turns
   8. If `ctx.tool_result_content`: inject as ROLE_TOOL turn before user input
@@ -424,7 +426,6 @@ Phase 1 rule-based implementation (~50-100 lines):
   - Emit `TalkerOutput { barge_in_ack = BargeInAck { spoken_text, unspoken_text } }` on the same stream.
 - [ ] Idempotent: if already idle, the barge_in arrives at a stream with no live generation task — emit a `BargeInAck` with empty strings and no-op.
 
-(There is no separate `prepare.py`. The inline-on-Converse design supersedes the earlier dedicated `Prepare` RPC.)
 
 #### M3.8 — main.py
 
@@ -432,12 +433,12 @@ Phase 1 rule-based implementation (~50-100 lines):
   1. Load `TalkerConfig`.
   2. Init `InferenceEngine` (start llama.cpp connection check).
   3. Load persona from cached file or wait for `UpdatePersona` gRPC call.
-  4. Start gRPC server (Unix socket, `TalkerServiceServicer`).
+  4. Start TCP gRPC servers (`TalkerServiceServicer` and `ListenerServiceImpl`).
   5. Start Listener asyncio task (`voice/listener.py`).
   6. `await server.wait_for_termination()`.
 - [ ] `if __name__ == "__main__": asyncio.run(main())`
 
-**Done when:** Full voice turn works end-to-end: speak → transcript → LLM → TTS output. Tags extracted. PREPARE interrupts correctly.
+**Done when:** Full voice turn works end-to-end: speak → transcript → LLM → TTS output. Tags extracted. Inline `barge_in` interrupts correctly.
 
 ---
 
@@ -460,26 +461,19 @@ Phase 1 rule-based implementation (~50-100 lines):
 
 ---
 
-### Milestone 5 — Reasoner (TypeScript)
+### Milestone 5 — Reasoner Service and Adapters
 
-**Goal:** Reasoner adapter that wraps OpenClaw (or Claude Code), intercepts output, streams events to Gateway.
+**Goal:** Implement the Reasoner contract in `spec-reasoner-v0.1.0.md`: Supervisor launches a
+service and volatile task environment on demand; Gateway authorizes the durable Kaguya-agent
+workspace lease and consumes the normalized event stream.
 
-- [ ] Init `reasoner/` as Node.js/TypeScript project.
-- [ ] Implement `ReasonerServiceClient` (gRPC client connecting to Gateway's `ReasonerService`).
-- [ ] Implement `OpenClawAdapter`:
-  - Spawn OpenClaw subprocess for given `TaskRequest.description`.
-  - Monitor stdout/stderr.
-  - Translate to `ReasonerEvent` stream:
-    - On spawn: emit `ReasonerStarted`.
-    - On meaningful stdout line: emit `ReasonerIntermediateStep`.
-    - On partial result: emit `ReasonerOutput`.
-    - On process exit 0: emit `ReasonerCompleted`.
-    - On process exit non-0: emit `ReasonerError`.
-  - Stream all events to Gateway via gRPC.
-- [ ] Implement `Interrupt(InterruptRequest { signal: cancel(task_id) })`: send SIGTERM to subprocess, confirm exit. Also handle `signal: stop` (cancel all in-flight tasks) and `signal: shutdown` (drain and exit).
-- [ ] Adapter pattern: `interface ReasonerAdapter { execute(task: TaskRequest): AsyncIterator<ReasonerEvent> }`. OpenClaw and Claude Code are separate adapters — swap without changing Gateway.
-- [ ] **[DECISION]** Reasoner is TypeScript for Node.js/OpenClaw ecosystem compatibility.
-- [ ] **[DECISION]** One Reasoner process per task. Gateway spawns a new process for each `DelegateRequest`. The `task_id` from the Talker is stable through the entire lifecycle.
+- [ ] Rewrite `reasoner/` as a `ReasonerService` server with a backend-neutral adapter interface.
+- [ ] Implement the Phase 1 mappers: Codex app-server plus Grok and Kimi ACP.
+- [ ] Accept Gateway's bidi `Delegate` stream for task start, context updates, and approval decisions; emit lifecycle, activity, plan, approval, completion, and error events.
+- [ ] Preserve backend-native file, edit, shell, and test tools within the Gateway-authorized lease. Mount `kaguya.*` extensions without replacing those native registries.
+- [ ] Implement `Interrupt` for task cancellation, global stop, and shutdown; Supervisor terminates volatile execution only as the fallback.
+- [ ] In Gateway, fold activity and plans into `TaskState`; inject the digest into Talker context. Only approvals, completion, and errors become P3 events.
+- [ ] Start with a concurrency cap of one session while keeping the contract N-ready.
 
 ---
 
@@ -506,7 +500,7 @@ Phase 1 rule-based implementation (~50-100 lines):
 - [ ] Test 1: Full voice turn. Speak "What time is it?" → verify `final_transcript` → `TalkerContext` → Converse `start` → `SentenceEvent` arrives at Gateway → `ResponseComplete`.
 - [ ] Test 2: Barge-in. Talker mid-sentence → `vad_speech_start` → `TalkerInput.barge_in` on the active Converse stream → `BargeInAck` with non-empty `spoken_text` → history contains only spoken portion → `ResponseComplete { was_interrupted = true }`.
 - [ ] Test 3: Tool call. Prompt triggers `[TOOL:web_fetch(...)]` → `ToolRequest` in `TalkerOutput` → Gateway dispatches to Toolkit → tool result → new Converse round.
-- [ ] Test 4: Delegation. Prompt triggers `[DELEGATE:...]` → `DelegateRequest` → Reasoner spawned via `Delegate(stream DelegateInput)` → `ReasonerCompleted` → narration turn.
+- [ ] Test 4: Delegation. Prompt triggers `[DELEGATE:...]` → `DelegateRequest` → Gateway-authorized lease + Reasoner `Delegate` stream → TaskState fold → `TaskCompleted` → Talker may summarize at its next conversational opening.
 - [ ] Test 5: Silence timer. No input for 3s after response → `silence_exceeded` → soft prompt Talker turn.
 - [ ] Test 6: Barge-in on idle Talker. `vad_speech_start` arrives when no Converse stream is open → `barge_in()` finds no active stream and logs at debug → no history corruption.
 - [ ] Test 7: Prefix prefill. After `ResponseComplete`, verify `PrefillCache` is dispatched to Talker. Verify next Converse round's first-token latency is measurably lower (benchmark test).
@@ -537,7 +531,7 @@ The following are deferred to Phase 2. Do not implement them in Phase 1, even pa
 - OpenPod protocol integration (Channel A, Channel D, telemetry P5 events).
 - Partial transcript prefill (word-level KV cache extension).
 - Speculative decoding (draft tokens before final_transcript).
-- Two-stage PREPARE signal (soft fade / hard stop).
+- Refine inline barge-in behavior from voice-interruption testing.
 - ChromaDB vector store.
 - QLoRA fine-tuning.
 - Custom TTS voice (Chatterbox/Qwen3-TTS).
@@ -620,13 +614,13 @@ kaguya/
 │   └── kaguya/
 │       └── v1/
 │           └── kaguya.proto        # Single source of truth — Section 3 above
-├── reasoner/                       # TypeScript — OpenClaw adapter
+├── reasoner/                       # Reasoner service — Codex app-server + ACP adapters
 │   ├── src/
 │   │   ├── index.ts                # Entry point
 │   │   ├── adapter.ts              # ReasonerAdapter interface
-│   │   ├── openclaw.ts             # OpenClaw adapter impl
-│   │   └── grpc_client.ts          # ReasonerService gRPC client → Gateway
-│   ├── proto/                      # Generated stubs — gitignored
+│   │   ├── codex_app_server.ts     # Codex app-server mapper
+│   │   ├── acp.ts                  # Grok/Kimi ACP mapper
+│   │   └── grpc_server.ts          # ReasonerService server for Gateway
 │   ├── package.json
 │   └── tsconfig.json
 ├── scripts/
@@ -645,7 +639,6 @@ kaguya/
 │   │   ├── soul_container.py       # Tag extraction, normalization, spoken/action split
 │   │   └── sentence_detector.py    # Token buffer → sentence boundaries (regex)
 │   ├── server.py                   # TalkerServiceServicer — wires Gateway ↔ inference ↔ voice
-│   ├── prepare.py                  # PREPARE handler — crosses voice + inference
 │   ├── config.py                   # pydantic BaseSettings
 │   ├── main.py                     # asyncio entrypoint: start gRPC server + Listener task
 │   ├── proto/                      # COMMITTED Python stubs (REF-005) — rebuild: make proto
@@ -677,5 +670,5 @@ kaguya/
 - `proto/` contains only hand-written `.proto` sources. `talker/proto/` contains **committed** Python stubs (regenerate with `make proto` after schema changes — see REF-005). `reasoner/` uses runtime loading (no stubs). `gateway/src/proto/` is gitignored, rebuilt automatically by tonic-build on `cargo build`.
 - `gateway/src/endpoint/` is isolated as a subdirectory because it will be replaced wholesale in Phase 2 (WebSocket → OpenPod). All other Gateway code remains unchanged.
 - `talker/` uses a flat layout (no `src/`): packages live directly under `talker/`. Snake_case per PEP 8.
-- `voice/` and `inference/` reflect the conceptual split: `voice/` owns all audio I/O (both directions), `inference/` owns all LLM inference (prompt formatting, token streaming, sentence detection, soul container). `server.py` and `prepare.py` are at root because they are cross-cutting coordinators that touch both.
+- `voice/` and `inference/` reflect the conceptual split: `voice/` owns all audio I/O (both directions), `inference/` owns all LLM inference (prompt formatting, token streaming, sentence detection, soul container). `server.py` is the cross-cutting coordinator; inline `barge_in` handling belongs there because it coordinates the stream, inference, and speaker state.
 - **IPC file organization (per-process):** Industry standard (grpc.io tutorials, production Python gRPC projects) is separate files for server and client roles. In the Talker Agent: `server.py` is the gRPC server (TalkerService — Gateway calls us). The gRPC client (ListenerService — we call Gateway) is embedded directly in `voice/listener.py` rather than a separate `client.py` because it is tightly coupled to listener logic and not shared by any other component. If a process has multiple independent gRPC clients, extract them to `ipc/client.py`. For the Gateway (Rust): server and client roles are in separate modules under `services/` per the directory structure above.

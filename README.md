@@ -7,7 +7,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/Gateway-Rust-orange.svg)](gateway/)
 [![Python](https://img.shields.io/badge/Talker-Python-blue.svg)](talker/)
-[![TypeScript](https://img.shields.io/badge/Reasoner-TypeScript-blue.svg)](reasoner/)
+[![Adapters](https://img.shields.io/badge/Reasoner-Adapter%20service-blue.svg)](reasoner/)
 
 </div>
 
@@ -27,7 +27,7 @@ Most voice assistants fall into two camps:
 Kaguya splits the difference with a **two-tier architecture**:
 
 - **Fast path** for conversation: Local 8B model responds in <700ms
-- **Slow path** for real work: Delegates complex tasks to more capable agents (OpenClaw, Claude Code) when needed
+- **Slow path** for real work: Delegates complex tasks to a background Reasoner service when needed
 
 The result: Responsive voice interaction that doesn't compromise on capability, all running on your GPU.
 
@@ -59,16 +59,16 @@ The result: Responsive voice interaction that doesn't compromise on capability, 
 - Emits structured action tags: `[TOOL:web_fetch(...)]`, `[DELEGATE:task]`, `[EMOTION:joy]`
 - Soul container pattern inspired by Project Airi
 
-**🟦 Reasoner (TypeScript)** — The deep thinker
+**🟦 Reasoner (adapter service)** — The deep thinker
 
 - Handles slow-path delegation for complex tasks
-- Wraps OpenClaw or Claude Code via an adapter pattern
-- Streams progress back to Gateway for conversational narration
+- Phase 1 adapters target Codex app-server plus Grok and Kimi ACP
+- Gateway folds task activity into context; the Talker decides whether to mention it at a conversational opening
 
-**🛠️ Toolkit (TypeScript)** — The hands
+**🛠️ Toolkit (Gateway-managed)** — The hands
 
 - Sandboxed tool execution with workspace isolation
-- MCP client for extensibility
+- MCP support for extensibility
 
 ### Fast path example
 
@@ -89,16 +89,16 @@ The result: Responsive voice interaction that doesn't compromise on capability, 
 **Then, in the background:**
 
 1. Qwen3-8B emits: `[DELEGATE:Search TypeScript files for React imports and analyze component usage]`
-2. Gateway spawns Reasoner Agent (OpenClaw)
+2. Gateway authorizes a task workspace lease; Supervisor starts the Reasoner session in volatile scratch space
 3. **You can keep talking** — Kaguya remains responsive while the Reasoner works
 4. Reasoner searches files, parses imports, counts component usage (~30-60 seconds)
-5. Gateway narrates progress: "I'm scanning through the TypeScript files now..."
+5. Gateway folds task state into Talker context; the Talker may mention it at its next conversational opening
 6. Reasoner completes → Gateway dispatches result to Qwen3-8B
 7. **Final response:** "I found 47 React components. The most commonly used are Button (23 imports), Layout (18 imports), and Card (15 imports)..."
 
 **Key benefit:** The Talker stays responsive during long-running tasks. You're not blocked waiting for the analysis to complete.
 
-For more architectural details: [`docs/spec-gateway-v0.1.0.md`](./docs/spec-gateway-v0.1.0.md) and [`docs/spec-agent-v0.1.0.md`](./docs/spec-agent-v0.1.0.md)
+For more architectural details: [`docs/kaguya-manifesto-v0.1.0.md`](./docs/kaguya-manifesto-v0.1.0.md), [`docs/spec-gateway-v0.1.0.md`](./docs/spec-gateway-v0.1.0.md), [`docs/spec-agent-v0.1.0.md`](./docs/spec-agent-v0.1.0.md), and [`docs/spec-reasoner-v0.1.0.md`](./docs/spec-reasoner-v0.1.0.md).
 
 ---
 
@@ -110,7 +110,7 @@ For more architectural details: [`docs/spec-gateway-v0.1.0.md`](./docs/spec-gate
 - ✅ Gateway core: event routing, RAG memory store (SQLite + FTS5 BM25), tool registry, silence timers
 - ✅ Listener: VAD + STT (faster-whisper), rule-based turn detection, raw TCP audio socket
 - ✅ Talker inference: prompt formatter, soul container, Kokoro TTS, sentence streaming
-- ⏳ Reasoner adapters (OpenClaw, Claude Code) and end-to-end smoke flows still in progress
+- ⏳ Reasoner adapters (Codex app-server, Grok ACP, Kimi ACP) and end-to-end smoke flows still in progress
 - 📋 Full implementation plan: [`docs/implementation-plan-v0.1.0.md`](./docs/implementation-plan-v0.1.0.md)
 
 **Contributions are welcome** — the core voice pipeline runs locally and we're now hardening it. Open issues if you spot architectural concerns or want to chat about a contribution.
@@ -140,7 +140,7 @@ Should work on most modern NVIDIA GPUs with 12+ GB VRAM. Cloud fallbacks (Deepgr
 
 - **Rust** (`rustup`) — for the Gateway
 - **Python 3.11+** + **uv** — for the Talker (uv manages the Python interpreter and venv)
-- **Node.js 20+** with **npm** — for the Reasoner / Toolkit
+- **Node.js 20+** with **npm** — needed by ACP-backed Reasoner adapters
 - **`buf`** + **`protoc`** — for proto generation and lint (Rust uses tonic-build's eager generation; Python regen is optional, stubs are committed)
 - **llama.cpp / LM Studio** (or any OpenAI-compatible server) running Qwen3-8B at `http://localhost:1234`
 - **CUDA-capable GPU** with 12+ GB VRAM recommended for the LLM
@@ -169,8 +169,7 @@ cd gateway  && cargo build     && cd ..
 
 #### Linux / WSL
 
-Same uv / cargo / npm flow, but install the system libraries via your
-distro:
+Same uv / cargo / npm flow, but install the system libraries via your distro:
 
 ```sh
 sudo apt install build-essential portaudio19-dev libopus-dev espeak-ng \
@@ -181,11 +180,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 #### Windows
 
-`opus.dll` is bundled in `talker/native/win32/`. Install Python 3.11+,
-[uv](https://docs.astral.sh/uv/getting-started/installation/),
-[rustup](https://rustup.rs/), Node.js 20+, and
-[buf](https://buf.build/docs/installation) via your preferred method,
-then run the per-component commands above (PowerShell or WSL).
+`opus.dll` is bundled in `talker/native/win32/`. Install Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), [rustup](https://rustup.rs/), Node.js 20+, and [buf](https://buf.build/docs/installation) via your preferred method, then run the per-component commands above (PowerShell or WSL).
 
 #### Running
 
@@ -202,9 +197,7 @@ cd gateway && cargo run
 echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
 ```
 
-For per-component details and gotchas (macOS port-binding, audio
-passthrough on WSL2, etc.), see [`talker/README.md`](./talker/README.md)
-and the specs in [`docs/`](./docs/).
+For per-component details and gotchas (macOS port-binding, audio passthrough on WSL2, etc.), see [`talker/README.md`](./talker/README.md) and the specs in [`docs/`](./docs/).
 
 ---
 
@@ -218,7 +211,7 @@ and the specs in [`docs/`](./docs/).
 - [x] M2: Listener (VAD, STT, turn detection, raw TCP audio socket)
 - [x] M3: Talker inference (LLM, soul container, TTS, sentence streaming)
 - [ ] M4: Toolkit (sandboxed tools, MCP integration) — partial; `run_command` disabled pending allowlist
-- [ ] M5: Reasoner adapters (OpenClaw, Claude Code)
+- [ ] M5: Reasoner service and adapters (Codex app-server, Grok ACP, Kimi ACP)
 - [x] M6: Local dev interface (WebSocket endpoint for text + audio)
 - [ ] M7: Integration tests (end-to-end smoke flows)
 
@@ -265,7 +258,7 @@ We're building Phase 1 in the open. Once M1-M3 land and the core pipeline is run
 
 **How to help now:**
 
-- Read the architecture in [`docs/spec-gateway-v0.1.0.md`](./docs/spec-gateway-v0.1.0.md) and [`docs/spec-agent-v0.1.0.md`](./docs/spec-agent-v0.1.0.md)
+- Read the [root manifesto](./docs/kaguya-manifesto-v0.1.0.md) and the architecture in [`docs/spec-gateway-v0.1.0.md`](./docs/spec-gateway-v0.1.0.md), [`docs/spec-agent-v0.1.0.md`](./docs/spec-agent-v0.1.0.md), and [`docs/spec-reasoner-v0.1.0.md`](./docs/spec-reasoner-v0.1.0.md)
 - Review the proto schema in [`docs/implementation-plan-v0.1.0.md`](./docs/implementation-plan-v0.1.0.md)
 - Open issues if you spot architectural concerns or have questions
 

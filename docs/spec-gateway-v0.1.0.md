@@ -36,10 +36,10 @@ The Gateway does **not**:
 10. **Thread/process management.** Spawn, monitor, and terminate the Listener, Talker, and Reasoner processes.
 11. **Sandbox management.** Ensure all tool executions run in appropriate isolation (sandboxed TypeScript processes). Enforce the workspace root: all Toolkit file paths are resolved relative to the configured workspace root directory. The workspace root is set at startup and can be reconfigured via control signals.
 12. **Reasoner lifecycle.** Start Reasoner Agents when the Talker requests delegation via `[DELEGATE:...]`. Manage multiple concurrent Reasoner Agents, each with a unique `task_id`. Monitor lifecycle. Adapt Reasoner output into Input Stream events (P3).
-13. **Reasoner output filtering.** Decide which intermediate Reasoner steps are worth forwarding to the Talker for narration — dropping noise, rate-limiting, merging. One utterance per meaningful state transition; rate-limited to prevent manic narration.
+13. **Reasoner task projection.** Fold structured activity and plan updates into `TaskState`; inject its digest into Talker context. Only approval, completion, and error events enter P3.
 14. **Timing management.** Silence timers, scheduled reminders, memory triggers. Emit timed events (P4) into the Input Stream.
 15. **Speculative prefill trigger.** After each Talker response completes, send the updated context package to the Talker marked as prefill-only (`n_predict: 0`, `cache_prompt: true`). On partial transcripts (Phase 2), send incremental prefill requests.
-16. **Output Stream mux.** Stop forwarding Talker audio to the endpoint on receipt of `PREPARE` acknowledgment. Resume forwarding when a new inference round begins.
+16. **Output Stream mux.** Stop forwarding Talker audio to the endpoint when `BargeInAck` confirms interruption. Resume forwarding when a new inference round begins.
 
 ---
 
@@ -217,20 +217,20 @@ Text input (no voice):
 
   t=0ms    OpenPod: text_command → demux → Input Stream [P1]
   t=1ms    Gateway: Processes text_command
-                    → Sends PREPARE to Talker (cancel if busy)
+                    → Sends inline `TalkerInput.barge_in` to Talker (cancel if busy)
                     → Fires RAG query
                     → Assembles context package
                     → Dispatches to Talker
   t=2ms    Talker:  Same flow as voice — format, infer, post-process, TTS (or text-only)
 ```
 
-The only asymmetry: voice has a `vad_speech_start` → delay → `final_transcript` gap (prefill opportunity). Text arrives as a complete input instantly — PREPARE and context package are dispatched in quick succession.
+The only asymmetry: voice has a `vad_speech_start` → delay → `final_transcript` gap (prefill opportunity). Text arrives as a complete input instantly — inline barge-in and context package are dispatched in quick succession.
 
 ### 5.3 False Positive VAD (Phase 1)
 
-If VAD fires on a cough or background noise, the Gateway sends PREPARE and the Talker stops (if speaking), but no `final_transcript` ever arrives. The silence timer fires after 3 seconds and Kaguya resumes or rephrases. False interruptions are less bad than missed interruptions.
+If VAD fires on a cough or background noise, the Gateway sends inline `barge_in` and the Talker stops (if speaking), but no `final_transcript` ever arrives. The silence timer fires after 3 seconds and Kaguya resumes or rephrases. False interruptions are less bad than missed interruptions.
 
-Phase 2 refinement: two-stage PREPARE (soft fade on `vad_speech_start`, hard stop on first `partial_transcript`).
+Phase 2 refinement: tune inline barge-in behavior using `vad_speech_start` and, if warranted, the first `partial_transcript`.
 
 ---
 
@@ -249,7 +249,7 @@ Phase 2 refinement: two-stage PREPARE (soft fade on `vad_speech_start`, hard sto
     → emits [DELEGATE:task_description] → gRPC → Gateway
 6. Gateway starts Reasoner Agent with task (unique task_id)
 7. Reasoner output → Input Stream events                         [P3]
-8. Gateway filters, forwards significant steps to Talker → narration
+8. Gateway folds activity and plan updates into `TaskState`; the Talker may mention the task at its next conversational opening
 9. Reasoner completes → Input Stream → Gateway → Talker → summary
 ```
 
@@ -286,18 +286,6 @@ No blocking. Each LLM invocation is a complete, independent round. Tool results 
 - `silence_exceeded(8s)`: Follow-up opportunity → forward to Talker as P4 event.
 - `silence_exceeded(30s)`: Context shift → forward to Talker as P4 event.
 - All timers canceled on `vad_speech_start` or `text_command`.
-
----
-
-## 9. Deliberative Narration Protocol
-
-The Gateway orchestrates the three phases of Deliberative Narration during slow-path Reasoner work.
-
-**Phase 1 — Immediate Acknowledgment (500-900ms):** Gateway dispatches first inference round to Talker immediately upon delegation decision. Talker generates hedged response ("Let me check on that.") and sends to TTS — user hears something within the normal response window.
-
-**Phase 2 — Narration (every 3-8s during Reasoner work):** Gateway filters Reasoner intermediate steps and forwards significant state transitions to Talker. Cadence: one utterance per meaningful state transition, not on a fixed timer. Rate-limited by Gateway to prevent manic narration.
-
-**Phase 3 — Resolution (on Reasoner completion):** Reasoner completion event arrives at Input Stream [P3]. Gateway assembles final context package and dispatches to Talker for summary generation.
 
 ---
 
@@ -352,7 +340,7 @@ Kaguya's output flows through two parallel paths back to the endpoint.
 
 Audio and metadata do not require frame-level synchronization at the endpoint. Emotion tags may slightly lead audio (expression before speech), which is intentional.
 
-On `PREPARE` signal: the Gateway stops forwarding Talker audio to the endpoint. The Talker handles TTS/LLM cancellation internally.
+On inline `TalkerInput.barge_in`, the Gateway stops forwarding Talker audio to the endpoint. The Talker handles TTS/LLM cancellation internally and returns `BargeInAck`.
 
 ---
 
@@ -365,7 +353,7 @@ Talker post-process produces (all arrive at Gateway via gRPC):
   → [TOOL:...] request    → tool dispatch
   → [DELEGATE:...] req    → Reasoner spin-up
   → Response complete     → triggers prefix prefill, history append, silence timer start
-  → partial_response      → on PREPARE (if Talker was speaking):
+  → BargeInAck            → on inline `barge_in` (if Talker was speaking):
                              { spoken: "Got it. The pipeline is health",
                                unspoken: "y — last run was two hours ago." }
                              Gateway appends only the spoken portion to history
@@ -384,9 +372,40 @@ The Gateway enforces the workspace root and manages all Toolkit tools.
 
 **MCP servers (Phase 1).** The Gateway manages MCP server connections and exposes available MCP tools through the Tool Registry. The LLM discovers and calls MCP tools via `[TOOL:search_tools(...)]` → `[TOOL:mcp_tool_name(...)]`.
 
-**Reasoner agent workspace access (Phase 1).** When Kaguya delegates to OpenClaw or Claude Code, the Reasoner Agent has its own workspace access model — potentially broader than the Talker's direct tools. The Reasoner Adapter manages this scope. Kaguya delegates the task and the Reasoner reports results back through the Input Stream.
-
 **User host ambient telemetry (Phase 2).** OpenPod's telemetry channel carries ambient activity from the user's host: current working directory, active processes, stdout/stderr from running builds, screen context. These arrive as P5 events in the Input Stream. Phase 2 because it requires OpenPod telemetry channel implementation.
+
+---
+
+## 14A. Reasoner Workspace Leases and Native Tools **[SIGN-OFF]**
+
+The detailed Reasoner contract is authoritative in `spec-reasoner-v0.1.0.md` §§5, 6, and 9A.
+
+**Host-capability authority.** Gateway has sole discretion over durable Kaguya-agent workspace
+and host capabilities. It authorizes the scope of a delegated task and issues an opaque,
+task-scoped workspace lease. Supervisor creates and cleans up the volatile task scratch
+environment needed for that lease. Neither the Reasoner service nor its backend receives a host
+path, container ID, or host credential.
+
+**Native execution.** The Reasoner backend keeps its own file, edit, shell, and test tools.
+Those tools run within the authorized workspace; Gateway does not force a CLI to substitute its
+tool registry with the Talker Toolkit. CLI-local permission settings are useful defense in
+depth; Supervisor enforces the volatile task environment and network policy that Gateway
+authorized.
+
+**Kaguya extensions.** Gateway may expose additional, namespaced `kaguya.*` capabilities to a
+Reasoner through MCP or an adapter-specific extension mechanism. These are plugins into the
+native agent loop, not replacements for it. They carry Kaguya policy and approval semantics
+independently of a backend's native tools.
+
+**Progress projection.** Gateway folds activity and plan updates into `TaskState` and puts the
+digest in Talker context. Only approvals, completion, and errors enter P3; Gateway does not
+select intermediate steps for automatic narration. The Talker decides whether to mention an
+active task at its next conversational opening.
+
+**Workspace materialization remains open.** Before implementation, choose how Gateway grants a
+lease into the durable Kaguya-agent workspace and how Supervisor provides its volatile scratch
+space. Any result export to the durable workspace requires Gateway approval; task scratch has an
+explicit cleanup path.
 
 ---
 
@@ -454,7 +473,7 @@ Audio frames flow on a dedicated raw TCP socket from Gateway to Listener at `lis
 │  - gRPC server (tonic)                                         │
 │  - Silence timers, prefill orchestration, Reasoner lifecycle   │
 └────────────────────────────────┬──────────────────────────────┘
-          gRPC (Unix socket)     │     gRPC (Unix socket)
+          gRPC (TCP)             │     gRPC (TCP)
           ┌──────────────────────┘     └──────────────────────┐
           ▼                                                    ▼
   Process 2: Listener + Talker (Python)          Process 4+: Reasoner(s) (TypeScript)
@@ -475,7 +494,7 @@ Audio frames flow on a dedicated raw TCP socket from Gateway to Listener at `lis
 - Persona file delivery (`SOUL.md` + `IDENTITY.md` + RAG-synthesized `memory_md`) to Talker at startup and on change. File watcher tracks `SOUL.md` and `IDENTITY.md`.
 - Tool dispatch (Toolkit registry, sandboxed TypeScript).
 - Reasoner lifecycle management (spawn, monitor, cancel).
-- Reasoner output filtering and narration dispatch.
+- Reasoner task-state folding and Talker-discretion task presentation.
 - Inline barge-in dispatch (`TalkerInput.barge_in`) on `vad_speech_start` and `text_command`.
 - Always-on prefix prefill trigger (post-turn).
 - Silence timer management.
