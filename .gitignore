@@ -45,6 +45,12 @@ dist/
 .claude/
 .codex/
 
+# Codex local settings and environment metadata (per-developer, not shared)
+.codex/
+
+# Supervisor (Rust)
+/supervisor/target/
+
 # Local data
 /config/MEMORY.md
 # RAG memory store — SQLite + WAL/SHM files, per-user runtime data
