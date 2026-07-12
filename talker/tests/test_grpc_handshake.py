@@ -78,11 +78,11 @@ async def test_talker_converse_handshake_completes_without_messages():
     can't send the start message → deadlock.
     """
     from config import TalkerConfig
-    from server import TalkerServiceServicer
+    from server import TalkerServiceImpl
 
     config = TalkerConfig()
     speaker = MagicMock()  # Converse handshake never touches the speaker
-    servicer = TalkerServiceServicer(config, speaker)
+    servicer = TalkerServiceImpl(config, speaker)
 
     def register(server: grpc.aio.Server) -> None:
         kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(servicer, server)

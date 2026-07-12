@@ -8,7 +8,7 @@ conversation turn.
 - **main.py** — asyncio entrypoint: starts both gRPC servers + Listener task.
 - **config.py** — `TalkerConfig` (pydantic-settings, direct-run defaults,
   `KAGUYA_*` env vars injected by launchers).
-- **server.py** — `TalkerServiceServicer`: bidi `Converse` for inference +
+- **server.py** — `TalkerServiceImpl`: bidi `Converse` for inference +
   inline barge-in, plus unary `PrefillCache` and `UpdatePersona`.
 - **voice/opus_decoder.py** — Opus → 16 kHz mono PCM (opuslib wrapper). Loads
   the system `libopus` on macOS/Linux; on Windows uses the bundled

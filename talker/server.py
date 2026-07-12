@@ -1,4 +1,4 @@
-"""server.py — TalkerServiceServicer: bidi Converse + unary helpers.
+"""server.py — TalkerServiceImpl: bidi Converse + unary helpers.
 
 Gateway opens a Converse bidi stream per turn:
   Gateway → Talker: TalkerInput.start (TalkerContext) | TalkerInput.barge_in
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
+class TalkerServiceImpl(kaguya_pb2_grpc.TalkerServiceServicer):
     def __init__(self, config: TalkerConfig, speaker: Speaker) -> None:
         self._config = config
         self._llm = LLMClient(config)

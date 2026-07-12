@@ -399,7 +399,7 @@ Phase 1 rule-based implementation (~50-100 lines):
 
 #### M3.5 — server.py (gRPC servicer — wires Gateway ↔ inference ↔ voice)
 
-- [ ] Implement `TalkerServiceServicer`:
+- [ ] Implement `TalkerServiceImpl`:
   - `Converse(request_iterator, context)`: bidi. Read inbound `TalkerInput`s; on `start(TalkerContext)` kick off generation (format prompt → stream tokens → sentence detect → soul container → emit `TalkerOutput`); on `barge_in(BargeInSignal)` set the cancel event, stop TTS, and emit `BargeInAck { spoken_text, unspoken_text }` inline.
   - `PrefillCache(req, context)`: call `llm_client.prefill(prompt)`.
   - `UpdatePersona(config, context)`: update cached `PersonaConfig` in memory.
@@ -433,7 +433,7 @@ Phase 1 rule-based implementation (~50-100 lines):
   1. Load `TalkerConfig`.
   2. Init `InferenceEngine` (start llama.cpp connection check).
   3. Load persona from cached file or wait for `UpdatePersona` gRPC call.
-  4. Start TCP gRPC servers (`TalkerServiceServicer` and `ListenerServiceImpl`).
+  4. Start TCP gRPC servers (`TalkerServiceImpl` and `ListenerServiceImpl`).
   5. Start Listener asyncio task (`voice/listener.py`).
   6. `await server.wait_for_termination()`.
 - [ ] `if __name__ == "__main__": asyncio.run(main())`
@@ -638,7 +638,7 @@ kaguya/
 │   │   ├── prompt_formatter.py     # TalkerContext + PersonaConfig → Qwen3 prompt string
 │   │   ├── soul_container.py       # Tag extraction, normalization, spoken/action split
 │   │   └── sentence_detector.py    # Token buffer → sentence boundaries (regex)
-│   ├── server.py                   # TalkerServiceServicer — wires Gateway ↔ inference ↔ voice
+│   ├── server.py                   # TalkerServiceImpl — wires Gateway ↔ inference ↔ voice
 │   ├── config.py                   # pydantic BaseSettings
 │   ├── main.py                     # asyncio entrypoint: start gRPC server + Listener task
 │   ├── proto/                      # COMMITTED Python stubs (REF-005) — rebuild: make proto

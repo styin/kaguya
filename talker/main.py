@@ -37,7 +37,7 @@ async def main() -> None:
     # to skip CUDA setup. Real runs always reach this code path and import
     # everything normally.
     from config import TalkerConfig
-    from server import TalkerServiceServicer
+    from server import TalkerServiceImpl
     from voice.listener import Listener, ListenerServiceImpl
     from voice.speaker import Speaker
 
@@ -50,13 +50,13 @@ async def main() -> None:
 
     # Init components
     speaker = Speaker(config)
-    talker_servicer = TalkerServiceServicer(config, speaker)
+    talker_service = TalkerServiceImpl(config, speaker)
     listener = Listener(config)
     listener_servicer = ListenerServiceImpl(listener.event_queue)
 
     # ── Talker gRPC server ──
     talker_server = grpc.aio.server()
-    kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(talker_servicer, talker_server)
+    kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(talker_service, talker_server)
     talker_port = _bind_or_raise(talker_server, config.talker_listen_addr, "Talker")
     await talker_server.start()
     logger.info(
@@ -88,7 +88,7 @@ async def main() -> None:
     finally:
         listener_task.cancel()
         await asyncio.gather(listener_task, return_exceptions=True)
-        await talker_servicer.close()
+        await talker_service.close()
         await talker_server.stop(grace=2.0)
         await listener_server.stop(grace=2.0)
         logger.info("Talker Agent shut down")
