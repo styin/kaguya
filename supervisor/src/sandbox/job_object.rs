@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use async_trait::async_trait;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -125,7 +126,13 @@ impl SandboxBackend for JobObjectBackend {
             }
         }
 
-        let _ = child.stdin.take(); // EOF
+        if let Some(input) = req.stdin.as_deref() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(input.as_bytes()).await;
+            }
+        } else {
+            let _ = child.stdin.take(); // EOF
+        }
         let cap = req.max_output_bytes;
         let mut so = child.stdout.take();
         let mut se = child.stderr.take();

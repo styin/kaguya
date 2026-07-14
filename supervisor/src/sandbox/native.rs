@@ -11,7 +11,10 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use super::{run_spawned, sanitize_session, script_name, ExecRequest, ExecResult, SandboxBackend};
+use super::{
+    configure_process_group, run_spawned, sanitize_session, script_name, ExecRequest, ExecResult,
+    SandboxBackend,
+};
 
 pub struct NativeBackend {
     root: PathBuf,
@@ -56,6 +59,7 @@ impl SandboxBackend for NativeBackend {
         let mut result = None;
         for cand in req.language.native_candidates() {
             let mut cmd = Command::new(cand);
+            configure_process_group(&mut cmd);
             cmd.arg(&script)
                 .current_dir(&dir)
                 .stdin(Stdio::piped())

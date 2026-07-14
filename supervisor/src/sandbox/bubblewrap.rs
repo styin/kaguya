@@ -21,7 +21,10 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use super::{run_spawned, sanitize_session, script_name, ExecRequest, ExecResult, SandboxBackend};
+use super::{
+    configure_process_group, run_spawned, sanitize_session, script_name, ExecRequest, ExecResult,
+    SandboxBackend,
+};
 
 pub struct BubblewrapBackend {
     root: PathBuf,
@@ -76,6 +79,7 @@ impl SandboxBackend for BubblewrapBackend {
 
         let interp = req.language.unix_interp();
         let mut cmd = Command::new("bwrap");
+        configure_process_group(&mut cmd);
 
         // Read-only system dirs that exist on this host.
         for d in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {

@@ -365,11 +365,23 @@ impl SandboxProvider {
         if session.trim().is_empty() {
             anyhow::bail!("sandbox session id must not be empty");
         }
+
+        if let Some((handle, _)) = self
+            .handles
+            .lock()
+            .await
+            .iter()
+            .find(|(_, existing)| *existing == session)
+        {
+            return Ok(handle.clone());
+        }
+
+        self.manager.acquire(session).await?;
+
         let mut handles = self.handles.lock().await;
         if let Some((handle, _)) = handles.iter().find(|(_, existing)| *existing == session) {
             return Ok(handle.clone());
         }
-        self.manager.acquire(session).await?;
         let handle = Uuid::new_v4().to_string();
         handles.insert(handle.clone(), session.to_string());
         Ok(handle)
@@ -516,6 +528,15 @@ pub(crate) async fn run_spawned(
     }
 }
 
+/// Place a child in a fresh Unix process group so timeout cleanup can signal
+/// every descendant that inherited the group. No-op on Windows.
+pub(crate) fn configure_process_group(_cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        _cmd.process_group(0);
+    }
+}
+
 /// Kill the child and (best-effort) its descendants.
 pub(crate) async fn kill_tree(child: &mut Child) {
     #[cfg(windows)]
@@ -525,6 +546,19 @@ pub(crate) async fn kill_tree(child: &mut Child) {
             // group needed, dependency-free.
             let _ = Command::new("taskkill")
                 .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            return;
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            let process_group = format!("-{pid}");
+            let _ = Command::new("kill")
+                .args(["-KILL", &process_group])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()

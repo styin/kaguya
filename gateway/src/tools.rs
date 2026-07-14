@@ -116,7 +116,7 @@ impl ToolRegistry {
                 .spawn(format!("tool_dispatch:{tool_name}"), async move {
                     let content = match sandbox {
                         Some(sb) => sb.exec_from_json(&conversation_id, &args_json).await,
-                        None => serde_json::json!({ "error": "sandbox disabled" }).to_string(),
+                        None => sandbox_error_json("sandbox disabled"),
                     };
                     let _ = p3_tx
                         .send(InputEvent::ToolResult {
@@ -161,6 +161,18 @@ impl ToolRegistry {
                     .await;
             });
     }
+}
+
+fn sandbox_error_json(error: impl Into<String>) -> String {
+    serde_json::json!({
+        "stdout": "",
+        "stderr": "",
+        "exit_code": -1,
+        "timed_out": false,
+        "truncated": false,
+        "error": error.into(),
+    })
+    .to_string()
 }
 
 // ── helpers ──
@@ -349,5 +361,32 @@ mod tests {
 
         sandbox.release().await;
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn sandbox_dispatch_without_client_returns_canonical_error_shape() {
+        let lifecycle = LifecycleSupervisor::new();
+        let tools = ToolRegistry::new(std::env::temp_dir(), lifecycle.spawner(), None);
+        let (result_tx, mut result_rx) = mpsc::channel(1);
+
+        tools.dispatch(
+            "conversation".into(),
+            "request".into(),
+            "sandbox_exec".into(),
+            r#"{"language":"python","code":"print(1)"}"#.into(),
+            result_tx,
+        );
+
+        let result = result_rx.recv().await.expect("P3 ToolResult");
+        let InputEvent::ToolResult { content, .. } = result else {
+            panic!("expected ToolResult");
+        };
+        let output: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(output["stdout"], "");
+        assert_eq!(output["stderr"], "");
+        assert_eq!(output["exit_code"], -1);
+        assert_eq!(output["timed_out"], false);
+        assert_eq!(output["truncated"], false);
+        assert_eq!(output["error"], "sandbox disabled");
     }
 }

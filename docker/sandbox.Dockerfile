@@ -12,4 +12,6 @@ RUN pip install --no-cache-dir numpy pandas requests
 RUN useradd -m -u 1000 sandbox
 USER 1000:1000
 WORKDIR /home/sandbox
-# 容器命令由 gateway 传入 (`sleep infinity`)，保持常驻，靠 docker exec 进入。
+
+# The Supervisor supplies the long-running command (`sleep infinity`) and
+# enters the container with `docker exec` for each sandbox_exec call.

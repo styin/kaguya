@@ -571,3 +571,57 @@ schema linting workflow, and Python keeps its existing `grpcio-tools` generator.
 - `protoc-bin-vendored` documentation: https://docs.rs/protoc-bin-vendored
 - `prost-build` documentation (`protoc` is used to parse schemas):
   https://docs.rs/prost-build
+
+---
+
+## REF-017 — Sandbox Backend Contract Suite and Environment-Gated Deployment Tests
+
+**Decision:** Sandbox backend behavior is verified by a shared integration
+contract in `supervisor/tests/sandbox_backend_contract.rs`. The suite exercises
+the public `SandboxManager` API for every backend that is available on the
+current host. It uses test-only settings:
+
+| Test setting | Value | Purpose |
+| --- | ---: | --- |
+| `default_timeout_secs` | `1` | Keep timeout tests fast while still exercising backend cleanup. |
+| outer timeout wait | `7s` | Give Docker Desktop/WSL and process-tree cleanup a small grace window beyond the configured 1s sandbox timeout. |
+| `max_output_bytes` | `32` | Force truncation with a compact stdout fixture. |
+| Docker availability probe | `10s` | Prevent Docker Desktop half-started states from hanging the suite. |
+
+Docker and Bubblewrap tests are environment-gated rather than mandatory:
+
+- Docker requires a reachable Docker daemon and the `kaguya-sandbox:latest`
+  image.
+- Bubblewrap requires Unix plus `bwrap --version`.
+- Windows Job Object tests require Windows plus `--features sandbox-jobobject`.
+
+**Rationale:**
+
+1. A single contract prevents backend drift: `stdin`, timeout, output
+   truncation, cleanup, and session isolation should mean the same thing for
+   native, Docker, Bubblewrap, and Job Object.
+2. The test-only 1s/7s timeout pair keeps CI and local runs short while still
+   detecting the review finding where descendants survived timeout and held
+   inherited pipes open.
+3. Docker Desktop on Windows can be installed while its WSL engine is not yet
+   usable. A bounded 10s probe turns that host setup problem into an explicit
+   skip instead of a hung test process.
+4. Environment gating keeps normal Windows/macOS/Linux development usable while
+   still allowing stronger backend coverage on hosts that have the relevant
+   runtime installed.
+
+**Supersedes:** none. Complements REF-014 and REF-015 by defining how backend
+behavior is verified after Supervisor ownership.
+
+**Sources:**
+
+- Docker Desktop Windows requirements:
+  https://docs.docker.com/desktop/setup/install/windows-install/
+- Docker Desktop WSL 2 backend prerequisites:
+  https://docs.docker.com/desktop/features/wsl/
+- Microsoft WSL installation/update documentation:
+  https://learn.microsoft.com/windows/wsl/install
+- Bubblewrap manual (`--die-with-parent`, namespace behavior):
+  https://manpages.debian.org/unstable/bubblewrap/bwrap.1.en.html
+- Windows Job Objects:
+  https://learn.microsoft.com/windows/win32/procthread/job-objects

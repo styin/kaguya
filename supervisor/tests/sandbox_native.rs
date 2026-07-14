@@ -107,6 +107,45 @@ async fn stdin_is_fed_to_the_program() {
     mgr.cleanup("test-conv-stdin").await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn native_timeout_kills_spawned_descendant_and_returns_promptly() {
+    let mut cfg = SandboxConfig::default();
+    cfg.default_timeout_secs = 1;
+    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
+    let session = "test-conv-timeout-tree";
+    let session_dir = std::env::temp_dir().join("kaguya-sandbox").join(session);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        mgr.exec_from_json(
+            session,
+            r#"{"language":"bash","code":"sleep 30 & echo $! > child.pid; wait"}"#,
+        ),
+    )
+    .await
+    .expect("timeout cleanup should not hang on inherited pipes");
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["timed_out"], true, "{output}");
+
+    let child_pid = tokio::fs::read_to_string(session_dir.join("child.pid"))
+        .await
+        .expect("test script should record descendant pid")
+        .trim()
+        .to_string();
+    let still_alive = std::process::Command::new("kill")
+        .args(["-0", &child_pid])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    assert!(
+        !still_alive,
+        "descendant process {child_pid} survived native timeout"
+    );
+
+    mgr.cleanup(session).await;
+}
+
 #[tokio::test]
 async fn rejects_unknown_language() {
     let cfg = SandboxConfig::default();

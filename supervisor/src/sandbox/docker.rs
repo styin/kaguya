@@ -17,6 +17,7 @@
 //! reaps the global label after a crash.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -28,11 +29,14 @@ use uuid::Uuid;
 
 use crate::config::{SandboxConfig, SandboxModeKind};
 
-use super::{run_spawned, script_name, ExecRequest, ExecResult, SandboxBackend};
+use super::{
+    configure_process_group, run_spawned, script_name, ExecRequest, ExecResult, SandboxBackend,
+};
 
 const LABEL_ALL: &str = "kaguya.sandbox=1";
 
 pub struct DockerBackend {
+    docker_cli: PathBuf,
     image: String,
     mode: SandboxModeKind,
     pool_size: usize,
@@ -55,7 +59,10 @@ struct DockerState {
 
 impl DockerBackend {
     pub fn new(cfg: &SandboxConfig) -> anyhow::Result<Self> {
-        let ok = std::process::Command::new("docker")
+        let docker_cli = find_docker_cli().ok_or_else(|| {
+            anyhow::anyhow!("docker backend selected but Docker CLI was not found")
+        })?;
+        let ok = std::process::Command::new(&docker_cli)
             .arg("version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -66,6 +73,7 @@ impl DockerBackend {
             anyhow::bail!("docker backend selected but `docker` CLI / daemon unavailable");
         }
         Ok(Self {
+            docker_cli,
             image: cfg.image.clone(),
             mode: cfg.mode,
             pool_size: cfg.pool_size,
@@ -103,7 +111,7 @@ impl DockerBackend {
         args.push("sleep".into());
         args.push("infinity".into());
 
-        let out = Command::new("docker")
+        let out = Command::new(&self.docker_cli)
             .args(&args)
             .output()
             .await
@@ -122,20 +130,23 @@ impl DockerBackend {
         Ok(id)
     }
 
-    async fn destroy(id: &str) {
-        let _ = Command::new("docker").args(["rm", "-f", id]).output().await;
+    async fn destroy(docker_cli: &Path, id: &str) {
+        let _ = Command::new(docker_cli)
+            .args(["rm", "-f", id])
+            .output()
+            .await;
     }
 
     /// Force-remove containers lost between `docker run` and state insertion.
     async fn reap_instance(&self) {
         let filter = format!("label=kaguya.sandbox.instance={}", self.instance);
-        let out = Command::new("docker")
+        let out = Command::new(&self.docker_cli)
             .args(["ps", "-aq", "--filter", &filter])
             .output()
             .await;
         if let Ok(out) = out {
             for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                Self::destroy(id).await;
+                Self::destroy(&self.docker_cli, id).await;
             }
         }
     }
@@ -161,7 +172,7 @@ impl DockerBackend {
             // Lost a race; drop the extra container.
             let existing = existing.clone();
             drop(st);
-            Self::destroy(&id).await;
+            Self::destroy(&self.docker_cli, &id).await;
             return Ok(existing);
         }
         st.sessions.insert(session.to_string(), id.clone());
@@ -186,16 +197,41 @@ impl SandboxBackend for DockerBackend {
         // Unique per-exec runfile so concurrent calls in one container don't
         // clobber each other; removed after the interpreter exits.
         let runfile = format!("/home/sandbox/{}", script_name(req.language.ext()));
-        // Code arrives on this exec's stdin; `cat` writes it to a file (no shell
-        // escaping of user code), then in-container `timeout` runs it and
-        // self-enforces the limit; the runfile is cleaned up afterward. The
-        // interpreter's exit status is preserved via `rc`. Program stdin = EOF.
-        let shell = format!(
-            "cat > {runfile} && timeout -k 2 {secs} {interp} {runfile}; \
-             rc=$?; rm -f {runfile}; exit $rc"
-        );
+        // Upload code in a separate exec so the program exec can use stdin for
+        // the documented `stdin` argument.
+        let upload_shell = format!("cat > {runfile}");
+        let mut upload_cmd = Command::new(&self.docker_cli);
+        configure_process_group(&mut upload_cmd);
+        upload_cmd
+            .args(["exec", "-i", &id, "sh", "-c", &upload_shell])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let upload_child = match upload_cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return ExecResult::backend_error(format!("docker exec upload spawn: {e}")),
+        };
 
-        let mut cmd = Command::new("docker");
+        let backstop = req.timeout + Duration::from_secs(5);
+        let upload = run_spawned(
+            upload_child,
+            Some(req.code.clone()),
+            backstop,
+            req.max_output_bytes,
+        )
+        .await;
+        if upload.exit_code != 0 {
+            return ExecResult::backend_error(format!(
+                "docker code upload failed: stdout={} stderr={}",
+                upload.stdout, upload.stderr
+            ));
+        }
+
+        let shell =
+            format!("timeout -k 2 {secs} {interp} {runfile}; rc=$?; rm -f {runfile}; exit $rc");
+
+        let mut cmd = Command::new(&self.docker_cli);
+        configure_process_group(&mut cmd);
         cmd.args(["exec", "-i", &id, "sh", "-c", &shell])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -206,14 +242,7 @@ impl SandboxBackend for DockerBackend {
         };
 
         // Outer backstop in case docker itself hangs.
-        let backstop = req.timeout + Duration::from_secs(5);
-        let mut r = run_spawned(
-            child,
-            Some(req.code.clone()),
-            backstop,
-            req.max_output_bytes,
-        )
-        .await;
+        let mut r = run_spawned(child, req.stdin, backstop, req.max_output_bytes).await;
         if r.exit_code == 124 {
             // coreutils `timeout` ⇒ timed out
             r.timed_out = true;
@@ -227,7 +256,7 @@ impl SandboxBackend for DockerBackend {
             st.sessions.remove(session)
         };
         if let Some(id) = id {
-            Self::destroy(&id).await;
+            Self::destroy(&self.docker_cli, &id).await;
         }
 
         // Never return a used container to the pool: it contains conversation
@@ -281,10 +310,10 @@ impl SandboxBackend for DockerBackend {
             )
         };
         for id in warm {
-            Self::destroy(&id).await;
+            Self::destroy(&self.docker_cli, &id).await;
         }
         for (_, id) in sessions {
-            Self::destroy(&id).await;
+            Self::destroy(&self.docker_cli, &id).await;
         }
         // Catch any container we created but lost track of.
         self.reap_instance().await;
@@ -293,4 +322,28 @@ impl SandboxBackend for DockerBackend {
     fn name(&self) -> &'static str {
         "docker"
     }
+}
+
+fn find_docker_cli() -> Option<PathBuf> {
+    if command_exists("docker") {
+        return Some(PathBuf::from("docker"));
+    }
+    #[cfg(windows)]
+    {
+        let default = PathBuf::from(r"C:\Program Files\Docker\Docker\resources\bin\docker.exe");
+        if default.exists() {
+            return Some(default);
+        }
+    }
+    None
+}
+
+fn command_exists(program: &str) -> bool {
+    std::process::Command::new(program)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }

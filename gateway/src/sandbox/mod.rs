@@ -1,9 +1,10 @@
 //! Client for the Supervisor-owned Sandbox Provider.
 //!
 //! The Gateway keeps only Tool Manager concerns: advertise `sandbox_exec`,
-//! request an opaque handle, forward execution, and release the handle when
-//! its conversation ends. Backend choice and lifecycle remain in Supervisor.
+//! request opaque handles, forward execution, and release handles when
+//! conversations end. Backend choice and lifecycle remain in Supervisor.
 
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 use crate::proto;
@@ -13,7 +14,7 @@ pub struct SandboxClient {
     http: reqwest::Client,
     enabled: bool,
     backend: Option<String>,
-    handle: Mutex<Option<String>>,
+    handles: Mutex<HashMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -63,7 +64,7 @@ impl SandboxClient {
             http,
             enabled: status.enabled,
             backend: Some(status.backend),
-            handle: Mutex::new(None),
+            handles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -73,7 +74,7 @@ impl SandboxClient {
             http: reqwest::Client::new(),
             enabled: false,
             backend: None,
-            handle: Mutex::new(None),
+            handles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -123,23 +124,28 @@ impl SandboxClient {
     }
 
     pub async fn release(&self) {
-        let Some(handle) = self.handle.lock().await.take() else {
-            return;
+        let handles = {
+            let mut current = self.handles.lock().await;
+            current
+                .drain()
+                .map(|(_, handle)| handle)
+                .collect::<Vec<_>>()
         };
-        if let Err(error) = self
-            .http
-            .delete(format!("{}/api/sandbox/{handle}", self.base_url))
-            .send()
-            .await
-        {
-            tracing::warn!(%error, %handle, "failed to release Supervisor sandbox handle");
+        for handle in handles {
+            if let Err(error) = self
+                .http
+                .delete(format!("{}/api/sandbox/{handle}", self.base_url))
+                .send()
+                .await
+            {
+                tracing::warn!(%error, %handle, "failed to release Supervisor sandbox handle");
+            }
         }
     }
 
     async fn ensure_handle(&self, session_id: &str) -> Result<String, String> {
-        let mut current = self.handle.lock().await;
-        if let Some(handle) = current.as_ref() {
-            return Ok(handle.clone());
+        if let Some(handle) = self.handles.lock().await.get(session_id).cloned() {
+            return Ok(handle);
         }
 
         let response = self
@@ -160,7 +166,31 @@ impl SandboxClient {
                 .error
                 .unwrap_or_else(|| "sandbox unavailable".into())
         })?;
-        *current = Some(handle.clone());
+
+        let raced_handle = {
+            let mut current = self.handles.lock().await;
+            if let Some(existing) = current.get(session_id) {
+                Some(existing.clone())
+            } else {
+                current.insert(session_id.to_string(), handle.clone());
+                None
+            }
+        };
+        if let Some(existing) = raced_handle {
+            if let Err(error) = self
+                .http
+                .delete(format!("{}/api/sandbox/{handle}", self.base_url))
+                .send()
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    %handle,
+                    "failed to release duplicate Supervisor sandbox handle"
+                );
+            }
+            return Ok(existing);
+        }
         Ok(handle)
     }
 }
@@ -219,6 +249,56 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["exit_code"], 0, "{output}");
         assert!(value["stdout"].as_str().unwrap().contains("gateway-client"));
+
+        client.release().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn client_caches_handles_per_session_without_cross_session_leakage() {
+        let app = SupervisorApp::new(ResolvedRuntimeConfig {
+            config: RuntimeConfig {
+                profile: Some("test".into()),
+                supervisor_addr: "127.0.0.1:0".into(),
+                sandbox: SandboxConfig::default(),
+                processes: BTreeMap::new(),
+            },
+            base_dir: ".".into(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            server::serve_on(app, listener).await.unwrap();
+        });
+
+        let client = SandboxClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+
+        let write = client
+            .exec_from_json(
+                "session-a",
+                r#"{"language":"python","code":"open('secret.txt','w').write('from-a')"}"#,
+            )
+            .await;
+        let write_value: serde_json::Value = serde_json::from_str(&write).unwrap();
+        assert_eq!(write_value["exit_code"], 0, "{write}");
+
+        let read_other = client
+            .exec_from_json(
+                "session-b",
+                r#"{"language":"python","code":"import pathlib; print(pathlib.Path('secret.txt').exists())"}"#,
+            )
+            .await;
+        let read_other_value: serde_json::Value = serde_json::from_str(&read_other).unwrap();
+        assert_eq!(read_other_value["exit_code"], 0, "{read_other}");
+        assert!(
+            read_other_value["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("False"),
+            "{read_other}"
+        );
 
         client.release().await;
         server_task.abort();
