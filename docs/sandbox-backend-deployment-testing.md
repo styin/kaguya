@@ -39,7 +39,7 @@ three backend-specific contract jobs:
 | CI job | Host | Required backend |
 | --- | --- | --- |
 | `Sandbox Docker (ubuntu-latest)` | Linux | Docker Engine + `kaguya-sandbox:latest` |
-| `Sandbox Bubblewrap (ubuntu-latest)` | Linux | Bubblewrap |
+| `Sandbox Bubblewrap (ubuntu-24.04)` | Linux | Bubblewrap + AppArmor profile |
 | `Sandbox Job Object (windows-latest)` | Windows | `sandbox-jobobject` feature |
 
 The Docker and Bubblewrap jobs set `KAGUYA_REQUIRE_DOCKER` and
@@ -195,12 +195,61 @@ test job_object_backend_contract_when_available ... ok
 
 Bubblewrap is Linux-only. It is not expected to run on Windows.
 
-Install on a Linux host:
+Install on an Ubuntu host:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y bubblewrap python3 nodejs bash coreutils
 ```
+
+### Ubuntu 24.04 AppArmor prerequisite
+
+Ubuntu 24.04 enables AppArmor mediation for unprivileged user namespaces.
+Kaguya runs Bubblewrap with `--unshare-all`, which creates a private network
+namespace in addition to the other namespaces. While constructing that
+sandbox, Bubblewrap needs namespace-scoped `CAP_NET_ADMIN` to configure its
+isolated loopback interface. Without an application-specific AppArmor profile,
+that operation can fail with:
+
+```text
+bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+```
+
+Install and load Ubuntu's `bwrap-userns-restrict` profile before running
+Kaguya's Bubblewrap backend on Ubuntu 24.04:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  apparmor-profiles apparmor-utils bubblewrap \
+  python3 nodejs bash coreutils
+sudo install -m 0644 \
+  /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+  /etc/apparmor.d/bwrap-userns-restrict
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+```
+
+Verify the host configuration and exercise the same isolation mode Kaguya
+uses:
+
+```bash
+sysctl kernel.apparmor_restrict_unprivileged_userns
+dpkg-query -W apparmor apparmor-profiles bubblewrap
+sudo aa-status
+find /etc/apparmor.d /usr/share/apparmor -iname '*bwrap*'
+test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "1"
+bwrap --ro-bind / / --unshare-all --die-with-parent -- true
+```
+
+This profile permits Bubblewrap to perform the privileged namespace setup and
+then removes those capabilities from the program executed inside the sandbox.
+This prerequisite applies to production Ubuntu 24.04 hosts as well as CI.
+
+Do not work around the failure by setting
+`kernel.apparmor_restrict_unprivileged_userns=0`: that relaxes user-namespace
+restrictions host-wide for every unconfined process. Do not add `--share-net`
+either, because it would give sandboxed, model-authored code access to the host
+network and violate Kaguya's offline Bubblewrap contract.
 
 Run:
 
@@ -249,5 +298,9 @@ job_object_backend_contract_when_available ... ok
   https://learn.microsoft.com/windows/wsl/install
 - Bubblewrap manual:
   https://manpages.debian.org/unstable/bubblewrap/bwrap.1.en.html
+- Ubuntu 24.04 unprivileged-user-namespace restrictions:
+  https://documentation.ubuntu.com/release-notes/24.04/
+- Bubblewrap/AppArmor failure and profile discussion:
+  https://github.com/openai/codex/issues/14919#issuecomment-4076504751
 - Windows Job Objects:
   https://learn.microsoft.com/windows/win32/procthread/job-objects
