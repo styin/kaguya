@@ -32,3 +32,9 @@ max_storage_chars = 4096
 # prompt cost when many retrievals fire (REF-010).
 # max_chars_per_result = 400
 # max_chars_per_md_entry = 300
+
+[supervisor]
+# Runtime control plane. The Gateway requests an opaque sandbox handle here;
+# backend choice, limits, prewarming, and cleanup live in kaguya.runtime.toml.
+# KAGUYA_SUPERVISOR_URL overrides this value when Supervisor launches Gateway.
+url = "http://127.0.0.1:3001"

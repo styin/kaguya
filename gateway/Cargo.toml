@@ -38,4 +38,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "htt
 dev-console = []
 
 [build-dependencies]
+protoc-bin-vendored = "3.2.0"
 tonic-build = "0.12"
+
+[dev-dependencies]
+kaguya-supervisor = { path = "../supervisor" }

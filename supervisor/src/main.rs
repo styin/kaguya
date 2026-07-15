@@ -10,15 +10,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let resolved = RuntimeConfig::load_discover()?;
-    let addr = resolved.config.supervisor_addr.parse()?;
+    let addr: std::net::SocketAddr = resolved.config.supervisor_addr.parse()?;
+    // Bind the control plane before launching Gateway. Gateway initializes its
+    // SandboxClient during boot and must never race the Supervisor listener.
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     let app = SupervisorApp::new(resolved);
+    app.prewarm_sandbox().await;
     app.start_monitor();
     if supervisor_autostart() {
         app.start_app().await?;
     }
 
     tokio::select! {
-        result = server::serve(app.clone(), addr) => result?,
+        result = server::serve_on(app.clone(), listener) => result?,
         signal = tokio::signal::ctrl_c() => {
             match signal {
                 Ok(()) => tracing::info!("OS shutdown signal received"),

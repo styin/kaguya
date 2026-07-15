@@ -34,7 +34,7 @@ The Gateway does **not**:
 8. **Tool registry and dispatch.** Maintain the Toolkit registry. Dispatch tool calls received from the Talker. Return results as Input Stream events (P3, non-blocking). Manage MCP server connections and expose available MCP tools through the Tool Registry.
 9. **Control signal interception.** Process `STOP`, `APPROVAL`, `SHUTDOWN` from the endpoint's control path. These bypass the Input Stream entirely — no event may delay a STOP.
 10. **Thread/process management.** Spawn, monitor, and terminate the Listener, Talker, and Reasoner processes.
-11. **Sandbox management.** Ensure all tool executions run in appropriate isolation (sandboxed TypeScript processes). Enforce the workspace root: all Toolkit file paths are resolved relative to the configured workspace root directory. The workspace root is set at startup and can be reconfigured via control signals.
+11. **Sandbox delegation.** Keep tool semantics and result correlation in Gateway, but obtain opaque execution handles from the Supervisor-owned Sandbox Provider. Supervisor enforces backend policy and resource lifecycle. Gateway continues to enforce the workspace root for its own filesystem tools.
 12. **Reasoner lifecycle.** Start Reasoner Agents when the Talker requests delegation via `[DELEGATE:...]`. Manage multiple concurrent Reasoner Agents, each with a unique `task_id`. Monitor lifecycle. Adapt Reasoner output into Input Stream events (P3).
 13. **Reasoner output filtering.** Decide which intermediate Reasoner steps are worth forwarding to the Talker for narration — dropping noise, rate-limiting, merging. One utterance per meaningful state transition; rate-limited to prevent manic narration.
 14. **Timing management.** Silence timers, scheduled reminders, memory triggers. Emit timed events (P4) into the Input Stream.
@@ -380,7 +380,7 @@ Spoken audio itself stays in the Talker → TTS → endpoint directly (forwarded
 
 The Gateway enforces the workspace root and manages all Toolkit tools.
 
-**Toolkit tools (Phase 1).** The Gateway's Toolkit exposes filesystem and environment tools: `list_files(path)`, `read_file(path)`, `write_file(path, content)`, `search_files(query)`, `run_command(cmd)`. These execute in sandboxed TypeScript processes managed by the Gateway. All file paths are resolved relative to the configured workspace root. The workspace root is set at startup (e.g., the user's current project directory) and can be reconfigured via OpenPod control signals.
+**Toolkit tools (Phase 1).** The Gateway's Toolkit exposes filesystem tools and `sandbox_exec`. Filesystem tool paths are resolved relative to the configured workspace root. For code execution, Gateway requests an opaque handle from Supervisor and forwards execution to the Supervisor-owned Sandbox Provider; provider internals never enter Gateway.
 
 **MCP servers (Phase 1).** The Gateway manages MCP server connections and exposes available MCP tools through the Tool Registry. The LLM discovers and calls MCP tools via `[TOOL:search_tools(...)]` → `[TOOL:mcp_tool_name(...)]`.
 

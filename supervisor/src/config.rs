@@ -16,20 +16,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::process::{ManagedProcessRestartPolicy, ManagedProcessSpec};
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     pub profile: Option<String>,
     #[serde(default = "default_http_addr")]
     pub supervisor_addr: String,
     #[serde(default)]
+    pub sandbox: SandboxConfig,
+    #[serde(default)]
     pub processes: BTreeMap<String, ProcessSpec>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 struct RuntimeConfigFile {
     pub profile: Option<String>,
     #[serde(default = "default_http_addr")]
     pub supervisor_addr: String,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
     #[serde(default)]
     pub processes: BTreeMap<String, ProcessSpec>,
     #[serde(default)]
@@ -54,8 +58,6 @@ pub struct ProcessSpec {
     pub criticality: Criticality,
     #[serde(default)]
     pub restart: RestartPolicy,
-    #[serde(default)]
-    pub sandbox: SandboxConfig,
     pub command: Option<String>,
     pub command_win32: Option<String>,
     pub cwd: Option<PathBuf>,
@@ -101,20 +103,6 @@ pub enum RestartPolicy {
     KeepAlive,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SandboxConfig {
-    #[serde(default)]
-    pub provider: SandboxProvider,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxProvider {
-    None,
-}
-
 impl RuntimeConfig {
     pub fn load_discover() -> anyhow::Result<ResolvedRuntimeConfig> {
         if let Ok(path) = std::env::var("KAGUYA_RUNTIME_CONFIG") {
@@ -149,6 +137,9 @@ impl RuntimeConfig {
                 }
             }
         }
+        if config.sandbox.workspace_root.is_relative() {
+            config.sandbox.workspace_root = base_dir.join(&config.sandbox.workspace_root);
+        }
         Ok(ResolvedRuntimeConfig { config, base_dir })
     }
 
@@ -164,7 +155,7 @@ impl RuntimeConfigFile {
     fn parse(content: &str, profile_override: Option<String>) -> anyhow::Result<RuntimeConfig> {
         let file = toml::from_str::<RuntimeConfigFile>(content)?;
         let selected_profile = profile_override.or(file.profile.clone());
-        let processes = if let Some(profile) = selected_profile.as_deref() {
+        let mut processes = if let Some(profile) = selected_profile.as_deref() {
             match file.profiles.get(profile) {
                 Some(profile_config) => profile_config.processes.clone(),
                 None if file.profiles.is_empty() => file.processes,
@@ -174,10 +165,22 @@ impl RuntimeConfigFile {
             file.processes
         };
         validate_runtime_topology(&processes)?;
+        if let Some(gateway) = processes.get_mut("gateway") {
+            let supervisor_url = if file.supervisor_addr.contains("://") {
+                file.supervisor_addr.clone()
+            } else {
+                format!("http://{}", file.supervisor_addr)
+            };
+            gateway
+                .env
+                .entry("KAGUYA_SUPERVISOR_URL".into())
+                .or_insert(supervisor_url);
+        }
 
         Ok(RuntimeConfig {
             profile: selected_profile,
             supervisor_addr: file.supervisor_addr,
+            sandbox: file.sandbox,
             processes,
         })
     }
@@ -189,7 +192,7 @@ fn selected_profile() -> Option<String> {
         .filter(|profile| !profile.trim().is_empty())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedRuntimeConfig {
     pub config: RuntimeConfig,
     pub base_dir: PathBuf,
@@ -258,23 +261,114 @@ impl Default for RestartPolicy {
     }
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+// ── Supervisor-owned code-execution sandbox provider ───────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBackendKind {
+    #[default]
+    Native,
+    Docker,
+    Bubblewrap,
+    JobObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxModeKind {
+    #[default]
+    SingleUser,
+    Hosted,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SandboxConfig {
+    #[serde(default = "sandbox_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub backend: SandboxBackendKind,
+    #[serde(default)]
+    pub mode: SandboxModeKind,
+    #[serde(default = "sandbox_workspace_root")]
+    pub workspace_root: PathBuf,
+    #[serde(default = "sandbox_timeout")]
+    pub default_timeout_secs: u64,
+    #[serde(default = "sandbox_output")]
+    pub max_output_bytes: usize,
+    #[serde(default = "sandbox_image")]
+    pub image: String,
+    #[serde(default)]
+    pub pool_size: usize,
+    #[serde(default = "sandbox_memory")]
+    pub memory_limit_mb: u64,
+    #[serde(default = "sandbox_pids")]
+    pub pids_limit: u64,
+    #[serde(default = "sandbox_cpus")]
+    pub cpus: f64,
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default = "sandbox_languages")]
+    pub allowed_languages: Vec<String>,
+}
+
+fn sandbox_enabled() -> bool {
+    true
+}
+
+fn sandbox_workspace_root() -> PathBuf {
+    PathBuf::from("..")
+}
+
+fn sandbox_timeout() -> u64 {
+    30
+}
+
+fn sandbox_output() -> usize {
+    16 * 1024
+}
+
+fn sandbox_image() -> String {
+    "kaguya-sandbox:latest".into()
+}
+
+fn sandbox_memory() -> u64 {
+    512
+}
+
+fn sandbox_pids() -> u64 {
+    128
+}
+
+fn sandbox_cpus() -> f64 {
+    1.0
+}
+
+fn sandbox_languages() -> Vec<String> {
+    vec!["python".into(), "node".into(), "bash".into()]
+}
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            provider: SandboxProvider::None,
-            required: false,
+            enabled: sandbox_enabled(),
+            backend: SandboxBackendKind::default(),
+            mode: SandboxModeKind::default(),
+            workspace_root: sandbox_workspace_root(),
+            default_timeout_secs: sandbox_timeout(),
+            max_output_bytes: sandbox_output(),
+            image: sandbox_image(),
+            pool_size: 0,
+            memory_limit_mb: sandbox_memory(),
+            pids_limit: sandbox_pids(),
+            cpus: sandbox_cpus(),
+            network: false,
+            allowed_languages: sandbox_languages(),
         }
     }
-}
-
-impl Default for SandboxProvider {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 fn default_http_addr() -> String {
@@ -375,7 +469,6 @@ mod tests {
             launch = "eager"
             criticality = "required"
             restart = "on_failure"
-            sandbox = { provider = "none", required = false }
             command = "cargo run"
             command_win32 = "cargo run"
             cwd = "../gateway"
@@ -399,6 +492,13 @@ mod tests {
         );
         assert!(config.processes["gateway"].is_eager_managed());
         assert!(!config.processes["llm_server"].is_managed());
+        assert_eq!(
+            config.processes["gateway"]
+                .resolved_env()
+                .get("KAGUYA_SUPERVISOR_URL")
+                .map(String::as_str),
+            Some("http://127.0.0.1:3001")
+        );
     }
 
     #[test]
@@ -425,6 +525,27 @@ mod tests {
             Criticality::DegradedUsable
         );
         assert!(!config.processes["voice_stack"].is_managed());
+    }
+
+    #[test]
+    fn parses_supervisor_owned_sandbox_provider() {
+        let toml = r#"
+            supervisor_addr = "127.0.0.1:3001"
+
+            [sandbox]
+            enabled = true
+            backend = "docker"
+            mode = "hosted"
+            workspace_root = "../workspace"
+            pool_size = 2
+        "#;
+
+        let config = RuntimeConfigFile::parse(toml, None).expect("config should parse");
+
+        assert_eq!(config.sandbox.backend, SandboxBackendKind::Docker);
+        assert_eq!(config.sandbox.mode, SandboxModeKind::Hosted);
+        assert_eq!(config.sandbox.workspace_root, PathBuf::from("../workspace"));
+        assert_eq!(config.sandbox.pool_size, 2);
     }
 
     #[test]

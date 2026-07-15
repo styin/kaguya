@@ -26,6 +26,7 @@ use crate::process::{
     start_managed_process, stop_managed_process, ManagedProcess, ManagedProcessLogLine,
     ManagedProcessSnapshot, ManagedProcessStatus,
 };
+use crate::sandbox::{SandboxManager, SandboxProvider};
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const GATEWAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,6 +45,7 @@ pub struct SupervisorApp {
     logs: LogStore,
     log_tx: mpsc::UnboundedSender<ManagedProcessLogLine>,
     http: reqwest::Client,
+    sandbox: SandboxProvider,
 }
 
 struct SupervisorInner {
@@ -169,6 +171,16 @@ impl SupervisorApp {
                 )
             })
             .collect();
+        let sandbox = match SandboxManager::from_config(
+            &resolved.config.sandbox,
+            resolved.config.sandbox.workspace_root.clone(),
+        ) {
+            Ok(manager) => SandboxProvider::new(manager),
+            Err(error) => {
+                tracing::warn!(%error, "sandbox provider initialization failed; disabling provider");
+                SandboxProvider::disabled()
+            }
+        };
 
         Self {
             inner: std::sync::Arc::new(Mutex::new(SupervisorInner {
@@ -179,6 +191,7 @@ impl SupervisorApp {
             logs,
             log_tx,
             http: reqwest::Client::new(),
+            sandbox,
         }
     }
 
@@ -234,10 +247,40 @@ impl SupervisorApp {
         for name in names {
             let _ = self.stop_process(&name).await;
         }
+        self.sandbox.shutdown().await;
         Ok(())
     }
 
+    pub fn sandbox_enabled(&self) -> bool {
+        self.sandbox.is_enabled()
+    }
+
+    pub fn sandbox_backend(&self) -> &'static str {
+        self.sandbox.backend_name()
+    }
+
+    pub async fn prewarm_sandbox(&self) {
+        self.sandbox.prewarm().await;
+    }
+
+    pub async fn acquire_sandbox(&self, session: &str) -> anyhow::Result<String> {
+        self.sandbox.acquire(session).await
+    }
+
+    pub async fn execute_in_sandbox(&self, handle: &str, args_json: &str) -> String {
+        self.sandbox.execute(handle, args_json).await
+    }
+
+    pub async fn release_sandbox(&self, handle: &str) -> anyhow::Result<()> {
+        self.sandbox.release(handle).await
+    }
+
     pub async fn start_process(&self, name: &str) -> anyhow::Result<()> {
+        // A crashed Gateway cannot release its opaque handles. Clear stale
+        // conversation resources before every initial start or restart.
+        if name == "gateway" {
+            self.sandbox.cleanup_sessions().await;
+        }
         let mut inner = self.inner.lock().await;
         inner.restart_disabled = false;
         let Some(state) = inner.processes.get_mut(name) else {
@@ -739,7 +782,6 @@ mod tests {
             launch: LaunchMode::Eager,
             criticality: Criticality::Required,
             restart,
-            sandbox: SandboxConfig::default(),
             command: Some(command),
             command_win32: None,
             cwd: None,
@@ -766,6 +808,10 @@ mod tests {
             config: RuntimeConfig {
                 profile: Some("test".to_string()),
                 supervisor_addr: "127.0.0.1:0".to_string(),
+                sandbox: SandboxConfig {
+                    enabled: false,
+                    ..SandboxConfig::default()
+                },
                 processes,
             },
             base_dir: ".".into(),

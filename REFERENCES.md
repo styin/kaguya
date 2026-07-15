@@ -445,3 +445,256 @@ _Add new entries below this line. Format: `## REF-NNN — Short Title (component
 - Kaguya architecture invariant: Gateway owns filesystem/capability routing, while runtime processes provide capabilities over IPC.
 - Kaguya supervisor extraction target: `supervisor/src/process.rs` owns managed child-process primitives and restart policy.
 - Gateway lifecycle source after extraction: `gateway/src/lifecycle/` contains task, connection, and reconnect modules only.
+
+---
+
+## REF-014 — `sandbox_exec` Tool: Pluggable Code-Execution Sandbox (Gateway, tools)
+
+**Decision:** LLM-generated code execution is exposed as a normal Gateway tool, `sandbox_exec`, backed by a swappable `SandboxBackend` trait (`gateway/src/sandbox/`). Backend and resource limits are config-driven (`[sandbox]` in `gateway.toml`). Defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | When `false`, the tool is not advertised to the Talker at all. |
+| `backend` | `native` | `native` \| `docker` \| `bubblewrap` \| `job_object`. |
+| `mode` | `single_user` | Docker only: `single_user` (lazy create on first use) vs `hosted` (prewarm `pool_size` containers at startup to hide cold-start). |
+| `default_timeout_secs` | `30` | Per-execution wall-clock limit, enforced by tree-kill (native/bwrap/job) or in-container `timeout` (Docker). |
+| `max_output_bytes` | `16384` (16 KiB) | Cap on captured stdout/stderr; the bytes feed the next LLM prompt, so this bounds per-turn context cost. |
+| `memory_limit_mb` | `512` | Docker `--memory`/`--memory-swap` and Job Object `JobMemoryLimit`. |
+| `pids_limit` | `128` | Docker `--pids-limit` and Job Object `ActiveProcessLimit`. |
+| `cpus` | `1.0` | Docker `--cpus` quota (fractions allowed). |
+| `network` | `false` | Docker: `--network=none` unless enabled. bubblewrap: always offline (`--unshare-all`). |
+
+**Rationale:**
+
+1. **Sandbox is just a tool.** From the dialog flow's view, `sandbox_exec` is indistinguishable from `read_file` or `list_files`: the LLM emits a `ToolRequest`, the Gateway executes it, a JSON string flows back through the normal P3 `ToolResult` path. No new proto messages, no new priority channel, no pipeline changes. This is why it lives under `tools.rs` dispatch rather than as a separate service or event stream. **This is distinct from REF-013's process-launch sandboxing** — REF-013 concerns wrapping *runtime component processes* (Talker/Reasoner) at launch, which is a supervisor concern; REF-014 concerns *executing LLM-authored code* mid-conversation, which is a Gateway tool concern.
+
+2. **Pluggable backend, native default.** Most self-hosting users already have a local Python/Node toolchain and accept running LLM code on their own machine. `native` gives zero extra dependencies and sub-millisecond startup (interpreter in a per-session scratch dir, isolation limited to cwd + timeout + tree-kill). Users who want isolation opt into `docker` (strongest), `bubblewrap` (Linux namespaces, no daemon), or `job_object` (Windows resource limits + kill-on-close). Advertising the tool only when enabled means the LLM is never told about a capability it can't use.
+
+3. **Per-conversation affinity.** Within one conversation the LLM may call the sandbox repeatedly (create a file, then read it, then modify it). All calls for a given `conversation_id` share filesystem state — a fixed Docker container or a stable scratch dir — and are torn down on conversation cleanup/shutdown. Backends key their session map on `conversation_id`.
+
+4. **Numeric defaults are conservative and reversible.** 30 s bounds a runaway loop without truncating typical analysis; 16 KiB output keeps a single tool result from blowing the prompt budget (cf. REF-010's RAG output caps); 512 MB / 128 PIDs are generous for scripting yet cap fork bombs and memory blowups. All are overridable per deployment.
+
+5. **`network=false` by default** because most `sandbox_exec` uses are local computation; opening the network is an explicit opt-in given the code is model-authored.
+
+6. **One Gateway process = one conversation ⇒ one-Gateway-per-user is the hosting model.** `main.rs` mints a single `conversation_id` per process, so "session end" == process shutdown, and `cleanup` runs there. Rather than bolt speculative multi-tenancy onto the Gateway, hosting runs one Gateway (hence one sandbox scope) per user session — users are then isolated by construction, with no shared container/scratch state to leak. Consequently the Docker backend does **not** replenish the warm pool on cleanup (there is no next in-process session to serve; that would be pure churn), and `hosted` mode simply prewarms `pool_size` containers at startup (`pool_size=1` suffices to hide first-call latency in the per-user shape).
+
+7. **Fail-loud posture, not fail-open.** `native` runs model-authored code with no host isolation; combining it with `mode=hosted` logs a prominent startup warning (safe only when each Gateway is itself confined per user). It is a warning rather than a hard refusal because a per-user-containerized Gateway legitimately uses `native` (the container *is* the sandbox). The `sandbox_exec` tool description deliberately avoids the word "isolated" since that is a property of the chosen backend, not the tool. A misconfigured `allowed_languages` that parses to zero known languages also warns (empty otherwise means "allow all").
+
+8. **Crash-safe container reaping.** Every Docker container carries two labels: `kaguya.sandbox=1` (all Kaguya sandboxes) and `kaguya.sandbox.instance=<uuid>` (this process only). Graceful `shutdown()` reaps by the instance label — safe even when several Gateways share one Docker host — as a belt-and-suspenders beyond the tracked container ids. After a hard crash, `make sandbox-clean` reaps the global label. Per-exec runner scripts use unique names (`.kaguya-run-<uuid>.<ext>`) and are removed after the interpreter exits, so concurrent calls in one session never clobber each other while user-created files still persist.
+
+**Windows Job Object note:** the `job_object` backend is feature-gated (`--features sandbox-jobobject`, off by default) and requires the `windows` crate with `Win32_Security` (for `SECURITY_ATTRIBUTES` referenced by `CreateJobObjectW`). Its `HANDLE` is held across `.await` via a `SendHandle` newtype — a Job Object is a process-wide kernel object whose handle validity is independent of the tokio worker thread polling the future.
+
+**Supersedes:** none. Replaces the previously-disabled `run_command` tool (removed from the registry) as the safe, isolatable code-execution path.
+
+**Sources:**
+
+- Docker resource limits: https://docs.docker.com/engine/containers/resource_constraints/ (`--memory`, `--pids-limit`, `--network=none`, `--cap-drop`).
+- Bubblewrap sandboxing model: https://github.com/containers/bubblewrap (`--unshare-all`, `--ro-bind`, `--die-with-parent`).
+- Windows Job Objects: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, memory/active-process limits) — the pattern Chromium uses for renderer resource containment.
+
+---
+
+## REF-015 — Supervisor-Owned Sandbox Provider and Opaque Handles
+
+**Decision:** Sandbox Provider ownership moves from Gateway to Supervisor. Gateway
+retains the `sandbox_exec` tool definition, request correlation, and P3
+`ToolResult` flow, but it may interact with a sandbox only through the
+Supervisor control-plane sequence:
+
+1. acquire an opaque handle for the conversation;
+2. execute using that handle;
+3. release the handle when the conversation ends.
+
+Supervisor owns backend construction, configuration, prewarming, handle/session
+mapping, resource limits, cleanup, and global shutdown. Sandbox configuration
+therefore lives in `config/kaguya.runtime.toml`, while `gateway.toml` contains
+only the Supervisor control-plane URL. The numerical defaults and backend
+semantics remain those documented by REF-014.
+
+**Rationale:**
+
+1. **One runtime owner.** Sandbox processes, containers, and OS resource handles
+   are runtime resources. The same component that constructs and monitors the
+   process graph must own their lifecycle and teardown.
+2. **Gateway remains a coordinator.** Tool meaning and conversational result
+   routing belong in Gateway; provider selection, Docker/Job Object details, and
+   warm-pool state do not.
+3. **Opaque handles preserve the boundary.** Gateway cannot depend on container
+   IDs, scratch paths, backend type, or provider implementation. Supervisor can
+   replace a backend without changing the tool protocol.
+4. **Shutdown ordering is explicit.** Gateway releases its conversation handle;
+   Supervisor remains authoritative and performs provider-wide cleanup after
+   managed processes stop. Before an initial Gateway start or restart,
+   Supervisor also clears stale conversation handles left by a crash.
+5. **Hosted pools are Supervisor-scoped.** Unlike REF-014's one-Gateway process
+   assumption, a Supervisor can serve multiple conversation handles. A released
+   Docker container is destroyed rather than reused (preventing file leakage),
+   and hosted mode replenishes a clean container up to the configured pool size.
+
+**Supersedes:** REF-014 only where it assigns Sandbox Provider implementation
+and lifecycle to `gateway/src/sandbox/`. REF-014 remains authoritative for the
+tool's behavior, supported backends, security posture, and configurable numeric
+defaults, except its item 6 no-replenishment behavior, which is replaced by the
+Supervisor-scoped clean replenishment rule above. This also completes REF-013's
+stated direction that sandbox/process launch concerns belong to Supervisor.
+
+**Sources:**
+
+- Project runtime architecture diagram `2.png`: Supervisor constructs/monitors
+  Gateway and binds to the Sandbox Provider.
+- Project sandbox sequence diagram `1.png`: Gateway → Tool Manager → Supervisor
+  → Sandbox Provider, with an opaque handle returned before execution.
+- `supervisor/src/process.rs`: existing runtime process ownership and teardown.
+- `gateway/src/core/pipeline/executor.rs`: existing P3 tool dispatch/result
+  boundary retained by this change.
+
+---
+
+## REF-016 — Vendored `protoc` for Rust Stub Generation
+
+**Decision:** Gateway and Supervisor build scripts obtain `protoc` from
+`protoc-bin-vendored` and pass that executable to `tonic-build`. Buf remains the
+schema linting workflow, and Python keeps its existing `grpcio-tools` generator.
+
+**Rationale:**
+
+1. Both Rust crates compile the same canonical proto during `cargo build`; a
+   system-level `protoc` prerequisite made clean Windows/macOS builds depend on
+   unrelated machine setup.
+2. The vendored crate selects a platform binary while preserving the existing
+   `tonic-build` output and schema source of truth.
+3. Pinning the crate version in both build dependencies keeps Gateway and
+   Supervisor generation behavior aligned and reproducible.
+
+**Sources:**
+
+- `protoc-bin-vendored` documentation: https://docs.rs/protoc-bin-vendored
+- `prost-build` documentation (`protoc` is used to parse schemas):
+  https://docs.rs/prost-build
+
+---
+
+## REF-017 — Sandbox Backend Contract Suite and Environment-Gated Deployment Tests
+
+**Decision:** Sandbox backend behavior is verified by a shared integration
+contract in `supervisor/tests/sandbox_backend_contract.rs`. The suite exercises
+the public `SandboxManager` API for every backend that is available on the
+current host. It uses test-only settings:
+
+| Test setting | Value | Purpose |
+| --- | ---: | --- |
+| `default_timeout_secs` | `1` | Keep timeout tests fast while still exercising backend cleanup. |
+| outer timeout wait | `7s` | Give Docker Desktop/WSL and process-tree cleanup a small grace window beyond the configured 1s sandbox timeout. |
+| `max_output_bytes` | `32` | Force truncation with a compact stdout fixture. |
+| Docker availability probe | `10s` | Prevent Docker Desktop half-started states from hanging the suite. |
+
+Docker and Bubblewrap tests are environment-gated rather than mandatory:
+
+- Docker requires a reachable Docker daemon and the `kaguya-sandbox:latest`
+  image.
+- Bubblewrap requires Unix plus `bwrap --version`.
+- Windows Job Object tests require Windows plus `--features sandbox-jobobject`.
+
+**Rationale:**
+
+1. A single contract prevents backend drift: `stdin`, timeout, output
+   truncation, cleanup, and session isolation should mean the same thing for
+   native, Docker, Bubblewrap, and Job Object.
+2. The test-only 1s/7s timeout pair keeps CI and local runs short while still
+   detecting the review finding where descendants survived timeout and held
+   inherited pipes open.
+3. Docker Desktop on Windows can be installed while its WSL engine is not yet
+   usable. A bounded 10s probe turns that host setup problem into an explicit
+   skip instead of a hung test process.
+4. Environment gating keeps normal Windows/macOS/Linux development usable while
+   still allowing stronger backend coverage on hosts that have the relevant
+   runtime installed.
+
+**Supersedes:** none. Complements REF-014 and REF-015 by defining how backend
+behavior is verified after Supervisor ownership.
+
+**Sources:**
+
+- Docker Desktop Windows requirements:
+  https://docs.docker.com/desktop/setup/install/windows-install/
+- Docker Desktop WSL 2 backend prerequisites:
+  https://docs.docker.com/desktop/features/wsl/
+- Microsoft WSL installation/update documentation:
+  https://learn.microsoft.com/windows/wsl/install
+- Bubblewrap manual (`--die-with-parent`, namespace behavior):
+  https://manpages.debian.org/unstable/bubblewrap/bwrap.1.en.html
+- Windows Job Objects:
+  https://learn.microsoft.com/windows/win32/procthread/job-objects
+
+---
+
+## REF-018 — Mandatory Per-Backend Sandbox CI by Supported Host
+
+**Decision:** Pull requests run the Supervisor suite on Linux, macOS, and
+Windows. Backend-specific sandbox contracts are mandatory on the host that
+implements each isolation mechanism:
+
+| Contract | Required CI host | Reason |
+| --- | --- | --- |
+| Docker | Linux | Exercises the container contract on GitHub-hosted Docker Engine without requiring Docker Desktop virtualization. |
+| Bubblewrap | Linux | Bubblewrap is implemented with Linux user, mount, PID, and network namespaces; it does not provide macOS coverage. |
+| Job Object | Windows | Job Objects are a Windows kernel facility and the backend is compiled only with `--features sandbox-jobobject`. |
+
+Normal local tests retain REF-017's environment-gated skip behavior. Dedicated
+CI jobs set `KAGUYA_REQUIRE_DOCKER` or `KAGUYA_REQUIRE_BUBBLEWRAP`, converting a
+missing runtime or image into a failure. This distinguishes "contract passed"
+from "backend was unavailable" without making optional local dependencies
+mandatory for every contributor.
+
+macOS is covered by the native Supervisor matrix. Docker Desktop compatibility
+on macOS and Windows is a deployment-specific scheduled or release-candidate
+check, not a substitute for the mandatory Linux Docker contract. Those desktop
+checks require environments with their virtualization layers configured and
+are intentionally outside the per-PR hosted-runner gate.
+
+**Supersedes:** REF-017 only where Docker and Bubblewrap availability is treated
+as optional in dedicated CI jobs. REF-017 remains authoritative for local test
+gating and the shared contract's numerical defaults.
+
+**Sources:**
+
+- GitHub-hosted runner operating systems and virtualization limitations:
+  https://docs.github.com/en/actions/concepts/runners/github-hosted-runners
+- Bubblewrap Linux namespace sandbox:
+  https://github.com/containers/bubblewrap
+- Docker Engine CI integration:
+  https://docs.docker.com/build/ci/github-actions/
+- Windows Job Objects:
+  https://learn.microsoft.com/windows/win32/procthread/job-objects
+
+---
+
+## REF-019 — Cross-Platform Sandbox Contract Timing Budget
+
+**Decision:** The shared sandbox backend contract uses the following test-only
+timing values:
+
+| Test setting | Value | Purpose |
+| --- | ---: | --- |
+| `default_timeout_secs` | `3` | Allow interpreter and sandbox startup on slower hosted runners while keeping timeout tests short. |
+| outer timeout wait | `10s` | Bound backend cleanup while exceeding Docker's configured timeout plus its 5-second internal cleanup allowance. |
+
+The production default remains 30 seconds.
+
+**Rationale:** The original 1-second contract deadline was shorter than Python
+startup on a Windows hosted runner, so an ordinary session-isolation probe was
+misclassified as a timeout. Three seconds preserves a fast timeout regression
+test but provides startup headroom. The 10-second outer bound remains strict
+enough to detect cleanup hangs and is greater than Docker's 8-second maximum
+path for a 3-second request timeout plus its internal 5-second allowance.
+
+**Supersedes:** REF-017 only for the shared contract's 1-second default timeout
+and 7-second outer wait. REF-017 remains authoritative for the other contract
+settings and environment gates.
+
+**Sources:**
+
+- Failed Windows hosted-runner contract showing a startup timeout:
+  https://github.com/styin/kaguya/actions/runs/29430087456/job/87402552734
+- Tokio timeout behavior:
+  https://docs.rs/tokio/latest/tokio/time/fn.timeout.html

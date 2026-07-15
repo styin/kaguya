@@ -1,14 +1,17 @@
 //! Tool Registry and Dispatcher
 //!
-//! Tool dispatch initiated by Talker, executed by gateway ([TOOL:...] in prompt)
-//! Results sent back to Talker via P3 channel.
+//! Tool requests originate in Talker and are coordinated by Gateway.
+//! Filesystem tools execute locally; `sandbox_exec` is delegated to the
+//! Supervisor-owned provider. Every result returns through the same P3 path.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::lifecycle::TaskSpawner;
 use crate::proto;
+use crate::sandbox::SandboxClient;
 use crate::types::InputEvent;
 
 struct ToolMeta {
@@ -21,37 +24,52 @@ pub struct ToolRegistry {
     tools: Vec<ToolMeta>,
     workspace_root: PathBuf,
     tasks: TaskSpawner,
+    sandbox: Option<Arc<SandboxClient>>,
 }
 
 impl ToolRegistry {
-    pub fn new(workspace_root: PathBuf, tasks: TaskSpawner) -> Self {
+    pub fn new(
+        workspace_root: PathBuf,
+        tasks: TaskSpawner,
+        sandbox: Option<Arc<SandboxClient>>,
+    ) -> Self {
+        let mut tools = vec![
+            ToolMeta {
+                name: "list_files".into(),
+                description: "List files in directory".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+            },
+            ToolMeta {
+                name: "read_file".into(),
+                description: "Read file contents".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+            },
+            ToolMeta {
+                name: "write_file".into(),
+                description: "Write to file".into(),
+                args_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}"#.into(),
+            },
+            // Direct shell execution is intentionally not registered.
+            // `sandbox_exec` is the canonical supervised execution path.
+        ];
+
+        // Advertise `sandbox_exec` only after Supervisor reports that its
+        // provider is enabled.
+        if let Some(sb) = &sandbox {
+            if let Some(def) = sb.tool_definition() {
+                tools.push(ToolMeta {
+                    name: def.name,
+                    description: def.description,
+                    args_schema: def.args_schema,
+                });
+            }
+        }
+
         Self {
-            tools: vec![
-                ToolMeta {
-                    name: "list_files".into(),
-                    description: "List files in directory".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
-                },
-                ToolMeta {
-                    name: "read_file".into(),
-                    description: "Read file contents".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
-                },
-                ToolMeta {
-                    name: "write_file".into(),
-                    description: "Write to file".into(),
-                    args_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}"#.into(),
-                },
-                // DISABLED: run_command requires allowlist-based sandboxing before re-enabling.
-                // See GitHub issue for scoped implementation plan.
-                // ToolMeta {
-                //     name: "run_command".into(),
-                //     description: "Run shell command in sandbox".into(),
-                //     args_schema: r#"{"type":"object","properties":{"cmd":{"type":"string"}}}"#.into(),
-                // },
-            ],
+            tools,
             workspace_root,
             tasks,
+            sandbox,
         }
     }
 
@@ -81,11 +99,37 @@ impl ToolRegistry {
 
     pub fn dispatch(
         &self,
+        conversation_id: String,
         request_id: String,
         tool_name: String,
         args_json: String,
         p3_tx: mpsc::Sender<InputEvent>,
     ) {
+        // ── Sandbox route ──
+        // `sandbox_exec` runs through a Supervisor-owned provider handle.
+        // Files persist across calls in the conversation; the normal P3
+        // ToolResult path remains unchanged.
+        if tool_name == "sandbox_exec" {
+            let sandbox = self.sandbox.clone();
+            info!(id = %request_id, "dispatching sandbox_exec");
+            self.tasks
+                .spawn(format!("tool_dispatch:{tool_name}"), async move {
+                    let content = match sandbox {
+                        Some(sb) => sb.exec_from_json(&conversation_id, &args_json).await,
+                        None => sandbox_error_json("sandbox disabled"),
+                    };
+                    let _ = p3_tx
+                        .send(InputEvent::ToolResult {
+                            request_id,
+                            tool_name,
+                            content,
+                        })
+                        .await;
+                });
+            return;
+        }
+
+        // ── Filesystem tools ──
         info!(tool = %tool_name, id = %request_id, "dispatching tool");
         let root = self.workspace_root.clone();
 
@@ -117,6 +161,18 @@ impl ToolRegistry {
                     .await;
             });
     }
+}
+
+fn sandbox_error_json(error: impl Into<String>) -> String {
+    serde_json::json!({
+        "stdout": "",
+        "stderr": "",
+        "exit_code": -1,
+        "timed_out": false,
+        "truncated": false,
+        "error": error.into(),
+    })
+    .to_string()
 }
 
 // ── helpers ──
@@ -196,7 +252,9 @@ async fn exec_write_file(root: &Path, args: &str) -> Result<String, String> {
     )
 }
 
-#[allow(dead_code)] // Disabled in registry pending allowlist sandbox; kept for re-enable.
+// Legacy direct-shell implementation retained for comparison only. It is not
+// registered; all model-authored code must use the Supervisor-owned provider.
+#[allow(dead_code)]
 async fn exec_run_command(root: &Path, args: &str) -> Result<String, String> {
     let cmd = parse_arg(args, "cmd")?;
     let blocked = [
@@ -231,4 +289,104 @@ async fn exec_run_command(root: &Path, args: &str) -> Result<String, String> {
         "stderr": &stderr[..stderr.len().min(2048)],
     })
     .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use kaguya_supervisor::app::SupervisorApp;
+    use kaguya_supervisor::config::{ResolvedRuntimeConfig, RuntimeConfig, SandboxConfig};
+    use kaguya_supervisor::server;
+
+    use super::*;
+    use crate::lifecycle::LifecycleSupervisor;
+
+    #[tokio::test]
+    async fn sandbox_tool_dispatch_completes_full_supervisor_chain() {
+        let supervisor = SupervisorApp::new(ResolvedRuntimeConfig {
+            config: RuntimeConfig {
+                profile: Some("test".into()),
+                supervisor_addr: "127.0.0.1:0".into(),
+                sandbox: SandboxConfig::default(),
+                processes: BTreeMap::new(),
+            },
+            base_dir: ".".into(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            server::serve_on(supervisor, listener).await.unwrap();
+        });
+
+        let sandbox = Arc::new(
+            SandboxClient::connect(format!("http://{addr}"))
+                .await
+                .unwrap(),
+        );
+        let lifecycle = LifecycleSupervisor::new();
+        let tools = ToolRegistry::new(
+            std::env::temp_dir(),
+            lifecycle.spawner(),
+            Some(Arc::clone(&sandbox)),
+        );
+        let (result_tx, mut result_rx) = mpsc::channel(1);
+
+        tools.dispatch(
+            "full-chain-conversation".into(),
+            "full-chain-request".into(),
+            "sandbox_exec".into(),
+            r#"{"language":"python","code":"print(21 * 2)"}"#.into(),
+            result_tx,
+        );
+
+        let result = result_rx.recv().await.expect("P3 ToolResult");
+        let InputEvent::ToolResult {
+            request_id,
+            tool_name,
+            content,
+        } = result
+        else {
+            panic!("expected ToolResult");
+        };
+        assert_eq!(request_id, "full-chain-request");
+        assert_eq!(tool_name, "sandbox_exec");
+        println!("full-chain P3 ToolResult: {content}");
+        let output: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(output["exit_code"], 0, "{content}");
+        assert!(
+            output["stdout"].as_str().unwrap().contains("42"),
+            "{content}"
+        );
+
+        sandbox.release().await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn sandbox_dispatch_without_client_returns_canonical_error_shape() {
+        let lifecycle = LifecycleSupervisor::new();
+        let tools = ToolRegistry::new(std::env::temp_dir(), lifecycle.spawner(), None);
+        let (result_tx, mut result_rx) = mpsc::channel(1);
+
+        tools.dispatch(
+            "conversation".into(),
+            "request".into(),
+            "sandbox_exec".into(),
+            r#"{"language":"python","code":"print(1)"}"#.into(),
+            result_tx,
+        );
+
+        let result = result_rx.recv().await.expect("P3 ToolResult");
+        let InputEvent::ToolResult { content, .. } = result else {
+            panic!("expected ToolResult");
+        };
+        let output: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(output["stdout"], "");
+        assert_eq!(output["stderr"], "");
+        assert_eq!(output["exit_code"], -1);
+        assert_eq!(output["timed_out"], false);
+        assert_eq!(output["truncated"], false);
+        assert_eq!(output["error"], "sandbox disabled");
+    }
 }

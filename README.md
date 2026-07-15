@@ -43,7 +43,13 @@ The result: Responsive voice interaction that doesn't compromise on capability, 
 
 ## How it works
 
-### The three-process architecture
+### The supervised runtime architecture
+
+**🧭 Supervisor (Rust)** — The launcher
+
+- Constructs and monitors the configured process graph
+- Owns Sandbox Provider selection, opaque handles, resource limits, and teardown
+- Exposes runtime status and lifecycle controls to the frontend
 
 **🦀 Gateway (Rust)** — The conductor
 
@@ -67,7 +73,8 @@ The result: Responsive voice interaction that doesn't compromise on capability, 
 
 **🛠️ Toolkit (TypeScript)** — The hands
 
-- Sandboxed tool execution with workspace isolation
+- Tool semantics and result correlation stay in Gateway
+- Code execution is delegated through a Supervisor-owned sandbox handle
 - MCP client for extensibility
 
 ### Fast path example
@@ -141,7 +148,7 @@ Should work on most modern NVIDIA GPUs with 12+ GB VRAM. Cloud fallbacks (Deepgr
 - **Rust** (`rustup`) — for the Gateway
 - **Python 3.11+** + **uv** — for the Talker (uv manages the Python interpreter and venv)
 - **Node.js 20+** with **npm** — for the Reasoner / Toolkit
-- **`buf`** + **`protoc`** — for proto generation and lint (Rust uses tonic-build's eager generation; Python regen is optional, stubs are committed)
+- **`buf`** — for proto linting (Rust builds use a vendored `protoc`; Python regen is optional and its stubs are committed)
 - **llama.cpp / LM Studio** (or any OpenAI-compatible server) running Qwen3-8B at `http://localhost:1234`
 - **CUDA-capable GPU** with 12+ GB VRAM recommended for the LLM
 

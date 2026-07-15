@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 async-stream = "0.3"
 axum = "0.7"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -23,6 +24,23 @@ tonic = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+[features]
+# Windows Job Object sandbox provider. Off by default because the native
+# provider remains the zero-dependency self-hosting default.
+sandbox-jobobject = ["dep:windows"]
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+optional = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+]
 
 [build-dependencies]
+protoc-bin-vendored = "3.2.0"
 tonic-build = "0.12"
