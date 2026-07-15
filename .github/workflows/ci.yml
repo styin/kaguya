@@ -33,6 +33,95 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --all-targets
 
+  supervisor:
+    name: Supervisor (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: supervisor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: supervisor
+      - run: cargo fmt --check
+      - run: cargo test --all-targets
+
+  sandbox-docker:
+    name: Sandbox Docker (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: supervisor
+      - name: Build sandbox image
+        run: make sandbox-image
+      - name: Run Docker backend contract
+        run: >-
+          cargo test --manifest-path supervisor/Cargo.toml
+          --test sandbox_backend_contract
+          docker_backend_contract_when_available
+          -- --exact --nocapture
+        env:
+          KAGUYA_REQUIRE_DOCKER: "1"
+
+  sandbox-bubblewrap:
+    name: Sandbox Bubblewrap (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: supervisor
+      - name: Install Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+      - name: Run Bubblewrap backend contract
+        run: >-
+          cargo test --manifest-path supervisor/Cargo.toml
+          --test sandbox_backend_contract
+          bubblewrap_backend_contract_when_available
+          -- --exact --nocapture
+        env:
+          KAGUYA_REQUIRE_BUBBLEWRAP: "1"
+
+  sandbox-job-object:
+    name: Sandbox Job Object (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: supervisor
+      - name: Run Job Object backend contract
+        run: >-
+          cargo test --manifest-path supervisor/Cargo.toml
+          --features sandbox-jobobject
+          --test sandbox_backend_contract
+          job_object_backend_contract_when_available
+          -- --exact --nocapture
+
   talker:
     name: Talker (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

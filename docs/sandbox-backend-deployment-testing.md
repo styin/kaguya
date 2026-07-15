@@ -27,6 +27,26 @@ supervisor/tests/sandbox_backend_contract.rs
 | `job_object` | Windows + `--features sandbox-jobobject` | Windows resource/process boundary, not filesystem/network isolation | Passed |
 | `bubblewrap` | Linux + `bwrap` | Linux namespace isolation | Not runnable on Windows; gated for Linux CI |
 
+Bubblewrap is Linux-specific. Its Linux CI result does not provide macOS
+coverage; macOS is covered by the native Supervisor test matrix, with Docker
+Desktop compatibility remaining a separate optional deployment check.
+
+## Automated CI coverage
+
+Pull requests run the Supervisor test suite on Linux, macOS, and Windows, plus
+three backend-specific contract jobs:
+
+| CI job | Host | Required backend |
+| --- | --- | --- |
+| `Sandbox Docker (ubuntu-latest)` | Linux | Docker Engine + `kaguya-sandbox:latest` |
+| `Sandbox Bubblewrap (ubuntu-latest)` | Linux | Bubblewrap |
+| `Sandbox Job Object (windows-latest)` | Windows | `sandbox-jobobject` feature |
+
+The Docker and Bubblewrap jobs set `KAGUYA_REQUIRE_DOCKER` and
+`KAGUYA_REQUIRE_BUBBLEWRAP`, respectively. When set, missing prerequisites fail
+the contract instead of taking the permissive local-development skip path.
+This ensures a green backend-specific CI job means the backend contract ran.
+
 ## Common commands
 
 Run the backend contract suite:

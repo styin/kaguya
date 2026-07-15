@@ -226,10 +226,18 @@ async fn native_backend_contract() {
 async fn docker_backend_contract_when_available() {
     let image = SandboxConfig::default().image;
     if !docker_ok(&["version"]).await {
+        assert!(
+            std::env::var_os("KAGUYA_REQUIRE_DOCKER").is_none(),
+            "Docker backend contract is required, but the Docker CLI or daemon is unavailable"
+        );
         eprintln!("skipping docker backend contract: docker CLI/daemon unavailable");
         return;
     }
     if !docker_image_exists(&image) {
+        assert!(
+            std::env::var_os("KAGUYA_REQUIRE_DOCKER").is_none(),
+            "Docker backend contract is required, but image {image} is unavailable"
+        );
         eprintln!("skipping docker backend contract: image {image} not found");
         return;
     }
@@ -241,6 +249,10 @@ async fn docker_backend_contract_when_available() {
 #[tokio::test]
 async fn bubblewrap_backend_contract_when_available() {
     if !command_ok("bwrap", &["--version"]) {
+        assert!(
+            std::env::var_os("KAGUYA_REQUIRE_BUBBLEWRAP").is_none(),
+            "Bubblewrap backend contract is required, but bwrap is unavailable"
+        );
         eprintln!("skipping bubblewrap backend contract: bwrap unavailable");
         return;
     }

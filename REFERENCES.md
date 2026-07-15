@@ -625,3 +625,44 @@ behavior is verified after Supervisor ownership.
   https://manpages.debian.org/unstable/bubblewrap/bwrap.1.en.html
 - Windows Job Objects:
   https://learn.microsoft.com/windows/win32/procthread/job-objects
+
+---
+
+## REF-018 — Mandatory Per-Backend Sandbox CI by Supported Host
+
+**Decision:** Pull requests run the Supervisor suite on Linux, macOS, and
+Windows. Backend-specific sandbox contracts are mandatory on the host that
+implements each isolation mechanism:
+
+| Contract | Required CI host | Reason |
+| --- | --- | --- |
+| Docker | Linux | Exercises the container contract on GitHub-hosted Docker Engine without requiring Docker Desktop virtualization. |
+| Bubblewrap | Linux | Bubblewrap is implemented with Linux user, mount, PID, and network namespaces; it does not provide macOS coverage. |
+| Job Object | Windows | Job Objects are a Windows kernel facility and the backend is compiled only with `--features sandbox-jobobject`. |
+
+Normal local tests retain REF-017's environment-gated skip behavior. Dedicated
+CI jobs set `KAGUYA_REQUIRE_DOCKER` or `KAGUYA_REQUIRE_BUBBLEWRAP`, converting a
+missing runtime or image into a failure. This distinguishes "contract passed"
+from "backend was unavailable" without making optional local dependencies
+mandatory for every contributor.
+
+macOS is covered by the native Supervisor matrix. Docker Desktop compatibility
+on macOS and Windows is a deployment-specific scheduled or release-candidate
+check, not a substitute for the mandatory Linux Docker contract. Those desktop
+checks require environments with their virtualization layers configured and
+are intentionally outside the per-PR hosted-runner gate.
+
+**Supersedes:** REF-017 only where Docker and Bubblewrap availability is treated
+as optional in dedicated CI jobs. REF-017 remains authoritative for local test
+gating and the shared contract's numerical defaults.
+
+**Sources:**
+
+- GitHub-hosted runner operating systems and virtualization limitations:
+  https://docs.github.com/en/actions/concepts/runners/github-hosted-runners
+- Bubblewrap Linux namespace sandbox:
+  https://github.com/containers/bubblewrap
+- Docker Engine CI integration:
+  https://docs.docker.com/build/ci/github-actions/
+- Windows Job Objects:
+  https://learn.microsoft.com/windows/win32/procthread/job-objects
