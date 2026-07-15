@@ -76,7 +76,7 @@ fn base_config(backend: SandboxBackendKind) -> SandboxConfig {
     SandboxConfig {
         backend,
         mode: SandboxModeKind::SingleUser,
-        default_timeout_secs: 1,
+        default_timeout_secs: 3,
         max_output_bytes: 32,
         pool_size: 0,
         ..SandboxConfig::default()
@@ -136,7 +136,7 @@ async fn output_truncation(mgr: &SandboxManager, name: &str) {
 async fn timeout_returns_promptly(mgr: &SandboxManager, name: &str) {
     let session = format!("{name}-contract-timeout");
     let output = tokio::time::timeout(
-        Duration::from_secs(7),
+        Duration::from_secs(10),
         mgr.exec_from_json(
             &session,
             r#"{"language":"python","code":"import time; time.sleep(30)"}"#,

@@ -78,8 +78,8 @@ jobs:
           KAGUYA_REQUIRE_DOCKER: "1"
 
   sandbox-bubblewrap:
-    name: Sandbox Bubblewrap (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: Sandbox Bubblewrap (ubuntu-24.04)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -89,10 +89,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: supervisor
-      - name: Install Bubblewrap
+      - name: Install Bubblewrap and AppArmor profile
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y apparmor-profiles apparmor-utils bubblewrap
+          sudo install -m 0644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+      - name: Verify Bubblewrap isolation prerequisites
+        run: |
+          uname -a
+          lsb_release -ds
+          dpkg-query -W -f='${Package} ${Version}\n' \
+            apparmor apparmor-profiles bubblewrap
+          sysctl kernel.apparmor_restrict_unprivileged_userns
+          sudo aa-status
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "1"
+          bwrap --ro-bind / / --unshare-all --die-with-parent -- true
       - name: Run Bubblewrap backend contract
         run: >-
           cargo test --manifest-path supervisor/Cargo.toml

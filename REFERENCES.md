@@ -666,3 +666,35 @@ gating and the shared contract's numerical defaults.
   https://docs.docker.com/build/ci/github-actions/
 - Windows Job Objects:
   https://learn.microsoft.com/windows/win32/procthread/job-objects
+
+---
+
+## REF-019 — Cross-Platform Sandbox Contract Timing Budget
+
+**Decision:** The shared sandbox backend contract uses the following test-only
+timing values:
+
+| Test setting | Value | Purpose |
+| --- | ---: | --- |
+| `default_timeout_secs` | `3` | Allow interpreter and sandbox startup on slower hosted runners while keeping timeout tests short. |
+| outer timeout wait | `10s` | Bound backend cleanup while exceeding Docker's configured timeout plus its 5-second internal cleanup allowance. |
+
+The production default remains 30 seconds.
+
+**Rationale:** The original 1-second contract deadline was shorter than Python
+startup on a Windows hosted runner, so an ordinary session-isolation probe was
+misclassified as a timeout. Three seconds preserves a fast timeout regression
+test but provides startup headroom. The 10-second outer bound remains strict
+enough to detect cleanup hangs and is greater than Docker's 8-second maximum
+path for a 3-second request timeout plus its internal 5-second allowance.
+
+**Supersedes:** REF-017 only for the shared contract's 1-second default timeout
+and 7-second outer wait. REF-017 remains authoritative for the other contract
+settings and environment gates.
+
+**Sources:**
+
+- Failed Windows hosted-runner contract showing a startup timeout:
+  https://github.com/styin/kaguya/actions/runs/29430087456/job/87402552734
+- Tokio timeout behavior:
+  https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
