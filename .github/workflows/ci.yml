@@ -55,7 +55,7 @@ jobs:
         with:
           workspaces: supervisor
       - run: cargo fmt --check
-      - run: cargo test --all-targets
+      - run: cargo test --all-targets -- --test-threads=1
 
   sandbox-docker:
     name: Sandbox Docker (ubuntu-latest)
