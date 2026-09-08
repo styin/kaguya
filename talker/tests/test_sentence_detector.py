@@ -6,7 +6,6 @@ Organized by failure category so a failing test name immediately tells you
 
 from inference.sentence_detector import SentenceDetector
 
-
 # ── Helpers ──────────────────────────────────────────────────
 
 

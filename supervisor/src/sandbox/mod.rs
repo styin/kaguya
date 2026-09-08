@@ -17,6 +17,7 @@ mod native;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;

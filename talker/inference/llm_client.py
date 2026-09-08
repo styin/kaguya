@@ -169,15 +169,15 @@ async def _parse_sse_cancellable(
                     # barge-in / reasoner-result cancellation (B12).
                     try:
                         await task
-                    except BaseException:  # noqa: BLE001 — expected on abort
-                        pass
+                    except BaseException as exc:  # noqa: BLE001 — expected on abort
+                        logger.debug("Drained cancelled SSE task: %r", exc)
 
                 if cancel_task in done:
                     line_task.cancel()
                     try:
                         await line_task
-                    except BaseException:  # noqa: BLE001 — expected on abort
-                        pass
+                    except BaseException as exc:  # noqa: BLE001 — expected on abort
+                        logger.debug("Drained cancelled SSE line task: %r", exc)
                     return
 
                 line = line_task.result()

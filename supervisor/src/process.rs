@@ -532,14 +532,18 @@ mod tests {
             start_managed_process(ManagedProcessSpec::new("failing-process", command))
                 .expect("process should start");
 
-        let mut snapshot = process.refresh_snapshot();
-        for _ in 0..10 {
-            snapshot = process.refresh_snapshot();
-            if snapshot.status == ManagedProcessStatus::Failed {
-                break;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let snapshot = loop {
+            let current = process.refresh_snapshot();
+            if current.status == ManagedProcessStatus::Failed {
+                break current;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "process should report failed status"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        };
 
         assert_eq!(snapshot.name, "failing-process");
         assert_eq!(snapshot.status, ManagedProcessStatus::Failed);

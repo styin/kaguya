@@ -64,12 +64,15 @@ def test_concurrent_emit_stress():
         results: list[str | None] = [None, None]
         barrier = threading.Barrier(2)
 
-        def race(index: int, method):
+        def race(index: int, method, *, barrier=barrier, results=results):
             barrier.wait()
             results[index] = method()
 
         t1 = threading.Thread(target=race, args=(0, td.on_silence_tick))
-        t2 = threading.Thread(target=race, args=(1, lambda: td.on_partial("Done.")))
+        t2 = threading.Thread(
+            target=race,
+            args=(1, lambda td=td: td.on_partial("Done.")),
+        )
         t1.start()
         t2.start()
         t1.join(timeout=2)

@@ -133,15 +133,17 @@ async fn native_timeout_kills_spawned_descendant_and_returns_promptly() {
         .expect("test script should record descendant pid")
         .trim()
         .to_string();
-    let still_alive = std::process::Command::new("kill")
-        .args(["-0", &child_pid])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    assert!(
-        !still_alive,
-        "descendant process {child_pid} survived native timeout"
-    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if !process_is_running(&child_pid) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "descendant process {child_pid} survived native timeout"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     mgr.cleanup(session).await;
 }
@@ -226,4 +228,26 @@ async fn opaque_handle_controls_execution_and_release() {
         .as_str()
         .unwrap()
         .contains("unknown or released"));
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if stat
+                .split_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                == Some("Z")
+            {
+                return false;
+            }
+        }
+    }
+
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }

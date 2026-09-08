@@ -41,6 +41,7 @@ def test_turn_detector_no_emit_before_vad_stop():
 
 def test_turn_detector_emits_after_vad_stop_complete_sentence():
     import time
+
     from config import TalkerConfig
     from voice.turn_detector import TurnDetector
 
@@ -58,6 +59,7 @@ def test_turn_detector_emits_after_vad_stop_complete_sentence():
 
 def test_turn_detector_waits_for_incomplete_sentence():
     import time
+
     from config import TalkerConfig
     from voice.turn_detector import TurnDetector
 
@@ -74,6 +76,7 @@ def test_turn_detector_waits_for_incomplete_sentence():
 
 def test_turn_detector_unconditional_emit_at_800ms():
     import time
+
     from config import TalkerConfig
     from voice.turn_detector import TurnDetector
 

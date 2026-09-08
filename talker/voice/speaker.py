@@ -21,7 +21,7 @@ Spoken/unspoken split strategy (conservative undercounting):
 
 import logging
 
-from RealtimeTTS import TextToAudioStream, KokoroEngine
+from RealtimeTTS import KokoroEngine, TextToAudioStream
 
 from config import TalkerConfig
 

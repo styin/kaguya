@@ -167,6 +167,4 @@ class TurnDetector:
             return False
         if _INCOMPLETE_ENDINGS.search(text):
             return False
-        if _TERMINAL_PUNCT.search(text):
-            return True
-        return False
+        return bool(_TERMINAL_PUNCT.search(text))

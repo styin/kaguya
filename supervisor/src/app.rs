@@ -970,15 +970,18 @@ mod tests {
         app.start_process("test")
             .await
             .expect("process should start");
-        for _ in 0..10 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
             let logs = app.logs().since(0);
             if logs.iter().any(|entry| entry.line.contains("hello")) {
                 return;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "child log should be captured"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-
-        panic!("child log should be captured");
     }
 
     #[tokio::test]

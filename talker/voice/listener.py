@@ -11,10 +11,9 @@ import struct
 import time
 
 from config import TalkerConfig
+from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
 from voice.opus_decoder import OpusDecoder
 from voice.turn_detector import TurnDetector
-
-from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +207,7 @@ class Listener:
         while True:
             try:
                 recorder.text(self._on_full_transcript)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("recorder.text() raised")
                 # Brief pause so we don't tight-loop on a persistent failure.
                 time.sleep(0.5)
