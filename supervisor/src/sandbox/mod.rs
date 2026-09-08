@@ -25,10 +25,14 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::{SandboxBackendKind, SandboxConfig, SandboxModeKind};
+use crate::telemetry::TelemetryHub;
+
+const SANDBOX_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 // ──────────────────────────────────────────
 // Shared types
@@ -254,6 +258,11 @@ impl SandboxManager {
         if !self.enabled {
             anyhow::bail!("sandbox is disabled");
         }
+        debug!(
+            %session,
+            backend = self.backend.name(),
+            "acquiring sandbox backend session"
+        );
         self.backend
             .acquire(session)
             .await
@@ -262,6 +271,11 @@ impl SandboxManager {
 
     pub async fn cleanup(&self, session: &str) {
         if self.enabled {
+            debug!(
+                %session,
+                backend = self.backend.name(),
+                "cleaning up sandbox backend session"
+            );
             self.backend.cleanup(session).await;
         }
     }
@@ -332,6 +346,7 @@ impl SandboxManager {
 pub struct SandboxProvider {
     manager: Arc<SandboxManager>,
     handles: Arc<Mutex<HashMap<String, String>>>,
+    telemetry: Option<TelemetryHub>,
 }
 
 impl SandboxProvider {
@@ -339,11 +354,17 @@ impl SandboxProvider {
         Self {
             manager: Arc::new(manager),
             handles: Arc::new(Mutex::new(HashMap::new())),
+            telemetry: None,
         }
     }
 
     pub fn disabled() -> Self {
         Self::new(SandboxManager::disabled())
+    }
+
+    pub fn with_telemetry(mut self, telemetry: TelemetryHub) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -373,6 +394,7 @@ impl SandboxProvider {
             .iter()
             .find(|(_, existing)| *existing == session)
         {
+            debug!(%session, %handle, "reusing sandbox handle");
             return Ok(handle.clone());
         }
 
@@ -384,13 +406,52 @@ impl SandboxProvider {
         }
         let handle = Uuid::new_v4().to_string();
         handles.insert(handle.clone(), session.to_string());
+        info!(
+            %session,
+            %handle,
+            backend = self.backend_name(),
+            "acquired sandbox handle"
+        );
         Ok(handle)
     }
 
     pub async fn execute(&self, handle: &str, args_json: &str) -> String {
         let session = self.handles.lock().await.get(handle).cloned();
         match session {
-            Some(session) => self.manager.exec_from_json(&session, args_json).await,
+            Some(session) => {
+                debug!(
+                    %session,
+                    %handle,
+                    backend = self.backend_name(),
+                    "executing sandbox request"
+                );
+                let started = std::time::Instant::now();
+                let content = self.manager.exec_from_json(&session, args_json).await;
+                if let Some(telemetry) = &self.telemetry {
+                    let result = serde_json::from_str::<serde_json::Value>(&content)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    telemetry
+                        .emit(
+                            "supervisor",
+                            "sandbox.exec.completed",
+                            Some(session.clone()),
+                            None,
+                            Some(handle.to_string()),
+                            serde_json::json!({
+                                "backend": self.backend_name(),
+                                "duration_ms": started.elapsed().as_millis() as u64,
+                                "exit_code": result.get("exit_code").and_then(|v| v.as_i64()),
+                                "timed_out": result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false),
+                                "truncated": result.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
+                                "stdout_bytes": result.get("stdout").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
+                                "stderr_bytes": result.get("stderr").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
+                                "error": result.get("error").cloned().unwrap_or(serde_json::Value::Null),
+                            }),
+                        )
+                        .await;
+                }
+                content
+            }
             None => ExecResult::backend_error("unknown or released sandbox handle").to_tool_json(),
         }
     }
@@ -401,6 +462,7 @@ impl SandboxProvider {
             anyhow::bail!("unknown or released sandbox handle");
         };
         self.manager.cleanup(&session).await;
+        info!(%session, %handle, "released sandbox handle");
         Ok(())
     }
 
@@ -511,13 +573,13 @@ pub(crate) async fn run_spawned(
         Err(_) => {
             timed_out = true;
             kill_tree(&mut child).await;
-            let _ = child.wait().await;
+            let _ = tokio::time::timeout(SANDBOX_CLEANUP_GRACE, child.wait()).await;
             -1
         }
     };
 
-    let (out, ot) = out_task.await.unwrap_or_default();
-    let (err, et) = err_task.await.unwrap_or_default();
+    let (out, ot) = collect_reader_task(out_task).await;
+    let (err, et) = collect_reader_task(err_task).await;
     ExecResult {
         stdout: out,
         stderr: err,
@@ -525,6 +587,17 @@ pub(crate) async fn run_spawned(
         timed_out,
         truncated: ot || et,
         backend_error: None,
+    }
+}
+
+async fn collect_reader_task(mut task: JoinHandle<(String, bool)>) -> (String, bool) {
+    match tokio::time::timeout(SANDBOX_CLEANUP_GRACE, &mut task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => (String::new(), false),
+        Err(_) => {
+            task.abort();
+            (String::new(), true)
+        }
     }
 }
 
@@ -556,14 +629,16 @@ pub(crate) async fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         if let Some(pid) = child.id() {
-            let process_group = format!("-{pid}");
-            let _ = Command::new("kill")
-                .args(["-KILL", &process_group])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-            return;
+            let pgid = pid as libc::pid_t;
+            let rc = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            if rc == 0 {
+                return;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            warn!(pid, %error, "failed to signal sandbox process group; falling back to child kill");
         }
     }
     let _ = child.start_kill();

@@ -24,6 +24,7 @@ pub mod error;
 pub mod lifecycle;
 pub mod rag;
 pub mod sandbox;
+pub mod telemetry;
 pub mod tools;
 
 /// gRPC/TCP client wrappers for adjacent processes.

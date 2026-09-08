@@ -111,7 +111,12 @@ impl ToolRegistry {
         // ToolResult path remains unchanged.
         if tool_name == "sandbox_exec" {
             let sandbox = self.sandbox.clone();
-            info!(id = %request_id, "dispatching sandbox_exec");
+            info!(
+                conversation_id = %conversation_id,
+                request_id = %request_id,
+                tool = "sandbox_exec",
+                "dispatching sandbox tool"
+            );
             self.tasks
                 .spawn(format!("tool_dispatch:{tool_name}"), async move {
                     let content = match sandbox {
@@ -130,7 +135,12 @@ impl ToolRegistry {
         }
 
         // ── Filesystem tools ──
-        info!(tool = %tool_name, id = %request_id, "dispatching tool");
+        info!(
+            conversation_id = %conversation_id,
+            request_id = %request_id,
+            tool = %tool_name,
+            "dispatching local tool"
+        );
         let root = self.workspace_root.clone();
 
         self.tasks
@@ -147,7 +157,12 @@ impl ToolRegistry {
                 let content = match result {
                     Ok(o) => o,
                     Err(e) => {
-                        error!(tool = %tool_name, err = %e, "tool failed");
+                        error!(
+                            request_id = %request_id,
+                            tool = %tool_name,
+                            err = %e,
+                            "tool failed"
+                        );
                         serde_json::json!({ "error": e }).to_string()
                     }
                 };
@@ -227,7 +242,11 @@ async fn exec_read_file(root: &Path, args: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     let trunc = if content.len() > 8192 {
-        format!("{}…[truncated, {} bytes]", &content[..8192], content.len())
+        format!(
+            "{}...[truncated, {} bytes]",
+            &content[..8192],
+            content.len()
+        )
     } else {
         content
     };

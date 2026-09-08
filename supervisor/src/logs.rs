@@ -19,6 +19,8 @@ pub struct LogEntry {
     pub timestamp: String,
     pub source: String,
     pub stream: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
     pub line: String,
 }
 
@@ -54,6 +56,7 @@ impl LogStore {
             timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             source: normalize_source(&source.into()),
             stream: stream.into(),
+            level: detect_level(&line),
             line,
         };
 
@@ -111,6 +114,19 @@ fn normalize_source(source: &str) -> String {
     }
 }
 
+fn detect_level(line: &str) -> Option<String> {
+    let upper = line.to_ascii_uppercase();
+    for level in ["ERROR", "WARN", "WARNING", "INFO", "DEBUG", "TRACE"] {
+        if upper
+            .split(|ch: char| !ch.is_ascii_alphabetic())
+            .any(|part| part == level)
+        {
+            return Some(if level == "WARNING" { "WARN" } else { level }.to_string());
+        }
+    }
+    None
+}
+
 fn is_transient_status_line(line: &str) -> bool {
     let trimmed = line.trim();
     if let Some(first) = trimmed.chars().next() {
@@ -160,6 +176,7 @@ mod tests {
 
         let entries = logs.since(0);
         assert_eq!(entries[0].line, "2026-05-29 INFO ready");
+        assert_eq!(entries[0].level.as_deref(), Some("INFO"));
     }
 
     #[test]
@@ -171,5 +188,19 @@ mod tests {
         let entries = logs.since(0);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].line, "real log");
+    }
+
+    #[test]
+    fn push_normalizes_python_warning_level() {
+        let logs = LogStore::new();
+        logs.push(
+            "talker_standalone",
+            "stderr",
+            "2026-08-15 10:00:00 [voice.listener] WARNING: microphone unavailable",
+        );
+
+        let entries = logs.since(0);
+        assert_eq!(entries[0].source, "talker");
+        assert_eq!(entries[0].level.as_deref(), Some("WARN"));
     }
 }

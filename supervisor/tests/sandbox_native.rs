@@ -146,6 +146,38 @@ async fn native_timeout_kills_spawned_descendant_and_returns_promptly() {
     mgr.cleanup(session).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn native_reader_cleanup_is_bounded_when_descendant_keeps_pipe_open() {
+    let cfg = SandboxConfig::default();
+    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
+    let session = "test-conv-reader-pipe";
+    let session_dir = std::env::temp_dir().join("kaguya-sandbox").join(session);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        mgr.exec_from_json(
+            session,
+            r#"{"language":"bash","code":"sleep 30 & echo $! > child.pid; exit 0"}"#,
+        ),
+    )
+    .await
+    .expect("reader cleanup should not hang on inherited pipes");
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["exit_code"], 0, "{output}");
+    assert_eq!(
+        value["truncated"], true,
+        "aborted reader cleanup should mark output truncated: {output}"
+    );
+
+    if let Ok(child_pid) = tokio::fs::read_to_string(session_dir.join("child.pid")).await {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", child_pid.trim()])
+            .status();
+    }
+    mgr.cleanup(session).await;
+}
+
 #[tokio::test]
 async fn rejects_unknown_language() {
     let cfg = SandboxConfig::default();

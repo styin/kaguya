@@ -698,3 +698,151 @@ settings and environment gates.
   https://github.com/styin/kaguya/actions/runs/29430087456/job/87402552734
 - Tokio timeout behavior:
   https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
+
+---
+
+## REF-020 — Phase 1 Telemetry via Supervisor Log Snapshot and SSE
+
+**Decision:** Phase 1 end-to-end telemetry is tested through the Supervisor log
+pipeline rather than the proto `Telemetry` RPC. Supervisor captures managed
+process stdout/stderr, stores normalized entries in `LogStore`, exposes snapshot
+reads through `/api/logs`, and streams new entries through `/api/logs/stream`.
+Each log entry may include a derived `level` field (`ERROR`, `WARN`, `INFO`,
+`DEBUG`, `TRACE`) when the line contains a recognizable level token.
+
+**Rationale:**
+
+1. The current implementation already uses Supervisor as the process owner and
+   log aggregation boundary, so this path tests the real observable behavior
+   used by the dev console.
+2. The proto `Telemetry` RPC is documented as Phase 1 stub-only; using it as the
+   primary acceptance path would test a planned interface rather than the
+   running system.
+3. Deriving a normalized level in Supervisor keeps the frontend simple while
+   preserving backwards compatibility: existing clients can ignore the added
+   field, and raw log text remains unchanged.
+4. Correlation fields (`conversation_id`, `request_id`, `tool`, `backend`,
+   `handle`, `session`) are emitted by producers as structured log fields rather
+   than parsed from payload text, which keeps the log stream useful without
+   exposing full tool code or large data payloads.
+
+**Supersedes:** none. Complements REF-017 by defining how sandbox contract
+activity is observed end-to-end.
+
+**Sources:**
+
+- Kaguya dev endpoint/logging specification:
+  `docs/spec-endpoint-v0.1.0.md`
+- Kaguya implementation plan (`Telemetry` stub-only in Phase 1):
+  `docs/implementation-plan-v0.1.0.md`
+- Server-Sent Events overview:
+  https://html.spec.whatwg.org/multipage/server-sent-events.html
+
+---
+
+## REF-021 — Bounded Sandbox Timeout Cleanup After Process-Group Kill
+
+**Decision:** After a sandbox execution times out, Supervisor directly signals
+the Unix process group with `SIGKILL` instead of spawning an external `kill`
+process. It then bounds post-kill child waiting and stdout/stderr reader joins
+with a 2s cleanup grace. Reader joins use the same bound even after a normal
+child exit, because a descendant can inherit stdout/stderr pipes and keep them
+open after the direct child exits.
+
+**Rationale:**
+
+1. Spawning `kill -KILL -<pgid>` and ignoring its result left cleanup
+   nondeterministic: a signaling failure could be followed by unbounded
+   `child.wait()` and unbounded stdout/stderr reader joins.
+2. Direct `kill(-pgid, SIGKILL)` reports errors synchronously. `ESRCH` is
+   treated as "already exited"; other errors fall back to direct child kill.
+3. The 2s cleanup grace is intentionally short because the execution timeout
+   has already fired. Cleanup should protect the Supervisor from pipe/process
+   leaks, not grant more user-code runtime.
+4. Aborting reader tasks on cleanup timeout returns a deterministic tool result
+   and marks output as truncated, preserving the contract that suspicious or
+   incomplete output is visible to the caller.
+
+**Supersedes:** strengthens REF-017's timeout cleanup contract for Unix native
+and Unix-backed execution paths.
+
+**Sources:**
+
+- POSIX `kill()` process group semantics:
+  https://pubs.opengroup.org/onlinepubs/9699919799/functions/kill.html
+- Tokio process documentation:
+  https://docs.rs/tokio/latest/tokio/process/index.html
+
+---
+
+## REF-022 — Supervisor Process Resource Sampling
+
+**Decision:** Supervisor samples managed process resource usage once per second
+and emits one `process.resource.sample` telemetry event per live managed PID.
+Each event includes the sample batch id, process name, label, PID, status,
+uptime, restart count, CPU percent, resident memory bytes, and virtual memory
+bytes. External processes are excluded from PID sampling because Supervisor does
+not own their process handles.
+
+**Rationale:**
+
+1. Supervisor already owns managed process lifecycle and PID state, so resource
+   sampling belongs in the control plane rather than Gateway's conversation hot
+   path.
+2. A 1s cadence is responsive enough for a development console while avoiding
+   the overhead and noise of sub-second polling.
+3. Emitting one raw event per process keeps the event stream append-only and
+   easy to inspect; `sample_id` lets the metrics worker aggregate per-batch
+   totals without conflating separate samples.
+4. `sysinfo` provides a cross-platform abstraction over Windows, Linux, and
+   macOS process resource APIs, preserving Kaguya's cross-OS support invariant.
+
+**Supersedes:** none. Extends REF-020 with Supervisor-owned process resource
+telemetry.
+
+**Sources:**
+
+- `sysinfo` crate documentation:
+  https://docs.rs/sysinfo/0.38.4/sysinfo/
+- Kaguya cross-platform support requirements:
+  `AGENTS.md`
+
+---
+
+## REF-023 — Supervisor-Owned Raw Telemetry Event Hub
+
+**Decision:** Gateway and other runtime components emit raw telemetry events;
+Supervisor owns event buffering, SSE fan-out, and aggregate metrics. The initial
+Supervisor event hub uses a 10,000-event in-memory ring buffer, returns the last
+200 events for an unqualified snapshot request, and feeds a 4,096-event
+aggregation queue. Gateway uploads events through `POST /api/telemetry/events`
+without blocking the hot path.
+
+**Rationale:**
+
+1. Gateway remains the conversation hot path and only emits facts about a turn
+   (`rag.retrieve.completed`, `talker.dispatch.started`,
+   `talker.first_output`, `talker.first_sentence`).
+2. Supervisor already owns process orchestration, log capture, and sandbox
+   backend lifecycle, so it is the correct control-plane process for
+   cross-component aggregation and console-facing APIs.
+3. The 10,000-event ring mirrors the existing log buffer size in
+   `docs/spec-endpoint-v0.1.0.md`, keeping debug-memory behavior consistent
+   between logs and telemetry.
+4. Returning 200 events for `since=0` keeps first-load payloads bounded while
+   still giving the console enough recent context to render a useful timeline.
+5. A bounded 4,096-event aggregation queue prevents telemetry spikes from
+   creating unbounded memory growth; raw event storage/SSE still proceeds even
+   if aggregate metrics drop samples under extreme load.
+
+**Supersedes:** none. Extends REF-020 from log-stream telemetry to structured
+raw events and derived metrics.
+
+**Sources:**
+
+- Kaguya endpoint/logging specification:
+  `docs/spec-endpoint-v0.1.0.md`
+- Tokio `mpsc` bounded channel documentation:
+  https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
+- Server-Sent Events overview:
+  https://html.spec.whatwg.org/multipage/server-sent-events.html

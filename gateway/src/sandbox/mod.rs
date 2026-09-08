@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use crate::proto;
 
@@ -104,6 +105,12 @@ impl SandboxClient {
             Ok(handle) => handle,
             Err(error) => return error_json(error),
         };
+        debug!(
+            session_id = %session_id,
+            handle = %handle,
+            backend = self.backend.as_deref().unwrap_or("unknown"),
+            "forwarding sandbox execution to Supervisor"
+        );
         let response = self
             .http
             .post(format!("{}/api/sandbox/{handle}/execute", self.base_url))
@@ -137,14 +144,18 @@ impl SandboxClient {
                 .delete(format!("{}/api/sandbox/{handle}", self.base_url))
                 .send()
                 .await
+                .and_then(|response| response.error_for_status())
             {
-                tracing::warn!(%error, %handle, "failed to release Supervisor sandbox handle");
+                warn!(%error, %handle, "failed to release Supervisor sandbox handle");
+            } else {
+                info!(%handle, "released Supervisor sandbox handle");
             }
         }
     }
 
     async fn ensure_handle(&self, session_id: &str) -> Result<String, String> {
         if let Some(handle) = self.handles.lock().await.get(session_id).cloned() {
+            debug!(%session_id, %handle, "reusing Supervisor sandbox handle");
             return Ok(handle);
         }
 
@@ -183,7 +194,7 @@ impl SandboxClient {
                 .send()
                 .await
             {
-                tracing::warn!(
+                warn!(
                     %error,
                     %handle,
                     "failed to release duplicate Supervisor sandbox handle"
@@ -191,6 +202,12 @@ impl SandboxClient {
             }
             return Ok(existing);
         }
+        info!(
+            %session_id,
+            %handle,
+            backend = self.backend.as_deref().unwrap_or("unknown"),
+            "acquired Supervisor sandbox handle"
+        );
         Ok(handle)
     }
 }

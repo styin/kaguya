@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::talker_service_client::TalkerServiceClient;
+use crate::telemetry::TelemetryClient;
 
 /// Persistent gRPC client for the Talker process.
 ///
@@ -33,6 +34,7 @@ pub struct TalkerClient {
     tasks: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
+    telemetry: Option<TelemetryClient>,
 }
 
 impl TalkerClient {
@@ -53,7 +55,13 @@ impl TalkerClient {
             tasks,
             connection,
             reconnect,
+            telemetry: None,
         }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: TelemetryClient) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 
     pub fn readiness(&self) -> Readiness {
@@ -106,10 +114,29 @@ impl TalkerClient {
         let endpoint = self.endpoint.clone();
         let connection = self.connection.clone();
         let reconnect = self.reconnect;
+        let telemetry = self.telemetry.clone();
+        let conversation_id = ctx.conversation_id.clone();
+        let turn_id = ctx.turn_id.clone();
+        let dispatch_started = std::time::Instant::now();
 
         // Create the bidi channel and register the sender BEFORE spawning.
         // Capacity 64 ⇒ try_send for the start payload never blocks.
         let (tx, rx) = mpsc::channel::<proto::TalkerInput>(64);
+        if let Some(telemetry) = &telemetry {
+            telemetry.emit(
+                "talker.dispatch.started",
+                Some(conversation_id.clone()),
+                Some(turn_id.clone()),
+                None,
+                serde_json::json!({
+                    "history_count": ctx.history.len(),
+                    "retrieval_count": ctx.retrieval_results.len(),
+                    "memory_chars": ctx.memory_contents.chars().count(),
+                    "tool_count": ctx.tools.len(),
+                    "user_input_chars": ctx.user_input.chars().count(),
+                }),
+            );
+        }
         let _ = tx.try_send(proto::TalkerInput {
             payload: Some(proto::talker_input::Payload::Start(ctx)),
         });
@@ -146,6 +173,8 @@ impl TalkerClient {
                 }
             };
 
+            let mut first_output_sent = false;
+            let mut first_sentence_sent = false;
             loop {
                 tokio::select! {
                     _ = child.cancelled() => {
@@ -155,6 +184,37 @@ impl TalkerClient {
                     result = inbound.message() => {
                         match result {
                             Ok(Some(output)) => {
+                                if let Some(telemetry) = &telemetry {
+                                    if !first_output_sent {
+                                        first_output_sent = true;
+                                        telemetry.emit(
+                                            "talker.first_output",
+                                            Some(conversation_id.clone()),
+                                            Some(turn_id.clone()),
+                                            None,
+                                            serde_json::json!({
+                                                "duration_ms": dispatch_started.elapsed().as_millis() as u64,
+                                            }),
+                                        );
+                                    }
+                                    if !first_sentence_sent
+                                        && matches!(
+                                            output.payload.as_ref(),
+                                            Some(proto::talker_output::Payload::Sentence(_))
+                                        )
+                                    {
+                                        first_sentence_sent = true;
+                                        telemetry.emit(
+                                            "talker.first_sentence",
+                                            Some(conversation_id.clone()),
+                                            Some(turn_id.clone()),
+                                            None,
+                                            serde_json::json!({
+                                                "duration_ms": dispatch_started.elapsed().as_millis() as u64,
+                                            }),
+                                        );
+                                    }
+                                }
                                 if output_tx.send(output).await.is_err() { break; }
                             }
                             Ok(None) => break,
