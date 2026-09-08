@@ -158,8 +158,8 @@ jobs:
       - name: Install macOS audio libraries
         if: runner.os == 'macOS'
         run: brew install opus
-      - run: uvx ruff check .
-      - run: uvx ruff format --check .
+      - run: uvx --from ruff==0.16.6 ruff check .
+      - run: uvx --from ruff==0.16.6 ruff format --check .
       - run: uv venv
       - run: uv pip install pydantic-settings opuslib grpcio protobuf httpx pytest pytest-asyncio
       - run: uv run --no-project pytest tests/ -v
