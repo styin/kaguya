@@ -160,7 +160,7 @@ async fn native_reader_cleanup_is_bounded_when_descendant_keeps_pipe_open() {
         std::time::Duration::from_secs(5),
         mgr.exec_from_json(
             session,
-            r#"{"language":"bash","code":"sleep 30 & echo $! > child.pid; exit 0"}"#,
+            r#"{"language":"bash","code":"python3 - <<'PY'\nimport os\nimport signal\nimport sys\nimport time\n\npid = os.fork()\nif pid == 0:\n    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n    sys.stdout.flush()\n    time.sleep(30)\nelse:\n    with open('child.pid', 'w') as f:\n        f.write(str(pid))\n    sys.exit(0)\nPY"}"#,
         ),
     )
     .await
