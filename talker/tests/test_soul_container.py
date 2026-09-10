@@ -14,7 +14,6 @@ from inference.soul_container import (
     process,
 )
 
-
 # ── Category 1: Plain text (no tags) ────────────────────────
 
 

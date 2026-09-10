@@ -6,7 +6,6 @@ Organized by failure category so a failing test name immediately tells you
 
 from inference.sentence_detector import SentenceDetector
 
-
 # ── Helpers ──────────────────────────────────────────────────
 
 
@@ -447,7 +446,7 @@ class TestEdgeCases:
         assert sd.flush() is None
 
     def test_newline_as_whitespace(self):
-        """Newline counts as whitespace in \\s+ — boundary fires if uppercase follows."""
+        r"""Newline counts as whitespace in \\s+ — boundary fires if uppercase follows."""
         sentences = _feed_all("Done.\nNext.")
         assert sentences[0] == "Done."
 
@@ -460,7 +459,7 @@ class TestEdgeCases:
         assert sentences[0] == "First."
 
     def test_no_space_between_sentences(self):
-        """No whitespace between sentences → no boundary (requires \\s+)."""
+        r"""No whitespace between sentences → no boundary (requires \\s+)."""
         sentences = _feed_all("First.Second.")
         assert len(sentences) == 1  # no split, flushed as one
 

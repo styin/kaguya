@@ -19,7 +19,6 @@ import pytest
 
 from proto import kaguya_pb2_grpc  # type: ignore[import]
 
-
 HANDSHAKE_TIMEOUT_S = 2.0
 
 
@@ -123,8 +122,8 @@ async def test_second_stream_terminates_first():
     """Opening a second Stream while the first is live causes the first
     to be terminated. The second receives subsequent events; the first
     sees its inbound iterator close cleanly (no more events delivered)."""
-    from voice.listener import ListenerServiceImpl
     from proto import kaguya_pb2  # type: ignore[import]
+    from voice.listener import ListenerServiceImpl
 
     event_queue: asyncio.Queue = asyncio.Queue()
     servicer = ListenerServiceImpl(event_queue)
@@ -182,7 +181,7 @@ async def test_second_stream_terminates_first():
                 assert a_next == grpc.aio.EOF or a_next is None, (
                     f"client A must be terminated; instead read: {a_next}"
                 )
-            except (asyncio.TimeoutError, grpc.aio.AioRpcError):
+            except (TimeoutError, grpc.aio.AioRpcError):
                 pytest.fail("client A must be cleanly terminated, not left hanging")
 
             call_b.cancel()
@@ -195,8 +194,8 @@ async def test_replaced_stream_event_goes_to_live_client_only():
     """Stronger version of the above: enqueue events between A's open and
     B's open. After B replaces A, only B should receive the post-replace
     events — not split between them."""
-    from voice.listener import ListenerServiceImpl
     from proto import kaguya_pb2  # type: ignore[import]
+    from voice.listener import ListenerServiceImpl
 
     event_queue: asyncio.Queue = asyncio.Queue()
     servicer = ListenerServiceImpl(event_queue)

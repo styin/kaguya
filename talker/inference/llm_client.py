@@ -145,7 +145,7 @@ async def _parse_sse_cancellable(
     If cancel_event is set, the iterator returns immediately —
     no waiting for the next token.
     """
-    line_iter = response.aiter_lines().__aiter__()
+    line_iter = aiter(response.aiter_lines())
 
     while True:
         # Race the next SSE line against the cancel event.
@@ -169,15 +169,15 @@ async def _parse_sse_cancellable(
                     # barge-in / reasoner-result cancellation (B12).
                     try:
                         await task
-                    except BaseException:  # noqa: BLE001 — expected on abort
-                        pass
+                    except BaseException as exc:  # noqa: BLE001 — expected on abort
+                        logger.debug("Drained cancelled SSE task: %r", exc)
 
                 if cancel_task in done:
                     line_task.cancel()
                     try:
                         await line_task
-                    except BaseException:  # noqa: BLE001 — expected on abort
-                        pass
+                    except BaseException as exc:  # noqa: BLE001 — expected on abort
+                        logger.debug("Drained cancelled SSE line task: %r", exc)
                     return
 
                 line = line_task.result()
@@ -274,5 +274,5 @@ async def _strip_think_blocks(tokens: AsyncIterator[str]) -> AsyncIterator[str]:
 
 
 async def _anext(aiter: AsyncIterator) -> str:
-    """Wrapper for __anext__ to make it awaitable for asyncio.wait."""
-    return await aiter.__anext__()
+    """Wrapper for anext() to make it awaitable for asyncio.wait."""
+    return await anext(aiter)

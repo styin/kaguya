@@ -19,7 +19,6 @@ once we migrate to /v1/chat/completions.
 
 import re
 
-
 # Abbreviations that should NOT trigger a sentence boundary.
 _ABBREVS = re.compile(
     r"\b(?:Dr|Mr|Mrs|Ms|Prof|Sr|Jr|vs|etc|approx|dept|est|govt"
@@ -95,6 +94,4 @@ class SentenceDetector:
         """Return True if the boundary match is a known false positive."""
         if _ABBREVS.search(text):
             return True
-        if _URL.search(text):
-            return True
-        return False
+        return bool(_URL.search(text))

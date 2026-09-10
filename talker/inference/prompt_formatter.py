@@ -6,7 +6,7 @@ to system_sections after parts.append() — a no-op bug.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from inference.soul_container import VALID_EMOTIONS
 from proto import kaguya_pb2  # type: ignore[import]
@@ -70,7 +70,7 @@ def assemble_prompt(
     # 5. Current context
     context_lines: list[str] = []
     if ctx.timestamp_ms:
-        ts = datetime.fromtimestamp(ctx.timestamp_ms / 1000, tz=timezone.utc)
+        ts = datetime.fromtimestamp(ctx.timestamp_ms / 1000, tz=UTC)
         context_lines.append(f"Current time: {ts.isoformat()}")
     if ctx.active_tasks_json:
         context_lines.append(f"Active tasks: {ctx.active_tasks_json}")

@@ -28,8 +28,10 @@ use kaguya_gateway::pipeline::{handlers, PipelineComponents, TurnState};
 use kaguya_gateway::proto;
 use kaguya_gateway::rag::RagEngine;
 use kaguya_gateway::reasoner::ReasonerManager;
+use kaguya_gateway::sandbox::SandboxClient;
 use kaguya_gateway::silence::SilenceTimers;
 use kaguya_gateway::talker::TalkerClient;
+use kaguya_gateway::telemetry::TelemetryClient;
 use kaguya_gateway::tools::ToolRegistry;
 use kaguya_gateway::types::*;
 
@@ -81,7 +83,32 @@ async fn main() -> anyhow::Result<()> {
     let listener_connection = lifecycle.register_connection("listener");
     let reasoner_connection = lifecycle.register_connection("reasoner");
     reasoner_connection.set_readiness(Readiness::Stopped);
-    let tools = ToolRegistry::new(config.files.workspace_root.clone(), task_spawner.clone());
+
+    // ── Supervisor-owned Sandbox Provider ──
+    // Gateway holds only the client; it acquires an opaque handle lazily on the
+    // first tool call. Backend policy and resource lifecycle stay in Supervisor.
+    let supervisor_url =
+        std::env::var("KAGUYA_SUPERVISOR_URL").unwrap_or_else(|_| config.supervisor.url.clone());
+    let telemetry = TelemetryClient::new(&supervisor_url, "gateway");
+    let sandbox = match SandboxClient::connect(&supervisor_url).await {
+        Ok(client) => {
+            info!(
+                backend = client.backend().unwrap_or("unknown"),
+                "connected to Supervisor Sandbox Provider"
+            );
+            Arc::new(client)
+        }
+        Err(error) => {
+            warn!(%error, %supervisor_url, "Supervisor sandbox unavailable; tool disabled");
+            Arc::new(SandboxClient::disabled())
+        }
+    };
+
+    let tools = ToolRegistry::new(
+        config.files.workspace_root.clone(),
+        task_spawner.clone(),
+        Some(Arc::clone(&sandbox)),
+    );
     let reasoner = ReasonerManager::new(
         clients.reasoner_addr.clone(),
         task_spawner.clone(),
@@ -98,7 +125,8 @@ async fn main() -> anyhow::Result<()> {
         clients.talker_addr.clone(),
         task_spawner.clone(),
         talker_connection,
-    );
+    )
+    .with_telemetry(telemetry.clone());
     let output = OutputManager::new(audio_out_tx, metadata_out_tx);
     let mut narration = NarrationFilter::new(5);
 
@@ -391,21 +419,51 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 // Skip expensive async fetches when Talker can't accept a dispatch.
-                let (retrieval, recent, tool_defs, tasks) = if ready {
+                let (retrieval, recent, tool_defs, tasks, rag_elapsed_ms) = if ready {
+                    let rag_started = std::time::Instant::now();
+                    let retrieval = rag.retrieve(&text).await;
+                    let rag_elapsed_ms = rag_started.elapsed().as_millis() as u64;
                     (
-                        rag.retrieve(&text).await,
+                        retrieval,
                         history.recent().await,
                         tools.definitions(),
                         reasoner.active_tasks().await,
+                        Some(rag_elapsed_ms),
                     )
                 } else {
-                    (vec![], vec![], vec![], vec![])
+                    (vec![], vec![], vec![], vec![], None)
                 };
+                let rag_result_count = retrieval.len();
+                let rag_top_score = retrieval
+                    .iter()
+                    .map(|result| result.score)
+                    .fold(None, |best: Option<f32>, score| {
+                        Some(best.map_or(score, |current| current.max(score)))
+                    });
+                let mut rag_source_counts = std::collections::BTreeMap::<String, usize>::new();
+                for result in &retrieval {
+                    *rag_source_counts.entry(result.source.clone()).or_insert(0) += 1;
+                }
 
                 let actions = handlers::handle_user_intent(
                     &mut turn, &text, is_voice, ready,
                     retrieval, recent, tool_defs, &tasks,
                 );
+                if let Some(duration_ms) = rag_elapsed_ms {
+                    telemetry.emit(
+                        "rag.retrieve.completed",
+                        Some(turn.conversation_id.clone()),
+                        Some(turn.last_turn_id.clone()),
+                        None,
+                        serde_json::json!({
+                            "duration_ms": duration_ms,
+                            "fused_hits": rag_result_count,
+                            "top_score": rag_top_score,
+                            "source_counts": rag_source_counts,
+                            "query_chars": text.chars().count(),
+                        }),
+                    );
+                }
                 pipeline.executor(&mut turn).execute_all(actions).await;
             }
 
@@ -504,6 +562,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Release only the opaque conversation handle. Provider/global teardown is
+    // owned by Supervisor and runs after managed processes stop.
+    sandbox.release().await;
 
     info!("Kaguya Gateway shutdown");
     Ok(())

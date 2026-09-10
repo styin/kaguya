@@ -22,9 +22,10 @@ from inference.soul_container import (
     IdentityConfig,
     SoulContainerResult,
     parse_identity_config,
+)
+from inference.soul_container import (
     process as soul_process,
 )
-
 from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
 
 if TYPE_CHECKING:

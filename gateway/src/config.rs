@@ -17,6 +17,8 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub rag: RagConfig,
     #[serde(default)]
+    pub supervisor: SupervisorConfig,
+    #[serde(default)]
     pub runtime: RuntimeConfig,
 }
 
@@ -374,7 +376,28 @@ impl Default for GatewayConfig {
                 enabled: true,
             },
             rag: RagConfig::default(),
+            supervisor: SupervisorConfig::default(),
             runtime: RuntimeConfig::default(),
+        }
+    }
+}
+
+// ── Supervisor control plane ─────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SupervisorConfig {
+    #[serde(default = "default_supervisor_url")]
+    pub url: String,
+}
+
+fn default_supervisor_url() -> String {
+    "http://127.0.0.1:3001".into()
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            url: default_supervisor_url(),
         }
     }
 }

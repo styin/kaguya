@@ -14,9 +14,11 @@
 //!   then SIGTERM after a timeout.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::config::{LaunchMode, ProcessSpec, ResolvedRuntimeConfig, RestartPolicy, RuntimeConfig};
@@ -26,12 +28,16 @@ use crate::process::{
     start_managed_process, stop_managed_process, ManagedProcess, ManagedProcessLogLine,
     ManagedProcessSnapshot, ManagedProcessStatus,
 };
+use crate::sandbox::{SandboxManager, SandboxProvider};
+use crate::telemetry::TelemetryHub;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const GATEWAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MONITOR_INTERVAL: Duration = Duration::from_millis(250);
+const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const RESTART_BASE_DELAY: Duration = Duration::from_millis(500);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(5);
+static RESOURCE_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Top-level process orchestrator.
 ///
@@ -44,6 +50,8 @@ pub struct SupervisorApp {
     logs: LogStore,
     log_tx: mpsc::UnboundedSender<ManagedProcessLogLine>,
     http: reqwest::Client,
+    sandbox: SandboxProvider,
+    telemetry: TelemetryHub,
 }
 
 struct SupervisorInner {
@@ -63,6 +71,15 @@ struct RuntimeProcessState {
     last_health_check: Option<Instant>,
     restart_timestamps: Vec<Instant>,
     restart_exhausted: bool,
+}
+
+struct ProcessResourceTarget {
+    name: String,
+    label: String,
+    pid: u32,
+    status: ProcessStatus,
+    uptime_secs: Option<u64>,
+    restart_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +156,7 @@ pub struct GatewayConnectionStatus {
 impl SupervisorApp {
     pub fn new(resolved: ResolvedRuntimeConfig) -> Self {
         let logs = LogStore::new();
+        let telemetry = TelemetryHub::new();
         let (log_tx, mut log_rx) = mpsc::unbounded_channel::<ManagedProcessLogLine>();
         let log_store = logs.clone();
         tokio::spawn(async move {
@@ -169,6 +187,16 @@ impl SupervisorApp {
                 )
             })
             .collect();
+        let sandbox = match SandboxManager::from_config(
+            &resolved.config.sandbox,
+            resolved.config.sandbox.workspace_root.clone(),
+        ) {
+            Ok(manager) => SandboxProvider::new(manager).with_telemetry(telemetry.clone()),
+            Err(error) => {
+                tracing::warn!(%error, "sandbox provider initialization failed; disabling provider");
+                SandboxProvider::disabled().with_telemetry(telemetry.clone())
+            }
+        };
 
         Self {
             inner: std::sync::Arc::new(Mutex::new(SupervisorInner {
@@ -179,11 +207,17 @@ impl SupervisorApp {
             logs,
             log_tx,
             http: reqwest::Client::new(),
+            sandbox,
+            telemetry,
         }
     }
 
     pub fn logs(&self) -> LogStore {
         self.logs.clone()
+    }
+
+    pub fn telemetry(&self) -> TelemetryHub {
+        self.telemetry.clone()
     }
 
     pub fn start_monitor(&self) {
@@ -192,6 +226,14 @@ impl SupervisorApp {
             loop {
                 app.enforce_restart_policy().await;
                 tokio::time::sleep(MONITOR_INTERVAL).await;
+            }
+        });
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut system = System::new();
+            loop {
+                app.emit_process_resource_samples(&mut system).await;
+                tokio::time::sleep(RESOURCE_SAMPLE_INTERVAL).await;
             }
         });
     }
@@ -234,10 +276,40 @@ impl SupervisorApp {
         for name in names {
             let _ = self.stop_process(&name).await;
         }
+        self.sandbox.shutdown().await;
         Ok(())
     }
 
+    pub fn sandbox_enabled(&self) -> bool {
+        self.sandbox.is_enabled()
+    }
+
+    pub fn sandbox_backend(&self) -> &'static str {
+        self.sandbox.backend_name()
+    }
+
+    pub async fn prewarm_sandbox(&self) {
+        self.sandbox.prewarm().await;
+    }
+
+    pub async fn acquire_sandbox(&self, session: &str) -> anyhow::Result<String> {
+        self.sandbox.acquire(session).await
+    }
+
+    pub async fn execute_in_sandbox(&self, handle: &str, args_json: &str) -> String {
+        self.sandbox.execute(handle, args_json).await
+    }
+
+    pub async fn release_sandbox(&self, handle: &str) -> anyhow::Result<()> {
+        self.sandbox.release(handle).await
+    }
+
     pub async fn start_process(&self, name: &str) -> anyhow::Result<()> {
+        // A crashed Gateway cannot release its opaque handles. Clear stale
+        // conversation resources before every initial start or restart.
+        if name == "gateway" {
+            self.sandbox.cleanup_sessions().await;
+        }
         let mut inner = self.inner.lock().await;
         inner.restart_disabled = false;
         let Some(state) = inner.processes.get_mut(name) else {
@@ -399,6 +471,75 @@ impl SupervisorApp {
                 state.next_restart_at = Some(now + restart_delay(restarted.restart_count));
             }
         }
+    }
+
+    async fn emit_process_resource_samples(&self, system: &mut System) {
+        let targets = self.process_resource_targets().await;
+        if targets.is_empty() {
+            return;
+        }
+        let pids = targets
+            .iter()
+            .map(|target| Pid::from_u32(target.pid))
+            .collect::<Vec<_>>();
+        system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
+        let sample_id = RESOURCE_SAMPLE_ID.fetch_add(1, Ordering::SeqCst);
+        let mut samples = Vec::new();
+        for target in targets {
+            let Some(process) = system.process(Pid::from_u32(target.pid)) else {
+                continue;
+            };
+            samples.push(serde_json::json!({
+                "sample_id": sample_id,
+                "process": target.name,
+                "label": target.label,
+                "pid": target.pid,
+                "status": target.status,
+                "uptime_secs": target.uptime_secs,
+                "restart_count": target.restart_count,
+                "cpu_percent": process.cpu_usage() as f64,
+                "rss_bytes": process.memory(),
+                "virtual_memory_bytes": process.virtual_memory(),
+            }));
+        }
+        for fields in samples {
+            self.telemetry
+                .emit(
+                    "supervisor",
+                    "process.resource.sample",
+                    None,
+                    None,
+                    None,
+                    fields,
+                )
+                .await;
+        }
+    }
+
+    async fn process_resource_targets(&self) -> Vec<ProcessResourceTarget> {
+        let mut inner = self.inner.lock().await;
+        let mut targets = Vec::new();
+        for (name, state) in inner.processes.iter_mut() {
+            let Some(process) = &mut state.process else {
+                continue;
+            };
+            let snapshot = process.refresh_snapshot();
+            if snapshot.status != ManagedProcessStatus::Running {
+                continue;
+            }
+            let Some(pid) = snapshot.pid else {
+                continue;
+            };
+            targets.push(ProcessResourceTarget {
+                name: name.clone(),
+                label: state.spec.label(name),
+                pid,
+                status: ProcessStatus::Running,
+                uptime_secs: state.started_at.map(|started| started.elapsed().as_secs()),
+                restart_count: snapshot.restart_count,
+            });
+        }
+        targets
     }
 
     async fn request_gateway_drain(&self) {
@@ -739,7 +880,6 @@ mod tests {
             launch: LaunchMode::Eager,
             criticality: Criticality::Required,
             restart,
-            sandbox: SandboxConfig::default(),
             command: Some(command),
             command_win32: None,
             cwd: None,
@@ -766,6 +906,10 @@ mod tests {
             config: RuntimeConfig {
                 profile: Some("test".to_string()),
                 supervisor_addr: "127.0.0.1:0".to_string(),
+                sandbox: SandboxConfig {
+                    enabled: false,
+                    ..SandboxConfig::default()
+                },
                 processes,
             },
             base_dir: ".".into(),
@@ -826,15 +970,18 @@ mod tests {
         app.start_process("test")
             .await
             .expect("process should start");
-        for _ in 0..10 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
             let logs = app.logs().since(0);
             if logs.iter().any(|entry| entry.line.contains("hello")) {
                 return;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "child log should be captured"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-
-        panic!("child log should be captured");
     }
 
     #[tokio::test]

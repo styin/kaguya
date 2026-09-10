@@ -161,8 +161,13 @@ impl<'a> ActionExecutor<'a> {
                 tool_name,
                 args_json,
             } => {
-                self.tools
-                    .dispatch(request_id, tool_name, args_json, self.p3_tx.clone());
+                self.tools.dispatch(
+                    self.state.conversation_id.clone(),
+                    request_id,
+                    tool_name,
+                    args_json,
+                    self.p3_tx.clone(),
+                );
             }
 
             PipelineAction::StartReasoner {
