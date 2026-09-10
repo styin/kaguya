@@ -188,6 +188,9 @@ impl SandboxClient {
             }
         };
         if let Some(existing) = raced_handle {
+            if existing == handle {
+                return Ok(existing);
+            }
             if let Err(error) = self
                 .http
                 .delete(format!("{}/api/sandbox/{handle}", self.base_url))
@@ -227,12 +230,80 @@ fn error_json(error: impl Into<String>) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use kaguya_supervisor::app::SupervisorApp;
     use kaguya_supervisor::config::{ResolvedRuntimeConfig, RuntimeConfig, SandboxConfig};
     use kaguya_supervisor::server;
 
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_acquisitions_preserve_shared_handle_and_files() {
+        let app = SupervisorApp::new(ResolvedRuntimeConfig {
+            config: RuntimeConfig {
+                profile: Some("test".into()),
+                supervisor_addr: "127.0.0.1:0".into(),
+                sandbox: SandboxConfig::default(),
+                processes: BTreeMap::new(),
+            },
+            base_dir: ".".into(),
+        });
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let router = server::router(app.clone()).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let barrier = Arc::clone(&barrier);
+                async move {
+                    let acquiring = request.uri().path() == "/api/sandbox/acquire";
+                    let response = next.run(request).await;
+                    // Both requests must reach Supervisor before either response
+                    // can populate the client's cache.
+                    if acquiring {
+                        barrier.wait().await;
+                    }
+                    response
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = SandboxClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let session = format!("concurrent-acquire-{}", uuid::Uuid::new_v4());
+        let outputs = tokio::time::timeout(Duration::from_secs(10), async {
+            let (first, second) = tokio::join!(
+                client.exec_from_json(
+                    &session,
+                    r#"{"language":"python","code":"open('first.txt','w').write('first')"}"#,
+                ),
+                client.exec_from_json(
+                    &session,
+                    r#"{"language":"python","code":"open('second.txt','w').write('second')"}"#,
+                ),
+            );
+            let third = client.exec_from_json(
+                &session,
+                r#"{"language":"python","code":"print(open('first.txt').read() + ':' + open('second.txt').read())"}"#,
+            ).await;
+            [first, second, third]
+        }).await;
+        server_task.abort();
+        app.shutdown_app().await.unwrap();
+
+        let outputs = outputs.expect("concurrent acquisition must complete");
+        for output in &outputs {
+            let value: serde_json::Value = serde_json::from_str(output).unwrap();
+            assert_eq!(value["exit_code"], 0, "{output}");
+            assert!(value["error"].is_null(), "{output}");
+        }
+        let third: serde_json::Value = serde_json::from_str(&outputs[2]).unwrap();
+        assert_eq!(third["stdout"].as_str().unwrap().trim(), "first:second");
+    }
 
     #[tokio::test]
     async fn client_uses_supervisor_handle_contract_end_to_end() {
