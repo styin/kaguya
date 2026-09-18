@@ -952,3 +952,52 @@ where the new plan marks them as such.
 - Existing tests and CI definitions, inspected but not rerun during this
   documentation update.
 - Revised sequence and acceptance gates: `docs/implementation-plan-v0.1.0.md`.
+
+---
+
+## REF-026 — Approved Gateway Entry Point and Pipeline Extraction
+
+**Decision / implementation record:** Apply REF-024's structural extraction
+after the user's 25 individual sign-offs on source blocks, ownership, function
+boundaries and wiring. `main.rs` retains runtime/logging initialization and
+awaits `app::run()`. Assembly and cleanup live in `app.rs`; the existing event
+loop lives in `core/pipeline/run.rs`.
+
+`pipeline::run()` owns receivers and turn/narration state, borrows the existing
+`PipelineComponents`, lifecycle supervisor and telemetry client, and receives
+the silence-enabled boolean. It is awaited directly rather than spawned as
+another task. Construction order, handler calls, channel capacities, awaits and
+cleanup sequence are retained. Import paths, binding mutability, the silence
+configuration access and two clarified comments follow the approved changes.
+
+Supervisor URL environment precedence moves unchanged into
+`SupervisorConfig::resolved_url()` in `config.rs`. Application assembly calls it
+after configuration load/default fallback and still constructs/connects the
+Supervisor clients. The environment override therefore applies even when
+configuration loading falls back to defaults.
+
+**Rationale:** The application selects and wires implementations, while the
+pipeline orchestrates supplied components. This creates the agreed extension
+boundary without introducing additional managers, a universal provider contract
+or a dynamic plugin registry. Gateway async tasks and Supervisor process/sandbox
+resources retain their existing owners.
+
+**Validation:** Default and `dev-console` Windows builds passed; their existing
+test suites passed 99 and 100 tests respectively. Formatting, diff checks and
+comparison against the approved source transformations passed. Live voice-stack
+and other-host acceptance were not run. Long-await/P0 responsiveness remains
+separate R8 work; no scheduling behavior was changed in this extraction.
+
+**Supersedes:** REF-024's pending source-extraction status only. Its composition
+direction remains applicable; generalized provider selection remains future
+work. No numerical default or algorithm is introduced or changed.
+
+**Sources:**
+
+- User sign-offs 1–25 in the Gateway refactor discussion, completed 2026-09-18.
+- Pre-extraction source: `gateway/src/main.rs` at `b4eecd4`.
+- Implemented entry/assembly/loop: `gateway/src/main.rs`, `gateway/src/app.rs`,
+  `gateway/src/core/pipeline/run.rs`.
+- URL resolution and exports: `gateway/src/config.rs`, `gateway/src/lib.rs`,
+  `gateway/src/core/pipeline/mod.rs`.
+- Commands and residual acceptance scope: implementation plan R0/R8.

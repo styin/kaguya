@@ -3,12 +3,13 @@
 //!
 //! The Gateway owns the main event loop, conversation state, priority-ordered
 //! input stream, and gRPC/WebSocket client connections to adjacent processes
-//! (Talker, Listener, Reasoner). It never touches the filesystem directly and
-//! never runs an LLM — those responsibilities belong to the processes it
-//! connects to.
+//! (Talker, Listener, Reasoner). It owns persona/history/RAG and direct file-tool
+//! access. Voice inference belongs to Talker; process and sandbox resource
+//! ownership belongs to Supervisor.
 //!
 //! # Module layout
 //!
+//! - [`app`] — Component assembly, startup wiring, and cleanup.
 //! - [`clients`] — gRPC/TCP client wrappers and connection recovery loops.
 //! - [`core`] — Conversation state, priority input stream, and output routing.
 //! - [`lifecycle`] — Task supervision, connection readiness, and reconnect policies.
@@ -18,6 +19,7 @@
 //! - [`sandbox`] — Client for the Supervisor-owned `sandbox_exec` provider.
 //! - [`tools`] — Tool registry and dispatch for the Talker's tool-use protocol.
 
+pub mod app;
 pub mod capabilities;
 pub mod config;
 pub mod error;

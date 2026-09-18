@@ -390,6 +390,12 @@ pub struct SupervisorConfig {
     pub url: String,
 }
 
+impl SupervisorConfig {
+    pub fn resolved_url(&self) -> String {
+        std::env::var("KAGUYA_SUPERVISOR_URL").unwrap_or_else(|_| self.url.clone())
+    }
+}
+
 fn default_supervisor_url() -> String {
     "http://127.0.0.1:3001".into()
 }

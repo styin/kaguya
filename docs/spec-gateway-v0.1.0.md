@@ -4,12 +4,13 @@
 
 **Version:** 0.1.0
 
-**Updated:** 2026-09-17
+**Updated:** 2026-09-18
 
 **Audience:** Developers working on Gateway and adjacent service contracts
 
 **Status convention:** **Current** describes inspected source on
-`gateway-refactor`, base commit `633ec49`. **Target** describes accepted work
+`gateway-refactor`, including the approved R0 extraction after documentation
+commit `b4eecd4` (runtime baseline `633ec49`). **Target** describes accepted work
 that is not complete. **Deferred** identifies later scope. Source inspection
 does not establish passing runtime or end-to-end tests.
 
@@ -46,8 +47,9 @@ choice. It must not be described as an existing Gateway inference path.
 
 ### 1.1 Configuration-Driven Application Composition (REF-024)
 
-**Status:** Accepted design for the structural refactor; not yet implemented as
-`gateway/src/app.rs`. Current assembly remains in `gateway/src/main.rs`.
+**Status:** The structural extraction is implemented: `main.rs` initializes the
+runtime/logging and calls `app::run()`; `app.rs` assembles components and awaits
+`core/pipeline/run.rs`. Generalized provider selection remains future work.
 
 The core pipeline consumes capability interfaces for replaceable functionality.
 Provider selection belongs to application composition. Service configuration
@@ -55,6 +57,10 @@ expresses the desired implementation; `config.rs` loads and validates that
 configuration; `app.rs` realizes it and injects the resulting capability handles.
 `app.rs` consumes the configuration system rather than owning its parsing,
 persistence, or configuration-management APIs.
+
+Supervisor URL precedence is resolved by `SupervisorConfig::resolved_url()` in
+`config.rs`, called after loading or falling back to default configuration.
+Client construction and connection/fallback handling remain in `app.rs`.
 
 The responsibilities of `app.rs` are to:
 
@@ -171,9 +177,10 @@ interrupt a user who has started speaking.
 
 [Input stream](../gateway/src/core/input_stream.rs) creates five P1–P5
 `tokio::sync::mpsc` channels. P0 and Talker outputs have separate channels in
-[main.rs](../gateway/src/main.rs). Internal events are Rust types; cross-service
-semantic messages use protobuf. The event loop currently lives in `main.rs`;
-R0 moves it into `core/pipeline/run.rs` without merging P0 into the input queue.
+[app.rs](../gateway/src/app.rs). Internal events are Rust types; cross-service
+semantic messages use protobuf. The event loop lives in
+[core/pipeline/run.rs](../gateway/src/core/pipeline/run.rs); P0 remains separate
+from the input queues and handlers. Long-await responsiveness work remains open.
 
 ## 4. Memory System
 
@@ -565,7 +572,7 @@ Adding session/task/policy/binding fields is active work, not present wire state
 | Built-in RAG | rusqlite with bundled SQLite/FTS5; optional HTTP embedder |
 | Configuration | gateway.toml for local behavior; kaguya.runtime.toml for process/capability topology and Supervisor sandbox settings |
 | Runtime state | In-memory history, turn state, active Reasoner requests and connections; RAG SQLite persists independently |
-| Provider assembly | main.rs today; app.rs extraction is accepted but pending |
+| Provider assembly | app.rs constructs components; main.rs initializes runtime/logging; pipeline::run handles the event loop |
 | Process/sandbox lifecycle | Supervisor; not Gateway |
 
 ### 16.1 Process Layout
@@ -610,7 +617,7 @@ without declaring incomplete functionality delivered.
 | Stage | Gateway-relevant outcome |
 | --- | --- |
 | Existing baseline | Event handling, voice clients, RAG, persona, local tools, reconnect, sandbox client and Console endpoint |
-| R0 | Extract assembly/event loop and align documentation; no implementation completion implied by this spec update |
+| R0 | Assembly/event-loop extraction implemented; validation evidence is recorded in the plan; P0 scheduling correction remains R8 work |
 | R1 | Durable session identity, history and resume APIs |
 | R2 | Policy resolution and correlated approval |
 | R3 | Durable application task ownership/lifecycle |
