@@ -846,3 +846,109 @@ raw events and derived metrics.
   https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 - Server-Sent Events overview:
   https://html.spec.whatwg.org/multipage/server-sent-events.html
+
+---
+
+## REF-024 — Configuration-Driven Gateway Composition Root
+
+**Status:** Accepted design; source extraction and generalized provider selection
+are pending. This entry records architecture and file ownership, not completed
+runtime behavior.
+
+**Decision:** Extract Gateway startup assembly into `gateway/src/app.rs` and the
+existing event loop into `gateway/src/core/pipeline/run.rs`. `main.rs` remains
+the entry point. Service configuration expresses provider choices; `config.rs`
+loads and validates them; `app.rs` resolves choices, configures and constructs
+providers or client adapters, arranges their lifecycle, and injects capability
+interfaces. Implementation-specific setup may live in provider-local factories.
+The core pipeline must not select providers or branch on their identities.
+
+Gateway-local tasks use the Gateway lifecycle owner. Supervisor retains managed
+process and sandbox lifecycle ownership under REF-013/015. Remote services own
+their provider internals; Gateway constructs their client adapters. This
+composition boundary does not move speech processing into Gateway.
+
+Core session, history, policy, workspace, and execution-binding modules use
+ordinary internal APIs. Only replaceable capabilities need provider contracts.
+Keep the existing `capabilities/` and implementation modules; explicit
+constructor injection is sufficient until configurable alternatives require
+factories or registration. A universal plugin contract and additional directory
+hierarchies are not prerequisites.
+
+**Rationale:**
+
+1. Provider changes remain localized to configuration and assembly rather than
+   introducing implementation branches into conversation handling.
+2. The existing RAG wiring already constructs `RagEngine` and passes
+   `Arc<dyn RagCapability>` to `PipelineComponents`; the extraction preserves
+   this working boundary.
+3. Explicit assembly supports future provider selection while keeping core
+   state ownership and the present directory structure simple.
+4. Distinguishing application assembly from process supervision preserves the
+   existing runtime and audio boundaries.
+
+**Supersedes:** none. Complements REF-012/013/015 with application composition
+ownership. Example provider names and configuration syntax in the diagram are
+illustrative, not configuration defaults or supported-provider commitments.
+
+**Sources:**
+
+- User-approved structure and provider-selection discussion, 2026-09-16;
+  referenced conversation: "Explain provider selection"
+  (`6aaa7d9b-c954-83ee-a35b-970445a7424f`).
+- Current assembly and RAG background task setup: `gateway/src/main.rs`.
+- Capability contract: `gateway/src/capabilities/rag.rs`.
+- Pipeline dependency injection: `gateway/src/core/pipeline/executor.rs`.
+- Current configuration/topology parsing: `gateway/src/config.rs`.
+- Supervisor resource ownership: `supervisor/src/app.rs` and
+  `supervisor/src/sandbox/mod.rs`.
+- Target flow and diagram: `docs/spec-gateway-v0.1.0.md`, §1.1.
+
+---
+
+## REF-025 — Implementation Plan Baseline and Extension Sequence
+
+**Decision:** Retain the original M0–M7 identifiers as historical baseline labels
+and use R0–R8 for the active sequence: structural extraction; session identity
+and persistence; policy; application task management/lifecycle; workspace
+management/lifecycle; sandbox hookup and execution binding; Reasoner; Console;
+and integration validation. Console/API slices and tests can accompany their
+backend stage; final acceptance remains explicit.
+
+The plan distinguishes source-confirmed implementation from passing validation.
+Checked items describe inspected code, while acceptance gates remain open until
+their results are recorded. Partially implemented subsystems, scaffolding and
+simulated backend behavior are not counted as complete systems.
+
+**Rationale:**
+
+1. The original checklist left existing implementation unchecked while retaining
+   superseded process, transport and source-layout instructions.
+2. The user requested session, policy, task and workspace foundations before
+   execution binding, a real Reasoner and Console completion. Making these
+   dependencies explicit prevents task/backend integration from inventing its
+   own identity, policy or workspace model.
+3. Source presence and acceptance evidence answer different questions; preserving
+   both prevents historical unchecked boxes or simulated results from being
+   mistaken for an accurate delivery status.
+4. REF-024's composition boundary and lightweight module layout remain intact.
+   Core subsystems need not become providers or independently packaged plugins.
+
+**Supersedes:** The original implementation plan's M0–M7 execution order and
+unmaintained progress checklist. Historical identifiers remain traceable. No
+existing REF entry is changed; storage formats, policy defaults, task states,
+workspace materialization, backend selection and numerical limits remain open
+where the new plan marks them as such.
+
+**Sources:**
+
+- User request to restructure the plan and add Session, Policy, Task, Workspace,
+  execution binding, Reasoner and Console work, 2026-09-17.
+- Source inspection on `gateway-refactor`, base commit `633ec49`: Gateway
+  `core/`, `clients/`, `lifecycle/`, `tools.rs`; Supervisor `app.rs` and
+  `sandbox/`; Talker `voice/`, `inference/` and `server.py`.
+- Console `src/App.tsx`, `src/store.ts`, `src/regions/`, `src/audio/` and
+  `server/plugin.ts`; Reasoner package scaffolding without `src/`.
+- Existing tests and CI definitions, inspected but not rerun during this
+  documentation update.
+- Revised sequence and acceptance gates: `docs/implementation-plan-v0.1.0.md`.
