@@ -6,7 +6,7 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 
 - `docs/spec-agent-v0.1.0.md` — Listener + Talker Agent specification
 - `docs/spec-gateway-v0.1.0.md` — Gateway specification
-- `docs/implementation-plan-v0.1.0.md` — Phase 1 implementation plan (single source of truth for build order)
+- `docs/implementation-plan-v0.1.0.md` — Implementation plan (single source of truth for build order and acceptance gates)
 - `REFERENCES.md` — External research and industry practice informing significant design questions (see below)
 
 ## REFERENCES.md — Bibliography Maintenance
