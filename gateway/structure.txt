@@ -55,6 +55,7 @@ Module grouping:
 
 - `main.rs`: async runtime and logging initialization; calls `app::run()`.
 - `app.rs`: component construction, startup wiring and cleanup.
+- `telemetry.rs`: async telemetry event client for Supervisor-owned event aggregation.
 - `capabilities/`: contracts for replaceable functionality.
 - `clients/`: outbound clients for adjacent services owned by other processes.
 - `core/`: orchestration state, event types, context assembly, history, persona,
