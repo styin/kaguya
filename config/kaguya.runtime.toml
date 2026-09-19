@@ -2,7 +2,7 @@ profile = "app"
 supervisor_addr = "127.0.0.1:3001"
 
 [sandbox]
-# Supervisor-owned provider used by Gateway's sandbox_exec tool (REF-015).
+# Supervisor-owned provider used by Gateway's sandbox_exec tool.
 enabled = true
 backend = "native"
 mode = "single_user"

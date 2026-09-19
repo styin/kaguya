@@ -15,7 +15,7 @@ that is not complete. **Deferred** identifies later scope. Source inspection
 does not establish passing runtime or end-to-end tests.
 
 The [implementation plan](implementation-plan-v0.1.0.md) owns progress,
-dependencies and acceptance gates (R0–R8, REF-025). The
+dependencies and acceptance gates (R0–R8). The
 [protobuf schema](../proto/kaguya/v1/kaguya.proto) owns current wire definitions.
 This specification preserves intended contracts while identifying implementation
 gaps; describing a gap does not waive the requirement.
@@ -27,7 +27,7 @@ gaps; describing a gap does not waive the requirement.
 Gateway coordinates conversation state, prioritized input, context assembly,
 tool dispatch, persona delivery and communication with Listener, Talker and
 Reasoner. It owns Gateway-local async task/connection lifecycle. Supervisor owns
-managed process lifecycle and sandbox resources (REF-013/015).
+managed process lifecycle and sandbox resources.
 
 **Current:** The endpoint is the React/Vite Console over WebSocket. OpenPod
 integration is deferred; Gateway does not currently speak OpenPod's protocol.
@@ -45,7 +45,7 @@ Gateway:
 Background LLM history summarization remains an open future implementation
 choice. It must not be described as an existing Gateway inference path.
 
-### 1.1 Configuration-Driven Application Composition (REF-024)
+### 1.1 Configuration-Driven Application Composition
 
 **Status:** The structural extraction is implemented: `main.rs` initializes the
 runtime/logging and calls `app::run()`; `app.rs` assembles components and awaits
@@ -75,7 +75,7 @@ The responsibilities of `app.rs` are to:
 Provider setup can remain in implementation-local constructors or factories;
 `app.rs` coordinates those calls. The pipeline must not branch on provider names
 or reach into provider-specific implementation state. Managed process launch,
-restart, and sandbox resource ownership remain with Supervisor (REF-013/015).
+restart, and sandbox resource ownership remain with Supervisor.
 Providers running in another service configure their own internals; Gateway
 assembly configures the corresponding client adapter.
 

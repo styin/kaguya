@@ -1,6 +1,6 @@
 //! End-to-end smoke of the native `sandbox_exec` path: construct a manager from
 //! the default config and actually run code through it. Guards the port of the
-//! Supervisor-owned sandbox provider (REF-015) beyond mere compilation.
+//! Supervisor-owned sandbox provider beyond mere compilation.
 
 use kaguya_supervisor::config::SandboxConfig;
 use kaguya_supervisor::sandbox::{SandboxManager, SandboxProvider};

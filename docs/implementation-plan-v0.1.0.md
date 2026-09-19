@@ -12,7 +12,7 @@
 
 This document owns implementation order and the remaining-work checklist.
 The original M0–M7 identifiers are retained below as historical baseline labels;
-the active sequence is now R0–R8 (REF-025). This replaces the original linear
+the active sequence is now R0–R8. This replaces the original linear
 build order, including the instruction to build Reasoner before the new session,
 policy, task, workspace, and execution foundations.
 
@@ -20,14 +20,14 @@ policy, task, workspace, and execution foundations.
 - `[ ]` means implementation, a design decision, or acceptance validation remains.
 - **[OPEN]** marks an unsettled choice. Resolve it before implementing dependent behavior; do not treat illustrative APIs, provider names, states, or thresholds as defaults.
 - Each active stage includes an acceptance gate. Close it only with recorded validation evidence.
-- New numerical defaults and non-obvious design decisions require an entry in [REFERENCES.md](../REFERENCES.md).
+- Cite external research or industry practice for significant design questions in [REFERENCES.md](../REFERENCES.md). Keep project decisions, numerical defaults, and validation evidence in their relevant specs, configuration documentation, or this plan.
 
 The [protobuf schema](../proto/kaguya/v1/kaguya.proto) is authoritative for current
-wire messages. [Gateway §1.1](spec-gateway-v0.1.0.md#11-configuration-driven-application-composition-ref-024)
+wire messages. [Gateway §1.1](spec-gateway-v0.1.0.md#11-configuration-driven-application-composition)
 records the accepted composition-root design. The Gateway spec now separates
 current behavior from accepted targets and remaining gaps. Older Endpoint spec
 sections still need the R7 reconciliation; their old process diagrams and
-directory tree must not override REF-013/015/024 or be read as current progress.
+directory tree must not override the ownership boundaries below or be read as current progress.
 
 ## 1. Ownership and Extension Boundaries
 
@@ -35,9 +35,9 @@ directory tree must not override REF-013/015/024 or be read as current progress.
 | --- | --- |
 | Session identity, authoritative history, policy, task records, workspace association, execution binding | Ordinary Gateway application modules; no universal plugin contract required |
 | Conversation handling | Gateway pipeline; structured context in, semantic events/actions out |
-| Provider selection and assembly | Service configuration → `config.rs` → `app.rs` → injected capability interfaces (REF-024) |
+| Provider selection and assembly | Service configuration → `config.rs` → `app.rs` → injected capability interfaces |
 | Gateway async tasks, connection readiness, reconnect and shutdown | Gateway `lifecycle/`; these async tasks are distinct from durable application tasks |
-| Managed processes, process-tree termination, sandbox resources and backend enforcement | Rust Supervisor (REF-013/015) |
+| Managed processes, process-tree termination, sandbox resources and backend enforcement | Rust Supervisor |
 | Voice capture processing, STT, LLM prompt formatting, sentence/tag processing and TTS | Python Listener/Talker service; Gateway does not inspect or decode audio |
 | Reasoner backend adaptation | TypeScript Reasoner service; Gateway owns task coordination and authorized bindings |
 | Presentation and controls | Console consumes authoritative APIs/events; it does not own session, policy, task or workspace truth |
@@ -123,7 +123,7 @@ as their dependencies become available, not deferred wholesale to the end.
 **Goal:** Make application assembly explicit without changing behavior or
 introducing a plugin framework.
 
-- [x] Extract construction/configuration/startup wiring to `gateway/src/app.rs`; keep `main.rs` as entry point (REF-024/026).
+- [x] Extract construction/configuration/startup wiring to `gateway/src/app.rs`; keep `main.rs` as entry point.
 - [x] Extract the existing event loop into `gateway/src/core/pipeline/run.rs`, retaining P0's separate control branch and existing handler/action boundaries.
 - [x] Keep existing concrete provider construction in assembly and RAG use behind its capability; no generalized provider registry or new core systems are introduced by this extraction.
 - [x] Keep provider background work under the existing lifecycle owner; preserve Supervisor process/sandbox ownership.
@@ -365,8 +365,9 @@ telemetry scenarios are in [telemetry testing](telemetry-e2e-testing.md).
 ## 5. Open Decisions and Deferred Scope
 
 The active-stage **[OPEN]** paragraphs are design work, not optional polish.
-Record decisions in REFERENCES.md and update the relevant contract/spec before
-building dependent behavior.
+Record decisions in the relevant contract/spec before building dependent
+behavior. Add or refine bibliography entries when external evidence informs a
+significant design question.
 
 Retained empirical questions from the original plan:
 

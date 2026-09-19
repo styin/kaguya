@@ -220,7 +220,7 @@ echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
   they can share the GPU context for VAD/STT/TTS/LLM.
 - **Audio bypass.** Raw 16-bit PCM/Opus frames don't go through gRPC at
   50fps — they ride a dedicated TCP socket (`:50056` by default) with
-  length-prefixed frames. See REF-002 for rationale.
+  length-prefixed frames.
 - **Bidi handshake.** Both `Stream` and `Converse` call
   `await context.send_initial_metadata(())` on entry. Without this,
   grpcio-aio defers HTTP/2 HEADERS until the first `yield`, which would
