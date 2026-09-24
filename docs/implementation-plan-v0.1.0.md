@@ -2,7 +2,7 @@
 
 **Version:** 0.1.0
 
-**Updated:** 2026-09-18
+**Updated:** 2026-09-23
 
 **Scope:** Existing voice-stack baseline, Gateway refactor, and the next application systems
 
@@ -44,8 +44,8 @@ directory tree must not override the ownership boundaries below or be read as cu
 
 Preserve these constraints throughout the work:
 
-- Keep one continuous Kaguya conversation possible across reconnects and restarts. Session identity does not require introducing a multi-chat product.
-- Keep session, turn, tool request, application task, backend session, workspace, and execution-handle identities distinct.
+- Bind a durable `InstanceId` to service configuration and select one default `SessionId` for its continuous conversation. Keep the identities distinct; ordinary configuration edits and process restarts preserve both. Additional sessions remain future work.
+- Keep instance, session, generation, conversational turn, tool request, application task, Reasoner run, backend session, workspace, and sandbox-allocation identities distinct. Cancellation tokens are control objects, not durable identities.
 - Keep authoritative history separate from derived RAG memories.
 - Keep logical workspace association separate from cwd, checkout materialization, access policy, runtime allocation, and file deletion.
 - Keep provider identity, capability identity, and process identity separate. One process/provider may supply several capabilities.
@@ -104,7 +104,7 @@ passed all acceptance tests. Remaining work is assigned to the active stages.
 | Stage | Focus | Main prerequisites | Status |
 | --- | --- | --- | --- |
 | R0 | Structural extraction and documentation alignment | Existing baseline | Complete for this extraction; Windows checks passed; R8 responsiveness/live/cross-host acceptance remains open |
-| R1 | Session: identity and persistence | R0 | In-memory precursor only |
+| R1 | Instance/session identity; generation semantics; persistence | R0 | In-memory precursor only; separate work sessions R1a → R1b → R1c below |
 | R2 | Policy management | R1 identity | Pending |
 | R3 | Task management and lifecycle | R1; R2 approval semantics | Volatile delegation precursor only |
 | R4 | Workspace management and lifecycle | R1/R3 association contracts | Configured-root precursor only |
@@ -154,27 +154,33 @@ unchanged.
 
 ### R1 — Session: Identity and Persistence
 
-**Goal:** A continuous conversation has durable identity and authoritative history
-independent of process, connection, and transient backend lifetimes.
+**Draft guiding checklist:** Each subsection is a separate implementation work
+session; each checkbox groups changes that must land together. This planning
+update implements none of them. R1a is the current session's scope. Complete the
+dedicated R1b refactor before R1c commits new history-schema semantics.
 
-**[OPEN]:** Define what `session_id` and the existing `conversation_id` each mean,
-whether they are the same identity, how a session is selected at startup, and how
-the persistence format/schema is versioned. Preserve continuity without assuming
-a multi-conversation UI or a particular storage/event-sourcing design.
+#### R1a — Configuration-bound Identity and Ownership (current session)
 
-- [ ] Define stable session identity, metadata and its relationship to turn/request/task IDs.
-- [ ] Replace unconditional fresh startup identity with explicit create/load/resume behavior.
-- [ ] Choose and implement durable history storage with a clear write boundary, ordering, error reporting and schema/migration policy.
-- [ ] Persist user inputs, assistant responses and tool results with correlation; define treatment of incomplete turns and confirmed-spoken partial responses on interruption.
-- [ ] Make transcript retention independent of Talker readiness and the current prompt window; define failed/queued input behavior rather than silently losing input.
-- [ ] Restore history after restart and prevent duplicates during reconnect/retry; keep derived RAG ingestion separate from transcript persistence.
-- [ ] Define recent-context selection in messages versus exchanges, retention/deletion behavior, and a compaction interface. Record the status of future LLM summarization separately.
-- [ ] Expose authoritative session identity and history snapshot/resume APIs for Console; define how snapshots and live updates join without gaps or duplication.
+- [ ] **Identity + configuration + startup:** Introduce validated `InstanceId` and default `SessionId`, initialize/save them once, and resolve the same configuration under managed and standalone startup. Surface configuration failures and stop startup when identity cannot be resolved reliably; no silent default identity. Define restore versus independent-copy behavior. Keep existing protobuf `conversation_id` as an explicit compatibility mapping to `SessionId`.
+- [ ] **Associations + enforcement + exposure:** Bind pipeline/history handles, persona, and capability connections to the resolved instance/session; carry and validate owner correlation on dispatch/callback boundaries. Expose authoritative identity through runtime/endpoint bootstrap. Establish instance-owned data locations and reject incompatible service-owner bindings or duplicate ownership; UUID differences alone do not isolate the existing RAG database or shared Talker state. Retain one active session; history schemas and shared-service multiplexing are later work.
+- [ ] **Allocation lifetime + transport + telemetry:** Separate sandbox allocation keys/handles from conversation identity and tool request IDs across Gateway/Supervisor contracts, cleanup, and event correlation. Rename Docker's internal `instance` field/helper to reflect runtime ownership (for example, `supervisor_run_id`); preserve its ephemeral lifetime, existing container-label compatibility, and cleanup behavior. Full workspace/task execution binding remains R5.
+- [ ] **Acceptance:** Verify stable identity across restarts/configuration edits, independent instance initialization, invalid/missing configuration failures, mismatched-owner rejection, and allocation release without session replacement. Exercise affected Gateway/Supervisor contracts and Windows/macOS path behavior; distinguish tests actually run from unsupported-host checks.
 
-**Acceptance:** Tests cover restart continuity, storage failure, interrupted
-responses, duplicate delivery, and reconnect to the same session. A bounded
-prompt window must not erase durable history. Detailed retention and recovery
-choices remain open until recorded.
+#### R1b — Semantic Refactor of `turn*` (dedicated session)
+
+- [ ] **Inventory + naming map:** Classify every `turn*` field, type, function, history/configuration counter, event, and test by actual meaning. Use `generation_id` for one Talker dispatch; distinguish the most recent user generation, session-wide `TurnState`, Listener utterance counters, and message-count history limits. Reserve conversational `TurnId` for a separately defined interaction lifecycle; no blanket rename.
+- [ ] **Coordinated migration:** Apply the naming map through Gateway, Talker/Listener, protobuf/stubs, Console, telemetry, RAG source references, tests, and docs. Preserve existing IDs, dispatch boundaries, scheduling, interruption, and history behavior; specify wire/persisted-field compatibility. Keep behavioral bug fixes separate from this refactor.
+- [ ] **Acceptance:** Review the semantic mapping and call-site changes, run affected behavior tests and frontend checks, regenerate stubs with `make proto`, and run `buf lint proto/` plus applicable compatibility checks. Prove representative user, tool-continuation, Reasoner, silence, and barge-in paths retain their behavior.
+
+#### R1c — History Persistence, Context and Recovery (following session)
+
+- [ ] **Schema + write boundary + ownership:** Add versioned authoritative history to `kaguya.db` using resolved instance/session ownership and R1b's correlation semantics. Define ordering, storage failures, incomplete generations, and confirmed-spoken partials; persist input independently of Talker readiness. Keep derived RAG memory distinct.
+- [ ] **Context + retention:** Separate bounded prompt selection from retained source history; share authoritative history/memory across Talker and Reasoner with role-specific prompts/projections. Define compaction and deletion propagation, preserving source links. A fresh task working context must not replace instance/session/task identity; resumable context branches and LLM summarization remain explicit design choices.
+- [ ] **Recovery + Console + acceptance:** Implement snapshot/cursor replay and deduplication together. Test restart, reconnect, duplicate delivery, unavailable Talker, storage failure, interrupted output, ownership separation, and prompt trimming without transcript loss. Replay must not blindly repeat external effects.
+
+**[OPEN]:** Exact configuration initialization/ownership-check mechanisms (R1a),
+the complete semantic naming and compatibility map (R1b), and history schema,
+retention and compaction choices (R1c). Resolve each before dependent work.
 
 ### R2 — Policy Management
 
@@ -208,7 +214,9 @@ jobs), task state transitions, concurrency, retry/resume semantics and durable
 recovery. A failed connection is not automatically a completed or failed task.
 
 - [ ] Define task identity and links to session, initiating turn/request, workspace association and eventual execution binding.
+- [ ] **Task + Reasoner runs (one coordinated checkpoint):** Allow multiple concurrent or sequential Reasoner runs under one `TaskId`. Give each delegation attempt a distinct `ReasonerRunId`; retain both IDs through dispatch, progress, results, cancellation and persistence. Replace the current task-keyed active-delegation map so one run cannot overwrite or remove a sibling. A retry creates a new run under the same task; provider/process identity remains separate.
 - [ ] Define the lifecycle/state machine, terminal outcomes and cancellation/approval transitions.
+- [ ] Define task-result aggregation and completion rules across runs, including partial failure and run-only versus whole-task cancellation. Validate sibling-run independence with fake backends in R3 and real adapters in R6; one run completing must not implicitly complete the objective.
 - [ ] Separate task records and coordination from `clients/reasoner.rs`; keep connection/protocol handling in the client.
 - [ ] Persist required task metadata, progress/result references and terminal outcomes; define reconstruction after Gateway/Supervisor/backend loss.
 - [ ] Correlate and order provider events, handle duplicates/late events, and prevent completed/cancelled tasks from being accidentally revived.
@@ -216,8 +224,8 @@ recovery. A failed connection is not automatically a completed or failed task.
 - [ ] Expose task lists/status/results and narration inputs through explicit APIs/events.
 - [ ] Define how approval waiting and workspace changes interact with running tasks; defer allocation mechanics to R5.
 
-**Acceptance:** Exercise concurrent tasks, targeted cancellation, delayed events,
-provider disconnect, restart reconciliation and result retrieval. Assert that
+**Acceptance:** Exercise concurrent tasks and multiple runs of one task, targeted
+cancellation, delayed events, provider disconnect, restart reconciliation and result retrieval. Assert that
 task identity survives transport replacement and that simulated progress cannot
 be recorded as genuine backend success.
 
@@ -258,6 +266,7 @@ either process restarts. Do not equate binding release with workspace deletion.
 - [ ] Define the binding request/result and validate prerequisites before acquiring runtime resources.
 - [ ] Map logical workspaces to the selected backend's actual working directory/storage; current scratch/container storage does not provide this mapping.
 - [ ] Extend Supervisor acquisition/execution/release contracts with the information needed for workspace and policy enforcement.
+- [ ] Use common correlation conventions for instance/session/task/run/request/allocation references while preserving their different lifetimes. Reuse R1a's allocation boundary; a reusable handle is not an invocation or Reasoner attempt, and a cancellation token is not an identity.
 - [ ] Add backend capability checks and explicit unsupported-combination errors; distinguish native execution from OS-enforced isolation.
 - [ ] Bind both Gateway file-tool access and Reasoner execution to the intended logical workspace and applicable policy.
 - [ ] Implement cancellation, release, timeout/failure cleanup, restart reconciliation and orphan handling without silently deleting persistent workspace data.
@@ -284,7 +293,7 @@ a finalized supported-provider set or a process-per-task requirement.
 - [ ] Implement the Reasoner gRPC server; Gateway remains the client. Evolve Delegate/Interrupt/Telemetry contracts only as required by the agreed task, policy and binding models.
 - [ ] Define a capability/adapter boundary for supported backends; keep backend selection outside the Gateway pipeline.
 - [ ] Implement the first approved adapter using the authorized execution binding, with workspace mapping and applicable permission enforcement.
-- [ ] Map backend progress, output, errors and completion to correlated task events; support context updates where required.
+- [ ] Map backend progress, output, errors and completion to both task and Reasoner-run identities; preserve sibling-run independence and support context updates where required.
 - [ ] Implement cancel/stop/shutdown and reconcile interrupted/disconnected backend runs with R3 lifecycle rules.
 - [ ] Complete Supervisor-controlled startup/readiness for on-demand Reasoner use; surface failures before treating work as running.
 - [ ] Make simulated fallback an explicit development behavior; normal unavailability must not produce a fake successful task.
