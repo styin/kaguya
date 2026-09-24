@@ -1,7 +1,7 @@
 //! Pipeline handlers — pure decision functions for each event variant.
 //!
 //! Each handler takes `&mut TurnState` plus pre-fetched data and returns
-//! `Vec<PipelineAction>`. The orchestrator in `main.rs` pre-fetches
+//! `Vec<PipelineAction>`. The orchestrator in `run.rs` pre-fetches
 //! async data (history, tools, retrieval), calls the handler, then
 //! passes the returned actions to the executor.
 

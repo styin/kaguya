@@ -3,12 +3,19 @@ gateway/
 |-- build.rs
 `-- src/
     |-- main.rs
+    |-- app.rs
     |-- lib.rs
     |-- config.rs
     |-- error.rs
+    |-- telemetry.rs
     |-- tools.rs
+    |-- capabilities/
+    |   |-- mod.rs
+    |   `-- rag.rs
     |-- clients/
+    |   |-- audio_sink.rs
     |   |-- listener.rs
+    |   |-- probe.rs
     |   |-- reasoner.rs
     |   `-- talker.rs
     |-- core/
@@ -18,8 +25,21 @@ gateway/
     |   |-- narration.rs
     |   |-- output.rs
     |   |-- persona.rs
+    |   |-- pipeline/
+    |   |   |-- mod.rs
+    |   |   |-- run.rs
+    |   |   |-- handlers.rs
+    |   |   |-- executor.rs
+    |   |   `-- types.rs
     |   |-- silence.rs
     |   `-- types.rs
+    |-- lifecycle/
+    |   |-- mod.rs
+    |   |-- task.rs
+    |   |-- connection.rs
+    |   `-- reconnect.rs
+    |-- sandbox/
+    |   `-- mod.rs
     |-- services/
     |   |-- control.rs
     |   `-- endpoint.rs
@@ -33,9 +53,17 @@ gateway/
 
 Module grouping:
 
+- `main.rs`: async runtime and logging initialization; calls `app::run()`.
+- `app.rs`: component construction, startup wiring and cleanup.
+- `telemetry.rs`: async telemetry event client for Supervisor-owned event aggregation.
+- `capabilities/`: contracts for replaceable functionality.
 - `clients/`: outbound clients for adjacent services owned by other processes.
 - `core/`: orchestration state, event types, context assembly, history, persona,
   output, and timing primitives used by the gateway runtime.
+- `core/pipeline/run.rs`: event loop with a separate P0 branch, using borrowed
+  application components and owned receivers/turn/narration state.
+- `lifecycle/`: Gateway-local async tasks, connections, reconnect and shutdown.
+- `sandbox/`: client for Supervisor-owned sandbox resources.
 - `services/`: inbound server surfaces exposed by the gateway.
 - `rag/`: retrieval, ranking, embedding, and persistence.
 

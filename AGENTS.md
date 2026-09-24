@@ -6,19 +6,20 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 
 - `docs/spec-agent-v0.1.0.md` — Listener + Talker Agent specification
 - `docs/spec-gateway-v0.1.0.md` — Gateway specification
-- `docs/implementation-plan-v0.1.0.md` — Phase 1 implementation plan (single source of truth for build order)
-- `REFERENCES.md` — Algorithmic design decisions with sources (see below)
+- `docs/implementation-plan-v0.1.0.md` — Implementation plan (single source of truth for build order and acceptance gates)
+- `REFERENCES.md` — External research and industry practice informing significant design questions (see below)
 
-## REFERENCES.md — Mandatory Maintenance
+## REFERENCES.md — Bibliography Maintenance
 
-`REFERENCES.md` records the empirical basis for every explicit algorithmic or numerical decision (thresholds, timer values, algorithm choices, codec decisions, file organization decisions).
+`REFERENCES.md` is a bibliography for significant design questions informed by external research or industry practice, including questions without a settled answer.
 
 **Rules:**
 
-- Before introducing any numeric threshold or non-obvious design decision, check if it already has an entry.
-- After introducing one, add a new `## REF-NNN` entry to `REFERENCES.md` with rationale and sources.
-- Never hardcode values that appear in REFERENCES.md — they must be configurable, with the REFERENCES.md value as the documented default.
-- Do not edit existing REF entries unless correcting a factual error. Superseded decisions get a new entry referencing the old one.
+- Check for an existing entry before adding external evidence for a significant design question. Update that entry when improving its framing or sources.
+- Cite specific external resources and explain their relevance and limitations. Distinguish source findings from Kaguya-specific inference; do not present source settings as validated project defaults.
+- Do not add entries solely for human sign-off, implementation history, routine tooling/file organization, configuration inventories, or test results. Record those in the relevant spec, configuration documentation, or implementation plan.
+- Keep numerical defaults configurable and document them with the configuration or specification. A new number alone does not warrant a bibliography entry.
+- Preserve surviving REF IDs and do not reuse deleted IDs. For a new topic, use a new `## REF-NNN` ID above the highest previously assigned ID (REF-026 at this cleanup); check Git history when necessary.
 
 ## Architecture Invariants (Do Not Violate)
 

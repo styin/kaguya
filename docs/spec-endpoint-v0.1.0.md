@@ -162,7 +162,7 @@ type DebugCommand =
 
 **Phase 1:** Raw PCM (16-bit signed little-endian, 16kHz, mono) in both directions. No Opus encoding. The Listener performs any codec work server-side.
 
-**Known test gap:** This means the Listener's Opus decode path (`voice/opus_decoder.py`, REF-002) is never exercised from the dev console. In Phase 2, OpenPod will deliver Opus frames and the Listener's `OpusDecoder` will be on the critical audio path. To mitigate: write a standalone integration test that feeds Opus-encoded audio directly to the Listener's `opus_decoder.decode()` → `recorder.feed_audio()` path, independent of the endpoint transport.
+**Known test gap:** This means the Listener's Opus decode path (`voice/opus_decoder.py`) is never exercised from the dev console. In Phase 2, OpenPod will deliver Opus frames and the Listener's `OpusDecoder` will be on the critical audio path. To mitigate: write a standalone integration test that feeds Opus-encoded audio directly to the Listener's `opus_decoder.decode()` → `recorder.feed_audio()` path, independent of the endpoint transport.
 
 **[OPEN] Phase 2 expansion:** Opus encoding in the browser (via `opus-stream-decoder` or WebAssembly libopus) to reduce bandwidth. The Gateway forwards Opus frames to the Listener unchanged. This is an additive change — raw PCM remains a fallback.
 

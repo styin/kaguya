@@ -1,8 +1,8 @@
-# Project Kaguya — Algorithmic Design References
+# Project Kaguya — Design Bibliography
 
-This document records the empirical basis for explicit algorithmic and numerical decisions made during Phase 1 design. Each entry links a decision in the implementation plan to its source rationale.
+This bibliography collects external research and industry practice relevant to Kaguya's significant design questions. Entries explain what each source establishes and how it informs the project; a source need not settle the question or validate our chosen defaults.
 
-Maintain this file whenever a numeric threshold, algorithm choice, or non-obvious design decision is introduced or changed. Add a new entry; do not edit existing ones unless correcting an error.
+Keep source findings distinct from project inference. Internal approvals, implementation history, routine tooling choices, configuration inventories, and test receipts belong in specifications, configuration documentation, or the implementation plan. Improve existing entries as evidence develops, preserve their REF IDs, and do not reuse deleted IDs.
 
 ---
 
@@ -46,66 +46,6 @@ Maintain this file whenever a numeric threshold, algorithm choice, or non-obviou
 - Nuance/Avaya/Genesys IVR engineering guides — end-of-speech detection and no-input timeout parameters
 
 **All three values are configurable in `config.rs`.** Do not hardcode. Adjust based on deployment context and user feedback.
-
----
-
-## REF-002 — Opus Decoding in Listener (M2.2)
-
-**Decision:** Opus → PCM decoding is performed in the Listener (Python, `opuslib` or `pyogg`) rather than in the Gateway (Rust).
-
-**Rationale:**
-
-1. **Spec mandates it explicitly.** `spec-agent-v0.1.0.md §2.2` lists "Decode Opus frames to PCM audio" as a Listener responsibility. `spec-gateway-v0.1.0.md §1` states the Gateway "does not inspect or decode audio content — it forwards audio bytes between OpenPod and the Listener/Talker without reading them." There is no ambiguity.
-
-2. **RealtimeSTT requires PCM.** RealtimeSTT's `feed_audio()` accepts raw bytes it appends directly to its audio buffer; faster-whisper expects 16kHz/16-bit/mono PCM. Neither library has an Opus decoding layer. Feeding Opus bytes directly produces garbage. (Confirmed via KoljaB/RealtimeSTT issues #22, #52, #137.)
-
-3. **Transport-layer agnosticism (Phase 2 stability).** If the Gateway decoded Opus, switching from dev-GUI/TUI (Phase 1) to OpenPod (Phase 2) could require Gateway changes to accommodate different codec profiles. Listener-side decoding means no Listener code changes when the Gateway's transport switches — the Listener always receives Opus bytes and always decodes them, regardless of what's upstream.
-
-4. **Industry pattern.** LiveKit Agents and Pipecat both decode Opus at the transport-to-processing boundary — the component that takes bytes off the wire and hands PCM to the AI stack. In Kaguya's architecture, that boundary is exactly the Listener's ingress.
-
-5. **Latency is negligible.** libopus decodes a 20ms frame in <0.3ms in Python via opuslib. At 50fps, this is <1% of one CPU core. Not on the critical path.
-
-**Implementation note:** Use `opuslib.Decoder(fs=16000, channels=1)` to decode directly to 16kHz mono PCM (libopus handles internal resampling). `frame_size` for `decode()` is 320 samples for a 20ms frame at 16kHz output (16000 × 0.02 = 320). `pyogg` is an alternative with the same libopus backend.
-
-**Sources:**
-
-- `spec-agent-v0.1.0.md §2.2` (Listener Responsibilities — Opus decode listed explicitly)
-- `spec-gateway-v0.1.0.md §1` (Gateway does not decode audio)
-- KoljaB/RealtimeSTT `feed_audio` PCM format: https://github.com/KoljaB/RealtimeSTT/issues/22
-- KoljaB/RealtimeSTT Opus discussion: https://github.com/KoljaB/RealtimeSTT/discussions/137
-
----
-
-## REF-003 — IPC File Organization: Separate Server and Client Files, Domain-First Naming (M2.4, §8)
-
-**Decision:** Each process uses separate files for its gRPC server role vs. client role, named by domain purpose rather than gRPC role. The Talker's ListenerService gRPC client is embedded in `voice/listener.py` (not a standalone `client.py`) because it is tightly coupled to listener logic and not shared by other components.
-
-**Rationale:**
-
-1. **Lifecycle incompatibility:** A gRPC server calls `await server.wait_for_termination()` (blocking); a gRPC client runs a long-lived `stub.StreamEvents()` async generator. These are two different asyncio task lifecycles. Combining them in one file forces incompatible control flows into the same module.
-
-2. **Google's canonical pattern:** Every gRPC Python example in `grpc/grpc/examples/python/` uses separate `*_server.py` and `*_client.py` files — `helloworld`, `route_guide`, `multiplex`, `auth`, `compression`. The grpc.io basics tutorial explicitly names these `route_guide_server.py` and `route_guide_client.py`. This is a hard convention, not a preference.
-
-3. **Independent testability:** `server.py` (TalkerServiceServicer) can be tested with mock `inference/` and `voice/speaker.py` without instantiating any gRPC client. `voice/listener.py` can be tested with a mock Gateway stub. A combined file requires both roles to be active for either to be tested.
-
-4. **Domain-first naming is superior to role-first naming:** `voice/listener.py` is named for what it does (listen, stream audio events to Gateway) rather than `grpc_client.py`. A developer reading `voice/` understands the module's purpose without knowing its gRPC role. This is the pattern used by **LiveKit Agents Python SDK**: `_agent.py` (server-side servicer equivalent) and `_worker.py` (outbound client to LiveKit server) are separate modules named by domain role, not by "server" vs. "client". The gRPC stub is an implementation detail internal to `_worker.py`, not surfaced as a top-level `client.py`.
-
-5. **Scale threshold:** The Talker is ~700–1150 lines total. RealtimeVoiceChat (the reference single-process script) uses ~400 lines in one file because it has no separate gRPC server and client roles. Kaguya's architecture is fundamentally different — the Talker has a four-method gRPC server servicer plus a streaming client with reconnect logic. A single IPC file would exceed 200 lines of unrelated concerns.
-
-**File boundary table:**
-
-| File                           | Domain role                            | gRPC role                                                                                  |
-| ------------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `talker/server.py`         | Wires inference ↔ voice ↔ Gateway per-turn | SERVER — receives `ProcessPrompt`, `Prepare`, `PrefillCache`, `UpdatePersona` from Gateway |
-| `talker/voice/listener.py` | Captures speech, detects turns         | CLIENT — dials Gateway, streams `ListenerEvent` messages                                   |
-| `talker/main.py`           | Process entrypoint                     | Orchestrates both as `asyncio` tasks                                                       |
-
-**Sources:**
-
-- grpc.io Python basics tutorial: https://grpc.io/docs/languages/python/basics/
-- Real Python gRPC guide: https://realpython.com/python-microservices-grpc/
-- LiveKit Agents Python SDK — `_agent.py` / `_worker.py` split: https://github.com/livekit/agents
-- Python gRPC structure guide: https://github.com/viktorvillalobos/python-grpc-structure
 
 ---
 
@@ -167,90 +107,6 @@ In short: Alexa and Dialogflow CX both achieve low fragmentation rates because t
 
 ---
 
-## REF-005 — Proto Stub Generation Asymmetry (M0, polyglot build system)
-
-**Decision:** Python proto stubs are **committed** to git. Rust proto stubs are **generated** via `build.rs` during `cargo build`. TypeScript uses **runtime loading** via `@grpc/proto-loader` with no code generation.
-
-**Rationale:**
-
-This asymmetry respects each language ecosystem's conventions while optimizing for end-user experience:
-
-### Python: Committed stubs (talker/proto/)
-
-1. **Small size:** `kaguya_pb2.py` + `kaguya_pb2_grpc.py` + `__init__.py` = ~33KB total. Negligible repository bloat.
-
-2. **Zero setup for end users:** With stubs committed, end users can clone, `uv sync`, and run tests immediately. No protoc installation, no grpcio-tools invocation, no Windows/Linux/macOS proto generation compatibility issues.
-
-3. **Stable output:** grpcio-tools generates deterministic Python code. Committed stubs never cause "generated code mismatch" errors across Python versions or platforms. (Contrast with C++ protobuf where codegen varies by protoc version.)
-
-4. **Ecosystem standard for libraries:** Python gRPC libraries (google-cloud-*, grpc-gateway-*, Confluent Kafka Python) all commit generated stubs. The pattern is: "proto schema in version control → stubs in version control → import and use." This is because Python packaging does not have a first-class "build step" like Rust's `build.rs` — `setup.py` custom commands are fragile and discouraged (PEP 517/518 shift to declarative builds).
-
-5. **Patch requirement:** grpcio-tools generates bare imports (`import kaguya_pb2`), which break when proto/ is a package. We patch to relative imports (`from . import kaguya_pb2`). Committing the patched output ensures this works for all users without requiring them to run `gen_proto.py`.
-
-**Size reference:** At 33KB for kaguya.proto (~500 lines), even a 10× schema expansion would only be 330KB — still negligible in a repository with bundled native libraries.
-
-### Rust: Generated stubs (gateway/src/proto/, gitignored)
-
-1. **Large size:** tonic-build generates 150–300KB of Rust code for a medium-sized proto schema. This bloats diffs and creates merge conflicts when the schema changes.
-
-2. **Ecosystem standard for services:** Every major Rust gRPC project uses `build.rs` with tonic-build: TiKV (PingCAP's distributed database), Vector (Datadog's observability pipeline), and all official Tonic examples. The pattern is: "proto schema in version control → build.rs generates code → `.gitignore src/proto/`."
-
-3. **Build system integration:** Rust's `build.rs` is a first-class feature designed exactly for codegen. Cargo automatically re-runs `build.rs` when `proto/kaguya/v1/kaguya.proto` changes (via `println!("cargo:rerun-if-changed=...")` directives). This is seamless and requires no manual steps.
-
-4. **No patch requirement:** tonic-build generates idiomatic Rust with correct module paths. No post-processing needed.
-
-**Size reference:** TiKV's proto/ generates ~2MB of Rust code (gitignored). Vector's proto/ generates ~500KB (gitignored). Our 150–300KB estimate is conservative.
-
-### TypeScript: Runtime loading (reasoner/, no generation)
-
-1. **No codegen in Node.js norm:** The Node.js gRPC ecosystem strongly prefers runtime loading via `@grpc/proto-loader`. Official Google examples, grpc.io tutorials, and production systems (e.g., Uber's service meshes) load `.proto` files at runtime. Static codegen (`grpc-tools`, `ts-proto`) exists but is niche.
-
-2. **Zero build step:** `@grpc/proto-loader` reads `proto/kaguya/v1/kaguya.proto` directly at runtime and generates TypeScript types on-the-fly via Protobuf.js reflection. No compilation, no stubs, no gitignore rules.
-
-3. **Instant schema iteration:** Changing `kaguya.proto` requires only restarting the Node.js process. No regeneration command, no build cache invalidation.
-
-4. **Trade-off accepted:** Runtime loading sacrifices compile-time type safety (types are inferred at runtime, not statically checked). This is acceptable for the Reasoner (a single-purpose service with a small API surface) but would not scale to a large microservice mesh.
-
-### Cross-language consistency via buf (CI only)
-
-**buf is used exclusively for CI validation** (`buf lint`, `buf breaking`) in `.github/workflows/proto-lint.yml`. It does **not** generate code. This ensures schema consistency across all three languages without forcing a single codegen tool.
-
-**File organization:**
-
-```
-proto/
-  buf.yaml               # CI-only linting and breaking change detection
-  kaguya/v1/kaguya.proto # Single source of truth
-talker/
-  proto/                 # COMMITTED Python stubs (33KB)
-  scripts/gen_proto.py   # Dev-only regeneration via grpcio-tools
-gateway/
-  build.rs               # Invokes tonic-build automatically on cargo build
-  src/proto/             # GITIGNORED Rust stubs (150-300KB)
-reasoner/
-  # No proto/ directory — runtime loads ../proto/kaguya/v1/kaguya.proto
-```
-
-**Developer workflow:**
-
-```sh
-# After editing proto/kaguya/v1/kaguya.proto:
-make proto                # Regenerates Python stubs (talker/proto/)
-cargo build               # Automatically regenerates Rust stubs (gateway/src/proto/)
-# Reasoner: no action needed (runtime loading)
-git add proto/ talker/proto/  # Commit schema + Python stubs
-git commit -m "proto: add new RPC method"
-```
-
-**Sources:**
-
-- Python gRPC packaging survey: google-cloud-python, grpc-gateway, confluent-kafka-python all commit stubs
-- Rust build.rs + tonic-build canonical examples: TiKV (https://github.com/tikv/tikv), Vector (https://github.com/vectordotdev/vector), Tonic examples (https://github.com/hyperium/tonic/tree/master/examples)
-- Node.js gRPC runtime loading: grpc.io Node.js tutorial (https://grpc.io/docs/languages/node/basics/), `@grpc/proto-loader` README (https://github.com/grpc/grpc-node/tree/master/packages/proto-loader)
-- PEP 517/518 (declarative Python builds, discouraging setup.py custom commands): https://peps.python.org/pep-0517/, https://peps.python.org/pep-0518/
-
----
-
 ## REF-006 — Max Response Sentences for Voice Brevity (Talker, M3.4)
 
 **Decision:** `MAX_RESPONSE_SENTENCES=4` — the soul container stops emitting spoken sentences after this limit per turn. Configurable in `config.py`.
@@ -295,554 +151,148 @@ Voice responses must be concise. Long monologues break conversational flow, caus
 
 ---
 
-## REF-008 — Default `top_k = 10` for Hybrid Retrieval (Gateway RAG)
+## REF-008 — Retrieval Breadth and Context Selection
 
-**Decision:** [gateway/src/config.rs](gateway/src/config.rs) sets `RagConfig::top_k = 10` as the default number of memories returned per turn. The retriever requests `top_k * 2` from each source, fuses via RRF (REF-007), then truncates to `top_k`.
+**Question:** How much memory should a turn retrieve, and how much of that
+candidate set should reach the model?
 
-**Rationale:**
+**References:**
 
-- **Standard RAG retrieval window before re-ranking (Lewis et al., 2020):** The original RAG paper for knowledge-intensive NLP used 5–10 retrieved passages as the augmentation set. Production RAG systems (Pinecone, Weaviate, LangChain) default to 5–20 for similar reasons.
-- **Token budget:** Kaguya memories are short (capped at ~200 characters by `truncate_chars` in [gateway/src/rag/mod.rs](gateway/src/rag/mod.rs)). 10 retrieved entries ≈ 2000 chars ≈ 500–700 tokens — fits inside `TalkerContext` without crowding history or persona.
-- **Why over-fetch then fuse:** Pulling `top_k * 2` from each modality before RRF gives the fusion stage signal from items that might rank low in one source but high in the other. Truncating to `top_k` post-fusion preserves the diversity benefit.
+- Lewis, P. et al. (2020). [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://arxiv.org/abs/2005.11401).
+  Combines a retrieved, non-parametric memory with a generative model and
+  evaluates it on knowledge-intensive NLP tasks. A foundation for retrieval
+  augmentation, not evidence for a universal number of conversational memories.
+- Anthropic (2024). [Introducing Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval).
+  Separates broad candidate retrieval from reranking and final context selection.
+  Its experiments compare different final chunk counts and report a trade-off
+  between retrieval coverage, distracting context, and latency. The reported
+  settings belong to those corpora and models.
+- Liu, N. F. et al. (2023). [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172).
+  Finds that answer quality on multi-document question answering and key-value
+  retrieval depends on where relevant information appears in the context.
+  Context-window capacity alone does not establish effective use of that context.
 
-**Configurability:** Adjust `[rag] top_k` in `gateway/gateway.toml` if context length budgets change.
-
-**Sources:**
-
-- Lewis, P. et al. (2020). "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks." _NeurIPS 2020_. https://arxiv.org/abs/2005.11401
-- Pinecone — RAG retrieval defaults: https://www.pinecone.io/learn/retrieval-augmented-generation/
-
----
-
-## REF-009 — BM25 via SQLite FTS5 with `porter unicode61` Tokenizer (Gateway RAG)
-
-**Decision:** Memory full-text search uses SQLite's FTS5 virtual table with the tokenizer string `porter unicode61` ([gateway/src/rag/store.rs](gateway/src/rag/store.rs) — table `memories_fts`).
-
-**Rationale:**
-
-- **FTS5's BM25 ranking is the default and battle-tested:** SQLite ships Okapi BM25 (Robertson/Spärck Jones IDF) as the FTS5 default ranking function. No extension or external library needed. Identical scoring semantics to Lucene's `BM25Similarity` for English queries.
-- **`unicode61` for international text:** SQLite's default `simple` tokenizer is ASCII-only and splits non-ASCII text as a single token, which kills recall on Chinese/Japanese/Korean. `unicode61` applies Unicode-aware folding (case + diacritics) and respects character classes — matching the Chinese trigger keywords (`我喜欢`, `项目`, …) that the memory extractor itself emits.
-- **`porter` stemmer for English:** Folds `like`/`liked`/`liking` to a common stem so a memory recorded as "I like coffee" matches a query for "what does the user like". Porter stemming is the standard IR stemmer; FTS5 supports stacking it on top of `unicode61`.
-- **Why not a custom CJK tokenizer (e.g. ICU):** Adds a build-time dependency and a per-platform binary. SQLite-bundled `unicode61` covers the substring matching we need at this corpus size (memory entries are short and few). Re-evaluate when memory grows past ~100k entries or recall on multi-character CJK queries degrades.
-
-**Sources:**
-
-- SQLite FTS5 documentation — Tokenizers: https://www.sqlite.org/fts5.html#tokenizers
-- SQLite FTS5 — BM25 ranking: https://www.sqlite.org/fts5.html#the_bm25_function
-- Porter, M.F. (1980). "An algorithm for suffix stripping." _Program_ 14(3): 130–137.
+**Relevance to Kaguya (design inference):** Compare fixed top-k selection with
+relevance thresholds, reranking, and selection under a token budget. Candidate
+recall and final answer quality are separate concerns: a larger search pool need
+not become a larger prompt. Thresholds require calibration to the chosen scorer;
+a token budget bounds size but does not establish relevance. Evaluate these
+choices on conversational memories, including turns with no useful match,
+alongside voice latency and prompt cost. Rank fusion is covered by REF-007;
+representation and compression by REF-010. Current retrieval settings live in
+[gateway/gateway.toml](gateway/gateway.toml); these sources do not validate their
+defaults or imply that the alternatives are implemented.
 
 ---
 
-## REF-010 — RAG Memory Truncation: Storage-Time vs. Output-Time (Gateway RAG)
+## REF-009 — Lexical Retrieval for Multilingual Memory
 
-**Decision:** The RAG store keeps full-fidelity memory content. Truncation only happens at *output* time — when retrieval results or the exported `memory_md` document are assembled for the Talker prompt. The store side has only a defensive sanity bound.
+**Question:** Which tokenization and normalization choices preserve useful
+lexical matches across English, Chinese, and mixed-language memories?
 
-**Configuration ([gateway/src/config.rs](gateway/src/config.rs#L48), `[rag]` block in `gateway/gateway.toml`):**
+**References:**
 
-| Knob                       | Default     | Layer       | Purpose                                                                                                |
-| -------------------------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------ |
-| `max_storage_chars`        | `Some(4096)` | Storage     | Defensive cap on the `memories.content` row. Real voice utterances never approach this. Prevents pathological pastes / adversarial inputs from poisoning the index. |
-| `max_chars_per_result`     | `None`      | Retrieval   | Cap on each `RetrievalResult.content` injected into the per-turn Talker prompt. `None` = let the model context budget govern. Set to bound per-turn prompt cost when many retrievals fire. |
-| `max_chars_per_md_entry`   | `None`      | Persona MD  | Cap on each row of the "Recent Context" section in `RagStore::export_as_markdown` (delivered via `UpdatePersona`). Independent of retrieval; affects the long-term-prefix cost. |
+- SQLite. [FTS5 tokenizers](https://www.sqlite.org/fts5.html#tokenizers) and
+  [BM25 ranking](https://www.sqlite.org/fts5.html#the_bm25_function).
+  FTS5 separates tokenization from ranking. Its default `unicode61` tokenizer
+  groups consecutive token characters; Unicode support does not supply Chinese
+  word segmentation. Porter stemming is designed for English. The separate
+  trigram tokenizer supports substring matching, with limitations for short
+  queries. These are distinct retrieval behaviors, not interchangeable forms
+  of multilingual support.
+- Unicode ICU. [Boundary Analysis](https://unicode-org.github.io/icu/userguide/boundaryanalysis/).
+  ICU supplements word-boundary rules with dictionaries for languages including
+  Chinese and Japanese. This provides a concrete alternative to treating an
+  uninterrupted sequence of characters as a single token.
 
-**Rationale:**
-
-- **Truncation at storage time is information loss that cascades.** Once a row is written truncated, every future BM25 search, every vector embedding, every exported `memory_md` row gets the damaged version. The original phrasing — including the *reason* a preference exists ("...because we're migrating off Java") — is gone forever. Keep storage authoritative; let consumers decide their own budget.
-
-- **Output-time caps are reversible.** A future change to `max_chars_per_result` (or removing the cap entirely) immediately benefits all stored memories on the next retrieval. No migration, no re-extraction.
-
-- **The 4 KB storage sanity bound is defensive only.** A 60-second monologue at conversational pace is ~1000 chars (English) or ~250–400 chars (Chinese, denser). 4096 chars is ~10–15× that, so legitimate voice input never hits the cap. Its only job is to bound the worst case if a user pastes raw text into a future text-input path or if an upstream component sends pathological content.
-
-- **Why `None` (unlimited) for output caps:** The 8B fast-path Talker has an 8K–32K context window depending on the `llama.cpp` config; with `top_k=10` retrievals at typical voice-utterance length (~150–300 chars each), the retrieval section is ~1.5–3 KB. That's well within budget. Capping at the output layer is *available* for deployments that hit budget pressure (large `top_k`, long memories, smaller-context models) but isn't needed for the default Phase-1 setup.
-
-- **Asymmetry with REF-006 (`max_response_sentences = 4`):** That sets a hard cap on assistant output for voice brevity. RAG truncation defaults to unlimited because input retrieval already passes through `top_k` (count-based) and BM25 ranking (relevance-based) — those are the right knobs for budget. Adding an additional length cap by default would over-constrain.
-
-**Phase-2 work that supersedes this:** Replace keyword-trigger extraction with LLM-based extraction (see `docs/spec-gateway-v0.1.0.md` Section 4). LLM extraction will produce concise, normalized memory entries directly — at which point `max_storage_chars` becomes vestigial defense and the output caps may shift to operate on token counts rather than char counts.
-
-**Sources:**
-
-- "Retrieve and refine, don't truncate" — general RAG-pipeline practice; e.g. LlamaIndex / LangChain documentation on chunking-vs-truncation tradeoffs.
-- SQLite cell-size limits: https://www.sqlite.org/limits.html (default 1 GB; 4 KB is far below any practical concern).
+**Relevance to Kaguya (design inference):** Compare English stemming,
+language-aware word segmentation, and character n-grams on names, identifiers,
+short Chinese queries, and mixed-language utterances. Assess missed matches and
+false matches alongside index size and cross-platform dependency cost. The
+current `porter unicode61` choice in [the memory store](gateway/src/rag/store.rs)
+is not evidence that Chinese substring retrieval works adequately. Revisit it
+based on retrieval failures rather than an arbitrary corpus-size threshold.
+Combining lexical and semantic rankings remains REF-007's concern.
 
 ---
 
-_Add new entries below this line. Format: `## REF-NNN — Short Title (component, milestone)`_
+## REF-010 — Memory Fidelity and Context Compression
 
-## REF-011 — reqwest TLS Backend: None for Phase 1 (Gateway, RAG embedder)
+**Question:** Where should information reduction happen: memory formation,
+indexing, retrieval, or prompt assembly? What information remains recoverable?
 
-**Decision:** `reqwest` in `gateway/Cargo.toml` is configured with `default-features = false, features = ["json", "http2"]` — no TLS backend compiled in. The single call site (`gateway/src/rag/embedder.rs`) posts to a localhost embedding server (`http://127.0.0.1:8081/v1/embeddings` by default).
+**References:**
 
-**Rationale:**
+- Park, J. S. et al. (2023). [Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442).
+  Stores observations and higher-level reflections in a memory stream;
+  reflections retain pointers to supporting memories. This is an example of
+  derived abstractions coexisting with their evidence, evaluated for simulated
+  agents rather than factual reliability in a personal assistant.
+- Anthropic (2024). [Introducing Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval).
+  Shows how document chunks can lose referents and situational context. It adds
+  chunk-specific context before embedding and lexical indexing. This informs
+  how to preserve meaning when splitting source material; it does not establish
+  that every memory should be shortened or summarized.
+- Jiang, H. et al. (2023). [LLMLingua: Compressing Prompts for Accelerated Inference of Large Language Models](https://arxiv.org/abs/2310.05736).
+  Evaluates budget-controlled, token-level prompt compression on reasoning,
+  conversation, and summarization datasets. It supplies an alternative to a
+  simple length cutoff, with measured quality/cost trade-offs in those settings,
+  not a guarantee of lossless compression.
 
-1. **No TLS in the actual data path.** The embedder is the only `reqwest` consumer in the gateway, and the configured endpoint is loopback HTTP. A TLS backend is dead code for the current deployment.
+**Relevance to Kaguya (design inference):** Distinguish retained source
+conversation, derived memories, searchable representations, and the context
+selected for one turn. Truncation discards a suffix without judging meaning;
+chunking preserves text across pieces but can separate its context; extractive
+selection retains chosen wording; summarization creates a compact interpretation
+that needs checking against its source. A derived memory can be concise while
+the source remains available. Recoverability depends on retaining and linking
+that source, not merely on choosing storage-time versus output-time reduction.
 
-2. **Contributor portability.** `reqwest`'s default `default-tls` enables `native-tls` → `openssl-sys`, which links against system OpenSSL via `pkg-config`. On Linux that requires `libssl-dev` (headers + `openssl.pc`); on macOS, Homebrew OpenSSL with `PKG_CONFIG_PATH` set; on Windows, vcpkg or perl-build OpenSSL. Dropping the TLS backend removes this system dependency entirely — `cargo build` works on any fresh dev machine with only the Rust toolchain. This matches the rest of the gateway: `tonic` is also on default features (no `tls` flag), so gRPC currently runs plain HTTP/2 over loopback as well.
-
-3. **Failure mode is loud, not silent.** If `embedding_url` is later set to `https://...` without re-enabling a TLS backend, `reqwest` errors immediately at request time with a "URL scheme is not allowed" / builder error — not a silent fallback. The misconfiguration surfaces on the first embedding request, in logs.
-
-4. **Reversibility is one line.** When TLS is needed (remote embedding endpoint, hosted service), swap to one of:
-
-   - `features = ["json", "http2", "rustls-tls"]` — pure-Rust, bundled Mozilla roots via `webpki-roots`. No system dep. Use `rustls-tls-native-roots` instead if corp-managed root CAs in the OS trust store must be honored.
-   - `features = ["json", "http2", "native-tls"]` — OS trust store, system OpenSSL. Requires `libssl-dev`/equivalent on each dev machine and CI image.
-
-   No source change in `embedder.rs` — `reqwest::Client::new()` and the `.post(...).json(...).send()` call sites are TLS-backend-agnostic.
-
-**Why not pick `rustls-tls` now as a hedge?** It would add `rustls`, `webpki-roots`, and ring/aws-lc-rs to the build — non-trivial compile time and binary size — to support a path nothing currently exercises. Cheaper to defer until the real requirement appears, at which point the trust-root choice (Mozilla bundle vs. OS roots) can be made with concrete context.
-
-**Sources:**
-
-- `reqwest` features documentation: https://docs.rs/reqwest/0.12/reqwest/#optional-features
-- `openssl-sys` build requirements: https://docs.rs/openssl/latest/openssl/#building
-- `rustls` vs `native-tls` trade-offs: https://github.com/rustls/rustls#project-goals (modern-only TLS, no OS keychain integration by default)
-
----
-
-## REF-012 - Gateway Lifecycle Module Split (Gateway, lifecycle refactor)
-
-**Decision:** Gateway lifecycle supervision remains exported as `crate::lifecycle`, but the implementation is split into submodules by ownership concern:
-
-| Module | Responsibility |
-| ------ | -------------- |
-| `gateway/src/lifecycle/mod.rs` | `LifecycleSupervisor`, shutdown orchestration, public re-exports |
-| `gateway/src/lifecycle/task.rs` | `TaskSpawner` and supervised Tokio task handles |
-| `gateway/src/lifecycle/connection.rs` | connection readiness state and shared handles |
-| `gateway/src/lifecycle/process.rs` | managed child-process launch, log forwarding, and termination |
-| `gateway/src/lifecycle/reconnect.rs` | bounded reconnect policy |
-
-**Rationale:**
-
-1. **Lifecycle is an infrastructure subsystem, not conversational core.** It owns task/process/connection resources and shutdown behavior. Keeping it under `gateway/src/lifecycle/` preserves the `crate::lifecycle` API while avoiding a misleading move into `gateway/src/core/`, whose existing modules model turn, persona, history, silence, and other conversation-domain concerns.
-
-2. **Split by owned resource.** Tasks, connections, processes, and reconnect policies have different failure modes and test surfaces. Keeping each resource type in its own file makes the next lifecycle work, especially runtime health snapshots and process monitoring, easier to review without changing external imports.
-
-3. **Public API stability.** `gateway/src/lib.rs` continues to expose `pub mod lifecycle;`, and `mod.rs` re-exports the existing public types. Existing callers keep using `crate::lifecycle::{...}` / `kaguya_gateway::lifecycle::{...}`.
-
-**Sources:**
-
-- Rust module system convention: directory modules with `mod.rs` preserve the same module path as a single `lifecycle.rs` file.
-- Kaguya Gateway source organization: `gateway/src/core/` is already domain-oriented, while lifecycle supervision is process/runtime infrastructure.
+Compare these approaches for preservation of names, reasons, qualifications,
+temporal changes, and contradictory evidence, as well as retrieval quality and
+latency. Changing prompt assembly can recover omitted material only if it was
+retained elsewhere. Current character caps in
+[gateway/gateway.toml](gateway/gateway.toml) are implementation limits, not a
+research-backed fidelity policy or a guarantee of source retention. REF-008
+covers how much retrieved material is selected.
 
 ---
 
-## REF-013 - Runtime Supervisor Package Boundary (Runtime supervisor refactor)
-
-**Decision:** Process ownership is extracted from Gateway into the standalone `supervisor/` Rust package. Gateway lifecycle now owns Tokio tasks, connection readiness, reconnect policy, and Gateway shutdown only. Runtime process launch, process-tree termination, child log forwarding, restart policy, and future sandbox wrapping belong to the supervisor package. Runtime launch policy lives in `config/kaguya.runtime.toml`; Gateway keeps only capability endpoint/readiness configuration.
-
-**Rationale:**
-
-1. **Separate lifecycle domains.** Gateway P0 `STOP` is an agent behavior path: cancel active generation, timers, reasoners, and output. Runtime shutdown/restart is an application process path. Keeping both inside Gateway made the Gateway lifecycle layer grow into a process orchestrator instead of a routing/control component.
-
-2. **Sandboxing is a process-launch concern.** Future sandbox providers such as `none`, OS-level wrappers, or platform-specific resource isolation wrap runtime processes, not Gateway turn stages. Locating process ownership in `supervisor/` leaves Gateway free of sandbox-specific branching and keeps untrusted sidecar capability providers outside Gateway's address space.
-
-3. **Preserve Rust process hardening.** The cross-platform process-tree shutdown, stdout/stderr forwarding, snapshots, and restart-policy tests were already implemented in Rust under Gateway. Moving that code outward keeps the stronger implementation while changing the owner.
-
-4. **Frontend telemetry can compose cleanly.** Supervisor remains authoritative for process health/logs/restarts; Gateway remains authoritative for capability connection readiness. The console can display both layers without Gateway exposing child-process snapshots.
-
-**Supersedes:** REF-012's process row for `gateway/src/lifecycle/process.rs`; Gateway no longer contains that module.
-
-**Sources:**
-
-- Kaguya architecture invariant: Gateway owns filesystem/capability routing, while runtime processes provide capabilities over IPC.
-- Kaguya supervisor extraction target: `supervisor/src/process.rs` owns managed child-process primitives and restart policy.
-- Gateway lifecycle source after extraction: `gateway/src/lifecycle/` contains task, connection, and reconnect modules only.
-
----
-
-## REF-014 — `sandbox_exec` Tool: Pluggable Code-Execution Sandbox (Gateway, tools)
-
-**Decision:** LLM-generated code execution is exposed as a normal Gateway tool, `sandbox_exec`, backed by a swappable `SandboxBackend` trait (`gateway/src/sandbox/`). Backend and resource limits are config-driven (`[sandbox]` in `gateway.toml`). Defaults:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `enabled` | `true` | When `false`, the tool is not advertised to the Talker at all. |
-| `backend` | `native` | `native` \| `docker` \| `bubblewrap` \| `job_object`. |
-| `mode` | `single_user` | Docker only: `single_user` (lazy create on first use) vs `hosted` (prewarm `pool_size` containers at startup to hide cold-start). |
-| `default_timeout_secs` | `30` | Per-execution wall-clock limit, enforced by tree-kill (native/bwrap/job) or in-container `timeout` (Docker). |
-| `max_output_bytes` | `16384` (16 KiB) | Cap on captured stdout/stderr; the bytes feed the next LLM prompt, so this bounds per-turn context cost. |
-| `memory_limit_mb` | `512` | Docker `--memory`/`--memory-swap` and Job Object `JobMemoryLimit`. |
-| `pids_limit` | `128` | Docker `--pids-limit` and Job Object `ActiveProcessLimit`. |
-| `cpus` | `1.0` | Docker `--cpus` quota (fractions allowed). |
-| `network` | `false` | Docker: `--network=none` unless enabled. bubblewrap: always offline (`--unshare-all`). |
-
-**Rationale:**
-
-1. **Sandbox is just a tool.** From the dialog flow's view, `sandbox_exec` is indistinguishable from `read_file` or `list_files`: the LLM emits a `ToolRequest`, the Gateway executes it, a JSON string flows back through the normal P3 `ToolResult` path. No new proto messages, no new priority channel, no pipeline changes. This is why it lives under `tools.rs` dispatch rather than as a separate service or event stream. **This is distinct from REF-013's process-launch sandboxing** — REF-013 concerns wrapping *runtime component processes* (Talker/Reasoner) at launch, which is a supervisor concern; REF-014 concerns *executing LLM-authored code* mid-conversation, which is a Gateway tool concern.
-
-2. **Pluggable backend, native default.** Most self-hosting users already have a local Python/Node toolchain and accept running LLM code on their own machine. `native` gives zero extra dependencies and sub-millisecond startup (interpreter in a per-session scratch dir, isolation limited to cwd + timeout + tree-kill). Users who want isolation opt into `docker` (strongest), `bubblewrap` (Linux namespaces, no daemon), or `job_object` (Windows resource limits + kill-on-close). Advertising the tool only when enabled means the LLM is never told about a capability it can't use.
-
-3. **Per-conversation affinity.** Within one conversation the LLM may call the sandbox repeatedly (create a file, then read it, then modify it). All calls for a given `conversation_id` share filesystem state — a fixed Docker container or a stable scratch dir — and are torn down on conversation cleanup/shutdown. Backends key their session map on `conversation_id`.
-
-4. **Numeric defaults are conservative and reversible.** 30 s bounds a runaway loop without truncating typical analysis; 16 KiB output keeps a single tool result from blowing the prompt budget (cf. REF-010's RAG output caps); 512 MB / 128 PIDs are generous for scripting yet cap fork bombs and memory blowups. All are overridable per deployment.
-
-5. **`network=false` by default** because most `sandbox_exec` uses are local computation; opening the network is an explicit opt-in given the code is model-authored.
-
-6. **One Gateway process = one conversation ⇒ one-Gateway-per-user is the hosting model.** `main.rs` mints a single `conversation_id` per process, so "session end" == process shutdown, and `cleanup` runs there. Rather than bolt speculative multi-tenancy onto the Gateway, hosting runs one Gateway (hence one sandbox scope) per user session — users are then isolated by construction, with no shared container/scratch state to leak. Consequently the Docker backend does **not** replenish the warm pool on cleanup (there is no next in-process session to serve; that would be pure churn), and `hosted` mode simply prewarms `pool_size` containers at startup (`pool_size=1` suffices to hide first-call latency in the per-user shape).
-
-7. **Fail-loud posture, not fail-open.** `native` runs model-authored code with no host isolation; combining it with `mode=hosted` logs a prominent startup warning (safe only when each Gateway is itself confined per user). It is a warning rather than a hard refusal because a per-user-containerized Gateway legitimately uses `native` (the container *is* the sandbox). The `sandbox_exec` tool description deliberately avoids the word "isolated" since that is a property of the chosen backend, not the tool. A misconfigured `allowed_languages` that parses to zero known languages also warns (empty otherwise means "allow all").
-
-8. **Crash-safe container reaping.** Every Docker container carries two labels: `kaguya.sandbox=1` (all Kaguya sandboxes) and `kaguya.sandbox.instance=<uuid>` (this process only). Graceful `shutdown()` reaps by the instance label — safe even when several Gateways share one Docker host — as a belt-and-suspenders beyond the tracked container ids. After a hard crash, `make sandbox-clean` reaps the global label. Per-exec runner scripts use unique names (`.kaguya-run-<uuid>.<ext>`) and are removed after the interpreter exits, so concurrent calls in one session never clobber each other while user-created files still persist.
-
-**Windows Job Object note:** the `job_object` backend is feature-gated (`--features sandbox-jobobject`, off by default) and requires the `windows` crate with `Win32_Security` (for `SECURITY_ATTRIBUTES` referenced by `CreateJobObjectW`). Its `HANDLE` is held across `.await` via a `SendHandle` newtype — a Job Object is a process-wide kernel object whose handle validity is independent of the tokio worker thread polling the future.
-
-**Supersedes:** none. Replaces the previously-disabled `run_command` tool (removed from the registry) as the safe, isolatable code-execution path.
-
-**Sources:**
-
-- Docker resource limits: https://docs.docker.com/engine/containers/resource_constraints/ (`--memory`, `--pids-limit`, `--network=none`, `--cap-drop`).
-- Bubblewrap sandboxing model: https://github.com/containers/bubblewrap (`--unshare-all`, `--ro-bind`, `--die-with-parent`).
-- Windows Job Objects: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, memory/active-process limits) — the pattern Chromium uses for renderer resource containment.
-
----
-
-## REF-015 — Supervisor-Owned Sandbox Provider and Opaque Handles
-
-**Decision:** Sandbox Provider ownership moves from Gateway to Supervisor. Gateway
-retains the `sandbox_exec` tool definition, request correlation, and P3
-`ToolResult` flow, but it may interact with a sandbox only through the
-Supervisor control-plane sequence:
-
-1. acquire an opaque handle for the conversation;
-2. execute using that handle;
-3. release the handle when the conversation ends.
-
-Supervisor owns backend construction, configuration, prewarming, handle/session
-mapping, resource limits, cleanup, and global shutdown. Sandbox configuration
-therefore lives in `config/kaguya.runtime.toml`, while `gateway.toml` contains
-only the Supervisor control-plane URL. The numerical defaults and backend
-semantics remain those documented by REF-014.
-
-**Rationale:**
-
-1. **One runtime owner.** Sandbox processes, containers, and OS resource handles
-   are runtime resources. The same component that constructs and monitors the
-   process graph must own their lifecycle and teardown.
-2. **Gateway remains a coordinator.** Tool meaning and conversational result
-   routing belong in Gateway; provider selection, Docker/Job Object details, and
-   warm-pool state do not.
-3. **Opaque handles preserve the boundary.** Gateway cannot depend on container
-   IDs, scratch paths, backend type, or provider implementation. Supervisor can
-   replace a backend without changing the tool protocol.
-4. **Shutdown ordering is explicit.** Gateway releases its conversation handle;
-   Supervisor remains authoritative and performs provider-wide cleanup after
-   managed processes stop. Before an initial Gateway start or restart,
-   Supervisor also clears stale conversation handles left by a crash.
-5. **Hosted pools are Supervisor-scoped.** Unlike REF-014's one-Gateway process
-   assumption, a Supervisor can serve multiple conversation handles. A released
-   Docker container is destroyed rather than reused (preventing file leakage),
-   and hosted mode replenishes a clean container up to the configured pool size.
-
-**Supersedes:** REF-014 only where it assigns Sandbox Provider implementation
-and lifecycle to `gateway/src/sandbox/`. REF-014 remains authoritative for the
-tool's behavior, supported backends, security posture, and configurable numeric
-defaults, except its item 6 no-replenishment behavior, which is replaced by the
-Supervisor-scoped clean replenishment rule above. This also completes REF-013's
-stated direction that sandbox/process launch concerns belong to Supervisor.
-
-**Sources:**
-
-- Project runtime architecture diagram `2.png`: Supervisor constructs/monitors
-  Gateway and binds to the Sandbox Provider.
-- Project sandbox sequence diagram `1.png`: Gateway → Tool Manager → Supervisor
-  → Sandbox Provider, with an opaque handle returned before execution.
-- `supervisor/src/process.rs`: existing runtime process ownership and teardown.
-- `gateway/src/core/pipeline/executor.rs`: existing P3 tool dispatch/result
-  boundary retained by this change.
-
----
-
-## REF-016 — Vendored `protoc` for Rust Stub Generation
-
-**Decision:** Gateway and Supervisor build scripts obtain `protoc` from
-`protoc-bin-vendored` and pass that executable to `tonic-build`. Buf remains the
-schema linting workflow, and Python keeps its existing `grpcio-tools` generator.
-
-**Rationale:**
-
-1. Both Rust crates compile the same canonical proto during `cargo build`; a
-   system-level `protoc` prerequisite made clean Windows/macOS builds depend on
-   unrelated machine setup.
-2. The vendored crate selects a platform binary while preserving the existing
-   `tonic-build` output and schema source of truth.
-3. Pinning the crate version in both build dependencies keeps Gateway and
-   Supervisor generation behavior aligned and reproducible.
-
-**Sources:**
-
-- `protoc-bin-vendored` documentation: https://docs.rs/protoc-bin-vendored
-- `prost-build` documentation (`protoc` is used to parse schemas):
-  https://docs.rs/prost-build
-
----
-
-## REF-017 — Sandbox Backend Contract Suite and Environment-Gated Deployment Tests
-
-**Decision:** Sandbox backend behavior is verified by a shared integration
-contract in `supervisor/tests/sandbox_backend_contract.rs`. The suite exercises
-the public `SandboxManager` API for every backend that is available on the
-current host. It uses test-only settings:
-
-| Test setting | Value | Purpose |
-| --- | ---: | --- |
-| `default_timeout_secs` | `1` | Keep timeout tests fast while still exercising backend cleanup. |
-| outer timeout wait | `7s` | Give Docker Desktop/WSL and process-tree cleanup a small grace window beyond the configured 1s sandbox timeout. |
-| `max_output_bytes` | `32` | Force truncation with a compact stdout fixture. |
-| Docker availability probe | `10s` | Prevent Docker Desktop half-started states from hanging the suite. |
-
-Docker and Bubblewrap tests are environment-gated rather than mandatory:
-
-- Docker requires a reachable Docker daemon and the `kaguya-sandbox:latest`
-  image.
-- Bubblewrap requires Unix plus `bwrap --version`.
-- Windows Job Object tests require Windows plus `--features sandbox-jobobject`.
-
-**Rationale:**
-
-1. A single contract prevents backend drift: `stdin`, timeout, output
-   truncation, cleanup, and session isolation should mean the same thing for
-   native, Docker, Bubblewrap, and Job Object.
-2. The test-only 1s/7s timeout pair keeps CI and local runs short while still
-   detecting the review finding where descendants survived timeout and held
-   inherited pipes open.
-3. Docker Desktop on Windows can be installed while its WSL engine is not yet
-   usable. A bounded 10s probe turns that host setup problem into an explicit
-   skip instead of a hung test process.
-4. Environment gating keeps normal Windows/macOS/Linux development usable while
-   still allowing stronger backend coverage on hosts that have the relevant
-   runtime installed.
-
-**Supersedes:** none. Complements REF-014 and REF-015 by defining how backend
-behavior is verified after Supervisor ownership.
-
-**Sources:**
-
-- Docker Desktop Windows requirements:
-  https://docs.docker.com/desktop/setup/install/windows-install/
-- Docker Desktop WSL 2 backend prerequisites:
-  https://docs.docker.com/desktop/features/wsl/
-- Microsoft WSL installation/update documentation:
-  https://learn.microsoft.com/windows/wsl/install
-- Bubblewrap manual (`--die-with-parent`, namespace behavior):
-  https://manpages.debian.org/unstable/bubblewrap/bwrap.1.en.html
-- Windows Job Objects:
-  https://learn.microsoft.com/windows/win32/procthread/job-objects
-
----
-
-## REF-018 — Mandatory Per-Backend Sandbox CI by Supported Host
-
-**Decision:** Pull requests run the Supervisor suite on Linux, macOS, and
-Windows. Backend-specific sandbox contracts are mandatory on the host that
-implements each isolation mechanism:
-
-| Contract | Required CI host | Reason |
-| --- | --- | --- |
-| Docker | Linux | Exercises the container contract on GitHub-hosted Docker Engine without requiring Docker Desktop virtualization. |
-| Bubblewrap | Linux | Bubblewrap is implemented with Linux user, mount, PID, and network namespaces; it does not provide macOS coverage. |
-| Job Object | Windows | Job Objects are a Windows kernel facility and the backend is compiled only with `--features sandbox-jobobject`. |
-
-Normal local tests retain REF-017's environment-gated skip behavior. Dedicated
-CI jobs set `KAGUYA_REQUIRE_DOCKER` or `KAGUYA_REQUIRE_BUBBLEWRAP`, converting a
-missing runtime or image into a failure. This distinguishes "contract passed"
-from "backend was unavailable" without making optional local dependencies
-mandatory for every contributor.
-
-macOS is covered by the native Supervisor matrix. Docker Desktop compatibility
-on macOS and Windows is a deployment-specific scheduled or release-candidate
-check, not a substitute for the mandatory Linux Docker contract. Those desktop
-checks require environments with their virtualization layers configured and
-are intentionally outside the per-PR hosted-runner gate.
-
-**Supersedes:** REF-017 only where Docker and Bubblewrap availability is treated
-as optional in dedicated CI jobs. REF-017 remains authoritative for local test
-gating and the shared contract's numerical defaults.
-
-**Sources:**
-
-- GitHub-hosted runner operating systems and virtualization limitations:
-  https://docs.github.com/en/actions/concepts/runners/github-hosted-runners
-- Bubblewrap Linux namespace sandbox:
-  https://github.com/containers/bubblewrap
-- Docker Engine CI integration:
-  https://docs.docker.com/build/ci/github-actions/
-- Windows Job Objects:
-  https://learn.microsoft.com/windows/win32/procthread/job-objects
-
----
-
-## REF-019 — Cross-Platform Sandbox Contract Timing Budget
-
-**Decision:** The shared sandbox backend contract uses the following test-only
-timing values:
-
-| Test setting | Value | Purpose |
-| --- | ---: | --- |
-| `default_timeout_secs` | `3` | Allow interpreter and sandbox startup on slower hosted runners while keeping timeout tests short. |
-| outer timeout wait | `10s` | Bound backend cleanup while exceeding Docker's configured timeout plus its 5-second internal cleanup allowance. |
-
-The production default remains 30 seconds.
-
-**Rationale:** The original 1-second contract deadline was shorter than Python
-startup on a Windows hosted runner, so an ordinary session-isolation probe was
-misclassified as a timeout. Three seconds preserves a fast timeout regression
-test but provides startup headroom. The 10-second outer bound remains strict
-enough to detect cleanup hangs and is greater than Docker's 8-second maximum
-path for a 3-second request timeout plus its internal 5-second allowance.
-
-**Supersedes:** REF-017 only for the shared contract's 1-second default timeout
-and 7-second outer wait. REF-017 remains authoritative for the other contract
-settings and environment gates.
-
-**Sources:**
-
-- Failed Windows hosted-runner contract showing a startup timeout:
-  https://github.com/styin/kaguya/actions/runs/29430087456/job/87402552734
-- Tokio timeout behavior:
-  https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
-
----
-
-## REF-020 — Phase 1 Telemetry via Supervisor Log Snapshot and SSE
-
-**Decision:** Phase 1 end-to-end telemetry is tested through the Supervisor log
-pipeline rather than the proto `Telemetry` RPC. Supervisor captures managed
-process stdout/stderr, stores normalized entries in `LogStore`, exposes snapshot
-reads through `/api/logs`, and streams new entries through `/api/logs/stream`.
-Each log entry may include a derived `level` field (`ERROR`, `WARN`, `INFO`,
-`DEBUG`, `TRACE`) when the line contains a recognizable level token.
-
-**Rationale:**
-
-1. The current implementation already uses Supervisor as the process owner and
-   log aggregation boundary, so this path tests the real observable behavior
-   used by the dev console.
-2. The proto `Telemetry` RPC is documented as Phase 1 stub-only; using it as the
-   primary acceptance path would test a planned interface rather than the
-   running system.
-3. Deriving a normalized level in Supervisor keeps the frontend simple while
-   preserving backwards compatibility: existing clients can ignore the added
-   field, and raw log text remains unchanged.
-4. Correlation fields (`conversation_id`, `request_id`, `tool`, `backend`,
-   `handle`, `session`) are emitted by producers as structured log fields rather
-   than parsed from payload text, which keeps the log stream useful without
-   exposing full tool code or large data payloads.
-
-**Supersedes:** none. Complements REF-017 by defining how sandbox contract
-activity is observed end-to-end.
-
-**Sources:**
-
-- Kaguya dev endpoint/logging specification:
-  `docs/spec-endpoint-v0.1.0.md`
-- Kaguya implementation plan (`Telemetry` stub-only in Phase 1):
-  `docs/implementation-plan-v0.1.0.md`
-- Server-Sent Events overview:
-  https://html.spec.whatwg.org/multipage/server-sent-events.html
-
----
-
-## REF-021 — Bounded Sandbox Timeout Cleanup After Process-Group Kill
-
-**Decision:** After a sandbox execution times out, Supervisor directly signals
-the Unix process group with `SIGKILL` instead of spawning an external `kill`
-process. It then bounds post-kill child waiting and stdout/stderr reader joins
-with a 2s cleanup grace. Reader joins use the same bound even after a normal
-child exit, because a descendant can inherit stdout/stderr pipes and keep them
-open after the direct child exits.
-
-**Rationale:**
-
-1. Spawning `kill -KILL -<pgid>` and ignoring its result left cleanup
-   nondeterministic: a signaling failure could be followed by unbounded
-   `child.wait()` and unbounded stdout/stderr reader joins.
-2. Direct `kill(-pgid, SIGKILL)` reports errors synchronously. `ESRCH` is
-   treated as "already exited"; other errors fall back to direct child kill.
-3. The 2s cleanup grace is intentionally short because the execution timeout
-   has already fired. Cleanup should protect the Supervisor from pipe/process
-   leaks, not grant more user-code runtime.
-4. Aborting reader tasks on cleanup timeout returns a deterministic tool result
-   and marks output as truncated, preserving the contract that suspicious or
-   incomplete output is visible to the caller.
-
-**Supersedes:** strengthens REF-017's timeout cleanup contract for Unix native
-and Unix-backed execution paths.
-
-**Sources:**
-
-- POSIX `kill()` process group semantics:
-  https://pubs.opengroup.org/onlinepubs/9699919799/functions/kill.html
-- Tokio process documentation:
-  https://docs.rs/tokio/latest/tokio/process/index.html
-
----
-
-## REF-022 — Supervisor Process Resource Sampling
-
-**Decision:** Supervisor samples managed process resource usage once per second
-and emits one `process.resource.sample` telemetry event per live managed PID.
-Each event includes the sample batch id, process name, label, PID, status,
-uptime, restart count, CPU percent, resident memory bytes, and virtual memory
-bytes. External processes are excluded from PID sampling because Supervisor does
-not own their process handles.
-
-**Rationale:**
-
-1. Supervisor already owns managed process lifecycle and PID state, so resource
-   sampling belongs in the control plane rather than Gateway's conversation hot
-   path.
-2. A 1s cadence is responsive enough for a development console while avoiding
-   the overhead and noise of sub-second polling.
-3. Emitting one raw event per process keeps the event stream append-only and
-   easy to inspect; `sample_id` lets the metrics worker aggregate per-batch
-   totals without conflating separate samples.
-4. `sysinfo` provides a cross-platform abstraction over Windows, Linux, and
-   macOS process resource APIs, preserving Kaguya's cross-OS support invariant.
-
-**Supersedes:** none. Extends REF-020 with Supervisor-owned process resource
-telemetry.
-
-**Sources:**
-
-- `sysinfo` crate documentation:
-  https://docs.rs/sysinfo/0.38.4/sysinfo/
-- Kaguya cross-platform support requirements:
-  `AGENTS.md`
-
----
-
-## REF-023 — Supervisor-Owned Raw Telemetry Event Hub
-
-**Decision:** Gateway and other runtime components emit raw telemetry events;
-Supervisor owns event buffering, SSE fan-out, and aggregate metrics. The initial
-Supervisor event hub uses a 10,000-event in-memory ring buffer, returns the last
-200 events for an unqualified snapshot request, and feeds a 4,096-event
-aggregation queue. Gateway uploads events through `POST /api/telemetry/events`
-without blocking the hot path.
-
-**Rationale:**
-
-1. Gateway remains the conversation hot path and only emits facts about a turn
-   (`rag.retrieve.completed`, `talker.dispatch.started`,
-   `talker.first_output`, `talker.first_sentence`).
-2. Supervisor already owns process orchestration, log capture, and sandbox
-   backend lifecycle, so it is the correct control-plane process for
-   cross-component aggregation and console-facing APIs.
-3. The 10,000-event ring mirrors the existing log buffer size in
-   `docs/spec-endpoint-v0.1.0.md`, keeping debug-memory behavior consistent
-   between logs and telemetry.
-4. Returning 200 events for `since=0` keeps first-load payloads bounded while
-   still giving the console enough recent context to render a useful timeline.
-5. A bounded 4,096-event aggregation queue prevents telemetry spikes from
-   creating unbounded memory growth; raw event storage/SSE still proceeds even
-   if aggregate metrics drop samples under extreme load.
-
-**Supersedes:** none. Extends REF-020 from log-stream telemetry to structured
-raw events and derived metrics.
-
-**Sources:**
-
-- Kaguya endpoint/logging specification:
-  `docs/spec-endpoint-v0.1.0.md`
-- Tokio `mpsc` bounded channel documentation:
-  https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
-- Server-Sent Events overview:
-  https://html.spec.whatwg.org/multipage/server-sent-events.html
+## REF-014 — Isolation Models for Agent Code Execution
+
+**Question:** What isolation does model-authored execution require, and how do
+the available approaches trade access control, resource containment, persistent
+state, startup cost, and platform support?
+
+**References:**
+
+- Docker. [Docker Engine security](https://docs.docker.com/engine/security/).
+  Describes namespaces, resource controls, capabilities, and the daemon's attack
+  surface. Mounts and privileges can weaken containment; resource limits do not
+  themselves prevent access to data. This supports evaluating the configured
+  boundary rather than treating the container label as a security guarantee.
+- Bubblewrap. [Sandbox security](https://github.com/containers/bubblewrap#sandbox-security).
+  A Linux tool for constructing sandbox environments whose protection depends
+  on the caller's policy and arguments. Filesystem exposure and namespace choices
+  are part of the security model, not properties established by invoking the
+  executable alone.
+- Microsoft. [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+  Documents grouped process management, resource limits, and termination.
+  Process security restrictions are separate. A Job Object by itself should
+  not be treated as a filesystem or network access boundary.
+- gVisor. [Introduction to gVisor security](https://gvisor.dev/docs/architecture_guide/intro/).
+  Explains an application kernel that handles workload system calls in
+  userspace, and contrasts that boundary with host-kernel primitives and virtual
+  machines. A reference for alternative isolation models, not a claim that
+  Kaguya implements gVisor or a recommendation to adopt it.
+
+**Relevance to Kaguya (design inference):** Compare filesystem and network
+authority separately from CPU/memory limits and process cleanup. Ordinary host
+execution needs an explicit account of its inherited authority. Persistent
+execution state may support multi-step work, but its scope and reset policy
+need separate consideration from process isolation. Assess startup/runtime
+cost and compatibility on each intended host without assuming equal guarantees
+across backends or a universally strongest option. Provider ownership, current
+backend support, and resource defaults belong in the
+[implementation plan](docs/implementation-plan-v0.1.0.md) and
+[runtime configuration](config/kaguya.runtime.toml).

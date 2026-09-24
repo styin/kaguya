@@ -94,7 +94,7 @@ pub struct MetadataEvent {
 
 /// What kind of round triggered the active Talker dispatch?
 ///
-/// Threaded through `main.rs` so `ResponseComplete` handling can decide
+/// Threaded through `core/pipeline/run.rs` so `ResponseComplete` handling can decide
 /// whether to call `RagEngine::evaluate_and_store`. Only `UserIntent`
 /// rounds correspond to a fresh user statement that should be paired
 /// with the assistant response into a memory.

@@ -1,504 +1,647 @@
-# spec-gateway-v0.1.0.md
-
 # Project Kaguya — Gateway Specification
 
 **Component:** Gateway (formerly "Router")
+
 **Version:** 0.1.0
-**Date:** March 2026
-**Audience:** Developers working on the Gateway module
+
+**Updated:** 2026-09-18
+
+**Audience:** Developers working on Gateway and adjacent service contracts
+
+**Status convention:** **Current** describes inspected source on
+`gateway-refactor`, including the approved R0 extraction after documentation
+commit `b4eecd4` (runtime baseline `633ec49`). **Target** describes accepted work
+that is not complete. **Deferred** identifies later scope. Source inspection
+does not establish passing runtime or end-to-end tests.
+
+The [implementation plan](implementation-plan-v0.1.0.md) owns progress,
+dependencies and acceptance gates (R0–R8). The
+[protobuf schema](../proto/kaguya/v1/kaguya.proto) owns current wire definitions.
+This specification preserves intended contracts while identifying implementation
+gaps; describing a gap does not waive the requirement.
 
 ---
 
 ## 1. Role and Mandate
 
-The Gateway is the central conductor of Project Kaguya. It is the only component that speaks OpenPod's protobuf protocol. It owns the Input Stream priority queue, all conversation state, the memory store interface, persona delivery, process lifecycle, and all IPC coordination between every other internal component.
+Gateway coordinates conversation state, prioritized input, context assembly,
+tool dispatch, persona delivery and communication with Listener, Talker and
+Reasoner. It owns Gateway-local async task/connection lifecycle. Supervisor owns
+managed process lifecycle and sandbox resources.
 
-The Gateway does **not**:
+**Current:** The endpoint is the React/Vite Console over WebSocket. OpenPod
+integration is deferred; Gateway does not currently speak OpenPod's protocol.
+Durable sessions, policy management, application tasks, workspace associations
+and execution binding are planned core responsibilities (R1–R5).
 
-- Run LLM inference for conversational responses. (It may call llama.cpp for background history compaction — a simple summarization task, not conversational.)
-- Inspect or decode audio content. It forwards audio bytes between OpenPod and the Listener/Talker without reading them.
-- Classify queries or decide whether to delegate. That is the Talker's exclusive decision.
-- Format LLM prompts. It assembles a structured context package; the Talker formats it into the model's expected prompt structure.
+Gateway:
+
+- assembles structured context; Talker formats prompts and runs conversational inference;
+- forwards raw audio without inspecting or decoding its content;
+- receives Talker delegation requests and coordinates their execution;
+- preserves P0 control outside the normal Input Stream;
+- owns authoritative conversation/application state, with replaceable functionality accessed through capability contracts.
+
+Background LLM history summarization remains an open future implementation
+choice. It must not be described as an existing Gateway inference path.
+
+### 1.1 Configuration-Driven Application Composition
+
+**Status:** The structural extraction is implemented: `main.rs` initializes the
+runtime/logging and calls `app::run()`; `app.rs` assembles components and awaits
+`core/pipeline/run.rs`. Generalized provider selection remains future work.
+
+The core pipeline consumes capability interfaces for replaceable functionality.
+Provider selection belongs to application composition. Service configuration
+expresses the desired implementation; `config.rs` loads and validates that
+configuration; `app.rs` realizes it and injects the resulting capability handles.
+`app.rs` consumes the configuration system rather than owning its parsing,
+persistence, or configuration-management APIs.
+
+Supervisor URL precedence is resolved by `SupervisorConfig::resolved_url()` in
+`config.rs`, called after loading or falling back to default configuration.
+Client construction and connection/fallback handling remain in `app.rs`.
+
+The responsibilities of `app.rs` are to:
+
+- resolve configured provider choices and construct local providers or remote
+  client adapters;
+- pass provider options and resolve credential references through the relevant
+  provider setup;
+- arrange provider-specific startup and cleanup through the existing lifecycle
+  owner, including Gateway-local background tasks;
+- assemble the core services and inject capability interfaces into the pipeline.
+
+Provider setup can remain in implementation-local constructors or factories;
+`app.rs` coordinates those calls. The pipeline must not branch on provider names
+or reach into provider-specific implementation state. Managed process launch,
+restart, and sandbox resource ownership remain with Supervisor.
+Providers running in another service configure their own internals; Gateway
+assembly configures the corresponding client adapter.
+
+Start with explicit constructor injection. Future configuration-driven factories
+or provider registration can replace selection at this boundary without changing
+pipeline behavior. Core session identity, authoritative history, policy,
+workspace association, and execution binding remain ordinary internal modules;
+they are not required to implement a universal provider contract. Capability
+contracts remain under `capabilities/`, with implementations in their existing
+modules. This decision requires no new plugin framework or provider directory.
+
+The diagram describes the target composition flow, not the current deployment
+or audio data path. Provider names, configuration keys, and capability calls are
+illustrative rather than supported configuration or finalized APIs. In
+particular, `speech.transcribe(...)` represents a voice-service capability:
+Gateway continues to forward raw audio and consume Listener events without
+decoding or transcribing audio itself.
+
+```mermaid
+flowchart TD
+    service_config["Service configuration<br/>rag.provider = local<br/>reasoner.provider = qwen<br/>speech.provider = whisper"]
+    config_module["config.rs<br/>Load and validate configuration"]
+
+    subgraph application_assembly["app.rs - composition root"]
+        direction TB
+        resolve_provider["Resolve provider choices"]
+        configure_provider["Resolve credentials and options"]
+        construct_provider["Construct providers or client adapters"]
+        start_provider["Arrange provider lifecycle tasks<br/>through the existing lifecycle owner"]
+        inject_capabilities["Inject capability interfaces"]
+        resolve_provider --> configure_provider --> construct_provider --> start_provider --> inject_capabilities
+    end
+
+    core_pipeline["Core pipeline<br/>Depends on capability contracts"]
+    rag_call["rag.retrieve(...)"]
+    reasoner_call["reasoner.run(...)"]
+    speech_call["speech.transcribe(...)<br/>Voice-service operation; illustrative"]
+
+    service_config --> config_module --> resolve_provider
+    inject_capabilities --> core_pipeline
+    core_pipeline --> rag_call
+    core_pipeline --> reasoner_call
+    core_pipeline -. "conceptual capability use" .-> speech_call
+```
+
 
 ---
 
-## 2. Responsibilities (Exhaustive)
+## 2. Responsibilities and Implementation Status
 
-1. **Endpoint I/O.** Receive audio frames, text commands, and control signals from the local endpoint; forward Kaguya's audio and metadata output back to it. **Phase 1:** The endpoint is a local dev-GUI/TUI connected via a simple local interface (e.g. WebSocket or stdio). The Gateway demuxes incoming frames into the appropriate Internal paths (audio → Listener, text → Input Stream P1, control → direct handling) and muxes outgoing audio and metadata back to the dev-GUI/TUI. **Phase 2:** The endpoint interface is replaced by the OpenPod protobuf protocol. The Gateway becomes the sole component speaking OpenPod, with Channel A (metadata) and Channel D (audio) muxed into OpenPod's wire format. The dev-GUI/TUI is retired or retained as a local debug tool.
-2. **Conversation history management.** Maintain the rolling conversation log (in-memory). Append new turns (user input + Talker response) after each exchange. Perform context window compaction: keep recent N turns in full, summarize older turns via background LLM call, discard beyond the summary horizon. Single continuous thread per user — no session management. This is distinct from the RAG memory store — history is the short-term rolling log; the RAG store is the distilled long-term knowledge base.
-3. **Context package assembly.** Before every Talker dispatch, assemble a structured context package containing: user input, the synthesized `memory_md` exported from the RAG store, per-turn `retrieval_results` from the hybrid retriever, conversation history, active task state, current tool list, any tool/reasoner results, and metadata (current time, etc.). The Talker formats this into a prompt; the Gateway has no knowledge of prompt format.
-4. **RAG memory management.** Own a SQLite database (`data/kaguya.db` by default) holding semantic memories with FTS5 BM25 indexes and optional vector embeddings. Per turn, run `RagEngine::retrieve(query)` to get top-k entries (BM25 + vector fused via RRF — see REF-007/008/009). Post-turn, run `evaluate_and_store(user_input, assistant_response)` to extract preference / fact / project / conversation memories from the exchange. The synthesized `memory_md` (user profile + project context + recent semantic memories) is recomputed and pushed to the Talker via `UpdatePersona` only when its content actually changes. The Talker has no filesystem access — the Gateway is the sole owner of the RAG store.
-5. **Persona file delivery.** Read `SOUL.md` and `IDENTITY.md` at startup; bundle them with the synthesized `memory_md` from the RAG store and send to Talker via gRPC `UpdatePersona`. Watch `SOUL.md` and `IDENTITY.md` for file changes and re-send on update; `memory_md` is re-pushed when post-turn evaluation changes it. The Talker has no filesystem access — the Gateway is the sole source of all persona and memory configuration.
-6. **Privilege management.** Enforce access control on tool invocations and agent spin-ups.
-7. **Poll Input Stream.** Continuously consume events from the priority queue.
-8. **Tool registry and dispatch.** Maintain the Toolkit registry. Dispatch tool calls received from the Talker. Return results as Input Stream events (P3, non-blocking). Manage MCP server connections and expose available MCP tools through the Tool Registry.
-9. **Control signal interception.** Process `STOP`, `APPROVAL`, `SHUTDOWN` from the endpoint's control path. These bypass the Input Stream entirely — no event may delay a STOP.
-10. **Thread/process management.** Spawn, monitor, and terminate the Listener, Talker, and Reasoner processes.
-11. **Sandbox delegation.** Keep tool semantics and result correlation in Gateway, but obtain opaque execution handles from the Supervisor-owned Sandbox Provider. Supervisor enforces backend policy and resource lifecycle. Gateway continues to enforce the workspace root for its own filesystem tools.
-12. **Reasoner lifecycle.** Start Reasoner Agents when the Talker requests delegation via `[DELEGATE:...]`. Manage multiple concurrent Reasoner Agents, each with a unique `task_id`. Monitor lifecycle. Adapt Reasoner output into Input Stream events (P3).
-13. **Reasoner output filtering.** Decide which intermediate Reasoner steps are worth forwarding to the Talker for narration — dropping noise, rate-limiting, merging. One utterance per meaningful state transition; rate-limited to prevent manic narration.
-14. **Timing management.** Silence timers, scheduled reminders, memory triggers. Emit timed events (P4) into the Input Stream.
-15. **Speculative prefill trigger.** After each Talker response completes, send the updated context package to the Talker marked as prefill-only (`n_predict: 0`, `cache_prompt: true`). On partial transcripts (Phase 2), send incremental prefill requests.
-16. **Output Stream mux.** Stop forwarding Talker audio to the endpoint on receipt of `PREPARE` acknowledgment. Resume forwarding when a new inference round begins.
+| Responsibility | Current implementation | Target / remaining work |
+| --- | --- | --- |
+| Endpoint I/O | WebSocket JSON text/control ingress, raw audio ingress forwarding, semantic metadata egress | Complete browser TTS egress and recovery in R7; OpenPod is deferred |
+| Session and history | Fresh conversation UUID at startup and an in-memory rolling message buffer | Durable identity/history and reconnect/restart continuity in R1 |
+| Context assembly | Structured user input, recent messages, memory, retrieval, tools, task summaries and result context | Aggregate size accounting and explicit oversize behavior in R8 |
+| Memory retrieval/storage | Built-in `RagEngine` behind `RagCapability`; SQLite, BM25, optional vectors | Future providers remain behind the capability boundary |
+| Persona delivery | Load/watch SOUL.md and IDENTITY.md; synthesize memory from RAG; deliver via UpdatePersona | Preserve startup/reconnect behavior through R0/R1 |
+| Policy and approval | Local file-path checks and Supervisor backend limits; approval control is a placeholder | Unified policy resolution and correlated approvals in R2 |
+| Input/control | P1–P5 channels, separate P0 channel and Talker-output channel | Verify/correct responsiveness under slow work in R0/R8 |
+| Tool dispatch | Rust Gateway registry and asynchronous execution; opaque Supervisor handles for `sandbox_exec` | Policy/binding integration and basic tool/MCP inventory decision in R5 |
+| Runtime lifecycle | Gateway supervises async work and service connections | Supervisor continues to own process launch, restart and termination |
+| Application tasks | Volatile Reasoner request tracking inside the client | Durable task management in R3, actual Reasoner service in R6 |
+| Workspace/execution | Configured root for direct file tools; separate sandbox scratch/container state | Logical workspace lifecycle and execution binding in R4/R5 |
+| Narration and timing | Intermediate-step filtering, silence timers and post-response prefill hooks | Validate interruption, scheduling and provider failure behavior |
+| Observability | Gateway emits telemetry; Supervisor owns its event hub, logs and process metrics | Console integration and end-to-end correlation in R7/R8 |
 
----
+Scheduled reminders, memory-trigger producers and MCP-triggered ambient events
+are not implemented merely because a priority level has been reserved for them.
 
 ## 3. The Input Stream
 
-The Input Stream is a unified priority queue internal to the Gateway process. It aggregates all events from all sources into a single ordered stream for the Gateway's event loop to consume.
-
 ### 3.1 Priority Levels
 
-| Priority | Level                | Event Types                                                                      | Handling                                                                                                                                                                            |
-| -------- | -------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| P0       | Control              | `STOP`, `APPROVAL`, `SHUTDOWN`                                                   | Bypass Input Stream entirely. Direct to Gateway event loop. No event may delay a STOP.                                                                                              |
-| P1       | Complete user intent | `final_transcript`, `text_command`                                               | Trigger context package assembly + Talker dispatch. Highest normal priority — shortest acceptable latency, triggers barge-in, can invalidate lower-priority work.                   |
-| P2       | Partial user signals | `partial_transcript`, `vad_speech_start`, `vad_speech_end`                       | `vad_speech_start` triggers an inline barge-in (`TalkerInput.barge_in`) on the active Converse stream. Partials feed speculative prefill (Phase 2). If P1 and P2 arrive simultaneously, P1 wins. |
-| P3       | Async results        | `reasoner_intermediate_step`, `reasoner_output`, `tool_result`, `reasoner_error` | Results from work Kaguya initiated. Trigger new inference rounds. Never preempt the user — if a tool result arrives while user is mid-sentence (P1/P2 in queue), tool result waits. |
-| P4       | Timed                | `silence_exceeded(duration)`, `scheduled_reminder`, `memory_trigger`             | Self-generated. Speculative — moot if user is speaking (P1/P2 in queue) or a tool result is pending (P3). Only act when queue is otherwise quiet.                                   |
-| P5       | Ambient              | `openpod_telemetry`, `screen_context_change`, MCP triggers                       | Background context. Process when truly idle. Never trigger immediate action.                                                                                                        |
+The intended ordering is human control, human input, initiated work results,
+then proactive/ambient work.
 
-Within a priority level, events are FIFO. Across levels, higher priority preempts lower.
+| Priority | Source | Current behavior / status |
+| --- | --- | --- |
+| P0 | STOP, APPROVAL, SHUTDOWN | Separate control channel, first event-loop branch; approval handling remains a placeholder |
+| P1 | FinalTranscript, TextCommand | Assemble context and dispatch when Talker is ready; cancel active silence |
+| P2 | VadSpeechStart, VadSpeechEnd, PartialTranscript | Speech start requests inline barge-in and mutes output; partials/end events are currently logged |
+| P3 | ToolResult, ReasonerStep, ReasonerCompleted, ReasonerError | Record/route results and eligible narration; Reasoner errors are currently logged |
+| P4 | SilenceExceeded | Proactive dispatch gated by configuration, readiness and generation state |
+| P5 | Telemetry | Channel/event placeholder; OpenPod ambient producers are deferred |
 
-### 3.2 Priority Rationale
+### 3.2 Ordering and Responsiveness
 
-**Ordering principle: human intent > human state > Kaguya's work results > Kaguya's proactive impulses > background context.**
+**Target:** STOP must remain responsive and lower-priority work must not override
+user interaction. P0 bypasses the Input Stream entirely.
 
-- **P0** is existential. `STOP` must take effect even if the queue is full.
-- **P1** represents complete user intent. It has the shortest acceptable latency (the user is waiting), triggers barge-in (anything Kaguya is doing becomes secondary), and can invalidate lower-priority work.
-- **P2** optimizes latency but triggers no visible actions alone. `vad_speech_start` enables preemptive barge-in detection before the full transcript arrives. Partials feed speculative prefill — every millisecond matters.
-- **P3** results are from work Kaguya initiated. Important, but they never preempt the user.
-- **P4** timers are speculative — "maybe I should say something." A silence timer is moot if the user is speaking.
-- **P5** enriches passive awareness but never triggers immediate action.
+**Current limitation:** A biased `tokio::select!` chooses among ready branches;
+it does not preempt an already-running branch. Retrieval, history access,
+provider calls and action execution may be awaited inside that branch. P3
+speech-state coordination and P0 latency under slow work require R0/R8
+validation. Queue priority alone is not a guarantee that a result cannot
+interrupt a user who has started speaking.
 
 ### 3.3 Implementation
 
-- Language: Rust (part of the Gateway binary).
-- Data structure: Per-level `tokio::sync::mpsc` channels, polled via `tokio::select!` with priority ordering.
-- Event format: Rust enum/struct internally; protobuf for cross-process boundaries.
-
----
+[Input stream](../gateway/src/core/input_stream.rs) creates five P1–P5
+`tokio::sync::mpsc` channels. P0 and Talker outputs have separate channels in
+[app.rs](../gateway/src/app.rs). Internal events are Rust types; cross-service
+semantic messages use protobuf. The event loop lives in
+[core/pipeline/run.rs](../gateway/src/core/pipeline/run.rs); P0 remains separate
+from the input queues and handlers. Long-await responsiveness work remains open.
 
 ## 4. Memory System
 
-### 4.1 Hybrid RAG (SQLite + FTS5 BM25 + optional vector)
+### 4.1 Built-in Hybrid RAG
 
-Kaguya's memory layer is implemented in [gateway/src/rag/](../gateway/src/rag) as `RagEngine`. It is a hybrid retrieval system, not a flat file.
+**Current:** [RagEngine](../gateway/src/rag/mod.rs) implements
+[RagCapability](../gateway/src/capabilities/rag.rs). The pipeline consumes the
+capability; the details here describe the built-in implementation, not a
+requirement that all providers use SQLite.
 
-**Storage:** A single SQLite database (default `data/kaguya.db`, configurable via `[rag] db_path`). Schema:
-- `memories` — id, content, memory_type (`conversation` | `fact` | `preference` | `project`), source (turn id), timestamps
-- `memories_fts` — FTS5 virtual table mirroring `memories.content` for BM25 search; tokenizer `porter unicode61` (REF-009)
-- `embeddings` — optional vector blobs (one per memory) populated by an incremental background embedder
-- `user_profile`, `projects` — keyed structured tables used to synthesize the `memory_md` document
+Storage is configured through `[rag] db_path` (currently `data/kaguya.db`,
+relative to Gateway's working directory). [RagStore](../gateway/src/rag/store.rs)
+creates:
 
-**Retrieval (per turn):** `RagEngine::retrieve(query)` runs:
-1. BM25 against `memories_fts` (always available)
-2. Cosine similarity over `embeddings` (only if an embedder is configured)
-3. Reciprocal Rank Fusion (RRF, k=60 — REF-007) merges the two rankings
-4. Result truncated to `top_k` (default 10 — REF-008)
+- `memories`: typed conversation/fact/preference/project content, source turn and creation timestamp;
+- `memories_fts`: FTS5 index maintained by triggers, using `porter unicode61` (REF-009);
+- `embeddings`: optional vector data keyed by memory;
+- `user_profile` and `projects`: schema tables that the current ingestion/export path does not use.
 
-The fused list is delivered to the Talker as `TalkerContext.retrieval_results` — a list of `{id, content, source ("bm25" | "vector"), score}`. The Talker prompt formatter renders these in a "Relevant context retrieved from memory" system block.
+For a nonempty user query, [retrieval](../gateway/src/rag/retriever.rs) combines
+BM25 and optional vector cosine-similarity rankings using reciprocal rank fusion
+(REF-007), limits the result count by configured `top_k` (REF-008), and applies
+an optional per-result content cap. The current ranker uses the REF-007 constant;
+do not infer that every algorithm parameter already has configuration plumbing.
+`RetrievalResult` carries id, content, source and score.
 
-**Post-turn ingestion:** `RagEngine::evaluate_and_store(user_input, assistant_response, turn_id)` runs simple keyword-trigger extraction (English + Chinese) to classify each exchange as `Preference`, `Fact`, `Project`, or generic `Conversation`, and inserts the entries into `memories`. The optional embedder is woken up via `Notify` and back-fills vectors for new entries asynchronously.
+Memory extraction uses English/Chinese keyword rules and stores typed rows.
+The optional embedder waits for notification, then processes unembedded rows
+against the configured `/v1/embeddings` endpoint. It is not an independent
+periodic polling service or a guaranteed startup backfill.
 
-**Synthesized `memory_md`:** `RagEngine::export_memory_md()` renders the structured tables (user profile, projects) and the most recent semantic memories (conversations + facts) as a single markdown document. This is what the Gateway sends to the Talker via `UpdatePersona`.
+`export_memory_md()` reads typed rows from `memories` to produce preferences,
+projects and recent conversation/fact sections. It does not read the separate
+`user_profile`/`projects` tables. Storage-time and output-time content caps
+are separate (REF-010); retrieval/export caps are optional. There is no universal
+200-character bound.
 
-**Embedder (optional):** [gateway/src/rag/embedder.rs](../gateway/src/rag/embedder.rs) is a long-running task that polls for unembedded rows and POSTs them to a local OpenAI-compatible `/v1/embeddings` endpoint. Configurable via `[rag] embedding_url`. Disabled = BM25-only retrieval.
+### 4.2 History and Durable Session State
 
-### 4.2 Dual Memory Structure
+**Current:** [History](../gateway/src/core/history.rs) stores recent
+`ChatMessage` values in memory and discards older entries. Despite the
+`max_recent_turns` setting name, selection/truncation counts messages, not
+complete user/assistant exchanges. There is no summary, durable transcript or
+restart reload, and startup creates a new conversation UUID.
 
-| Memory Type                           | Contents                                                                          | Implementation                                                                                                                          |
-| ------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **Long-term (RAG store)**             | User profile, project facts, semantic memories from past turns (conversation/fact/preference/project) | SQLite `memories` table with FTS5 BM25 + optional vector embeddings; queried per turn for top-k; synthesized to `memory_md` for Talker  |
-| **Short-term (conversation history)** | Recent turns, rolling log, compacted older turns                                  | In-memory state in Gateway (`History`); included in context package                                                                      |
+**Target (R1):** Durable session identity and authoritative history support a
+continuous conversation across connection/process restarts. Prompt-window
+selection must be separate from transcript retention. Session identity does not
+require a multi-chat UI. Storage format, retention, history compaction and the
+relationship between session and conversation IDs remain open.
+
+RAG memories remain derived knowledge, not a substitute for authoritative
+conversation history.
 
 ### 4.3 Memory Hydration Flow
 
-```
+```text
 Startup:
-  Gateway opens data/kaguya.db (creates schema if missing)
-  Gateway reads SOUL.md, IDENTITY.md from disk
-  Gateway calls RagEngine::export_memory_md() → synthesized memory_md
-  Gateway sends {soul, identity, memory_md} → Talker via UpdatePersona gRPC
+  load persona files and open the configured RAG store
+  export memory markdown
+  Talker connection/recovery loop delivers PersonaConfig
 
-Every turn:
-  final_transcript arrives → Gateway runs RagEngine::retrieve(text)
-                          → assembles context package:
-    → memory_md (cached from last UpdatePersona)
-    → retrieval_results (per-turn RAG hits)
-    → Conversation history (in-memory)
-    → User input, tools, metadata
-  → Gateway forwards context package to Talker (Converse stream)
+P1 user input when Talker is ready:
+  retrieve relevant memories
+  fetch recent history, tool definitions and active-task descriptions
+  assemble TalkerContext
+  append user history and dispatch Converse
 
-User edits SOUL.md or IDENTITY.md:
-  Gateway file watcher detects change
-  Gateway re-reads SOUL.md / IDENTITY.md
-  Gateway sends updated config (with current memory_md) to Talker via UpdatePersona
-  (memory_md is NOT a watched file — it's synthesized from the RAG store)
+Persona file change:
+  reload changed SOUL.md or IDENTITY.md
+  export current memory and update the shared persona snapshot
+  push UpdatePersona when possible
 ```
 
-### 4.4 Memory Indexing (Post-Turn)
+`memory_md` is synthesized data, not a watched file. Current user-history
+appending is gated by Talker readiness; R1 must define durable handling of input
+received while the provider is unavailable.
 
-```
-Talker completes response → ResponseComplete arrives
-  → Gateway appends new turn to conversation history (in-memory):
-      { user: "Can you check the Goedel pipeline status",
-        assistant: "The pipeline is healthy — last run 2h ago." }
-  → Gateway calls RagEngine::evaluate_and_store(user, assistant, turn_id):
-      keyword-trigger extraction → 0..N MemoryEntry rows inserted
-      embedder.wake() → background task back-fills vectors
-  → Gateway calls export_memory_md() and compares against last sent.
-    If changed → Gateway sends updated PersonaConfig via UpdatePersona
-  → Gateway sends updated context package to Talker for prefix prefill
-```
+### 4.4 Post-Response Processing
 
-### 4.5 Future evolution
+[Pipeline handlers](../gateway/src/core/pipeline/handlers.rs) distinguish
+response history from RAG ingestion:
 
-Phase-1 trigger-based extraction is intentionally crude. Anticipated upgrades (none of which require breaking the storage format):
-- LLM-based extraction (a small local model evaluates "is this exchange memory-worthy?" and produces a structured summary).
-- Re-ranking after RRF fusion using a cross-encoder.
-- Embedding back-end choices: local server, hosted (Voyage/OpenAI), or on-device.
-- Migration of `memories` to a dedicated vector store (sqlite-vss extension or external service) when corpus exceeds ~100k entries.
+- Non-interrupted, nonempty responses append assistant text to history.
+- Only eligible `UserIntent` responses with a preceding user input invoke memory extraction; tool continuations, Reasoner narration/results and silence rounds do not create fresh user/assistant memory pairs.
+- Non-interrupted completion checks for changed memory, pushes updated persona when needed, and requests prefix prefill.
+- An interrupted response skips that normal completion path. A received `BargeInAck` contributes only its confirmed-spoken text.
+- Completion resets turn state, unmutes output and restarts the silence cascade.
 
----
+The user entry is appended during user-input handling, not as a new paired
+record after every response. R1/R8 must verify interruption and duplicate-event
+behavior rather than assuming the current in-memory flow provides durable
+delivery guarantees.
+
+### 4.5 Future Evolution and Limits
+
+LLM-based extraction, alternative embedding providers and reranking remain
+possible extensions. A vector-store migration threshold requires measurement;
+the old approximate corpus-size trigger is not a settled rule. Storage/schema
+compatibility must be evaluated for whichever design is selected.
+
+R8 retains aggregate context-size accounting and clear oversize behavior as
+unfinished requirements. Optional per-field caps alone do not establish that a
+complete TalkerContext fits transport or model limits.
 
 ## 5. Turn Lifecycle (Inline Barge-In on Converse Stream)
 
-Every turn begins the same way, regardless of whether the Talker is currently speaking or idle. There is no special "barge-in" mode — barge-in is just a `TalkerInput.barge_in` message on the active Converse bidi stream.
+The current interruption message is `TalkerInput.barge_in`, with
+`TalkerOutput.barge_in_ack` carrying `spoken_text` and `unspoken_text`.
+There is no separate Prepare RPC or partial_response message in the current
+schema.
 
 ### 5.1 Voice Input Flow
 
+```text
+Console raw audio → Gateway byte forwarding → Listener
+Listener speech onset → VadSpeechStart [P2]
+Gateway cancels silence, requests inline barge-in, mutes its output
+  if an active Converse sender exists:
+    Talker sets generation cancellation and stops TTS
+    Talker queues BargeInAck with spoken/unspoken text
+    Gateway records received spoken text and unmutes output
+
+Listener final transcript → FinalTranscript [P1]
+Gateway checks Talker readiness, retrieves memory and assembles context
+Gateway dispatches a new Converse round
+Talker formats the prompt, streams model tokens internally,
+  emits semantic events and plays TTS locally
+ResponseComplete → conditional post-response work and silence timers
 ```
-EVERY turn, regardless of whether Talker is speaking or idle:
 
-  t=0ms    Listener: VAD speech onset → vad_speech_start [P2] → Input Stream
-  t=1ms    Gateway:  Processes vad_speech_start
-                     → Sends TalkerInput.barge_in on the active Converse stream
-                       (fire-and-forget; no-op if no active stream)
-                     → Mutes audio output, cancels active silence timers
-
-  t=1ms    Talker receives BargeInSignal:
-                     IF speaking:
-                       → Stop TTS playback (mid-word if necessary)
-                       → Cancel in-flight LLM generation
-                       → Emit BargeInAck on the same stream:
-                         { spoken_text: "Got it. The pipeline is health",
-                           unspoken_text: "y — last run was two hours ago." }
-                       → ResponseComplete { was_interrupted = true } follows
-                     IF idle:
-                       → No-op (no active Converse stream → barge_in finds None)
-
-  t=1ms    Gateway:  IF BargeInAck received:
-                       → Append spoken_text to conversation history
-                       → Discard unspoken_text
-                     → Stops muxing Talker audio to OpenPod Channel D
-
-  t=50ms+  Listener: partial_transcript events [P2] → Input Stream
-  t=50ms+  Gateway:  Forwards partials to Talker for incremental KV prefill (Phase 2)
-
-  t=500ms+ Listener: final_transcript [P1] → Input Stream
-  t=501ms  Gateway:  Processes final_transcript
-                     → RagEngine::retrieve(text) — BM25 (+ vector) + RRF
-                     → Assembles context package (cached memory_md, fresh
-                       retrieval_results, history, tools, input)
-                     → Dispatches context package to Talker
-
-  t=502ms  Talker:   Formats prompt → LLM → soul container → TTS → Channel D
-                     metadata → gRPC → Gateway → Output Stream → Channel A
-                     [TOOL:...] → gRPC → Gateway → tool dispatch
-                     [DELEGATE:...] → gRPC → Gateway → Reasoner spin-up
-                     → On completion: signals Gateway → prefix prefill → silence timer starts
-```
+This is a source-level control flow, not a measured latency trace. Current TTS
+accounting is conservative and sentence-based, not a word-accurate split.
+`ResponseComplete` reports generation completion; it does not establish that
+all queued speech finished playing. Browser TTS routing and complete
+interruption accounting remain R7/R8 acceptance work.
 
 ### 5.2 Text Input Flow
 
-```
-Text input (no voice):
-
-  t=0ms    OpenPod: text_command → demux → Input Stream [P1]
-  t=1ms    Gateway: Processes text_command
-                    → Sends PREPARE to Talker (cancel if busy)
-                    → Fires RAG query
-                    → Assembles context package
-                    → Dispatches to Talker
-  t=2ms    Talker:  Same flow as voice — format, infer, post-process, TTS (or text-only)
+```text
+Console JSON text message → TextCommand [P1]
+Gateway checks readiness, fetches retrieval/history/tools/task descriptions
+User-intent handler cancels silence and the prior dispatch token,
+  appends user history and starts the new Converse round
 ```
 
-The only asymmetry: voice has a `vad_speech_start` → delay → `final_transcript` gap (prefill opportunity). Text arrives as a complete input instantly — PREPARE and context package are dispatched in quick succession.
+**Current limitation:** The P1 handler does not emit a separate inline barge-in
+action. Cancelling its dispatch token is not equivalent to proving receipt of
+a BargeInAck. R1/R7/R8 must validate text interruption, playback cancellation
+and preservation of confirmed-spoken history. The desired behavior remains
+responsive interruption with accurate history.
 
-### 5.3 False Positive VAD (Phase 1)
+### 5.3 False Positive VAD
 
-If VAD fires on a cough or background noise, the Gateway sends PREPARE and the Talker stops (if speaking), but no `final_transcript` ever arrives. The silence timer fires after 3 seconds and Kaguya resumes or rephrases. False interruptions are less bad than missed interruptions.
+Speech onset can interrupt a response even when no final transcript follows.
+Current silence cancellation/restart depends on received events: completion
+restarts timers, while an idle/no-stream onset does not itself schedule recovery.
+Silence-triggered generation is also disabled in the checked-in Gateway config.
 
-Phase 2 refinement: two-stage PREPARE (soft fade on `vad_speech_start`, hard stop on first `partial_transcript`).
-
----
+A guaranteed spoken recovery after a fixed delay is therefore not current
+behavior. False-onset recovery and idle barge-in remain validation work;
+a two-stage fade/stop design is deferred.
 
 ## 6. Delegation Flow
 
-```
-1. final_transcript arrives in Input Stream                      [P1]
-2. Gateway assembles context package (memory, history, tasks, tools)
-3. Gateway forwards context package to Talker
-4. Talker formats prompt, runs LLM inference
-5a. Talker determines: "I can handle this"
-    → generates response → soul container → TTS → Channel D
-    → transcript + tags → gRPC → Gateway → Output Stream → Channel A
-5b. OR Talker determines: "This needs deeper work"
-    → generates acknowledgment → TTS → Channel D
-    → emits [DELEGATE:task_description] → gRPC → Gateway
-6. Gateway starts Reasoner Agent with task (unique task_id)
-7. Reasoner output → Input Stream events                         [P3]
-8. Gateway filters, forwards significant steps to Talker → narration
-9. Reasoner completes → Input Stream → Gateway → Talker → summary
-```
+**Current integration:** Talker emits a DelegateRequest with a task ID and
+description. Gateway's [ReasonerManager](../gateway/src/clients/reasoner.rs)
+tracks a volatile request, connects to the Reasoner endpoint as a gRPC client,
+opens Delegate, and adapts supported outputs into P3 events. It does not spawn a
+Reasoner OS process. Intermediate/output descriptions feed narration; completion
+feeds a summary continuation; errors are currently logged by the event loop.
 
----
+**Current limitation:** The Reasoner package has no service implementation.
+Connection exhaustion currently triggers simulated progress/completion in the
+Gateway client. Those events are not evidence of real task execution.
 
-## 7. Tool Dispatch Flow (Non-Blocking)
+**Target (R3–R6):**
 
-```
-Round 1:
-  Talker LLM: "Let me check that for you. [TOOL:web_fetch(...)]" → stops
-  Soul container:
-    → "Let me check that for you." → TTS → Channel D (user hears immediately)
-    → TOOL request → gRPC → Gateway
+1. Own task identity/lifecycle outside the transport client.
+2. Resolve session, workspace and policy into an authorized execution binding.
+3. Coordinate actual Reasoner availability through Supervisor-owned process lifecycle.
+4. Dispatch to the configured backend through the Reasoner service.
+5. Correlate progress, approvals, cancellation, failures and results with durable task state.
 
-  Gateway dispatches to Toolkit (TypeScript, sandboxed)
-  [Tool executes asynchronously, ~200-2000ms]
+Backend selection, backend-session lifetime and process reuse remain open.
+One OS process per task is not a settled requirement. Normal provider failure
+must not become simulated success.
 
-  Tool result → Input Stream event [P3]
-  Gateway assembles new context package with tool result included
-  Gateway forwards to Talker for new inference round
+## 7. Tool Dispatch Flow (Asynchronous)
 
-Round 2:
-  Talker LLM: "The pipeline is healthy — last run was two hours ago." → TTS → Channel D
+```text
+Talker emits ToolRequest, e.g. list_files with {"path":"."}
+Gateway validates the tool name and dispatches registered work
+  filesystem tools → current Gateway file-tool implementation
+  sandbox_exec → Supervisor acquire/execute through an opaque handle
+Result → ToolResult [P3]
+Gateway records the result and, when Talker is ready,
+  builds a result context and dispatches a continuation
 ```
 
-No blocking. Each LLM invocation is a complete, independent round. Tool results are async events, same as Reasoner results.
+The current [registry](../gateway/src/tools.rs) is Rust code in Gateway. It
+advertises list_files, read_file, write_file and conditionally sandbox_exec.
+There is no implemented standalone TypeScript Toolkit, web_fetch or tool search.
+R5 resolves the intended inventory and any separate Toolkit proposal.
 
----
+Execution is spawned asynchronously, but result processing and other event-loop
+work still include awaits. This is not a claim that the complete Gateway hot
+path cannot block. The protocol also does not guarantee that a model stops
+generating immediately after emitting a tool tag.
 
 ## 8. Silence Timer Management
 
-- After Talker signals response complete, Gateway starts silence timer.
-- `silence_exceeded(3s)`: Soft prompt opportunity → forward to Talker as P4 event.
-- `silence_exceeded(8s)`: Follow-up opportunity → forward to Talker as P4 event.
-- `silence_exceeded(30s)`: Context shift → forward to Talker as P4 event.
-- All timers canceled on `vad_speech_start` or `text_command`.
+[SilenceTimers](../gateway/src/core/silence.rs) runs a cancellable cascade using
+configured absolute elapsed targets from the latest start. The REF-001 defaults
+are 3 seconds for a soft prompt, 8 seconds for follow-up, and 30 seconds for
+context shift; they are not cumulative sleeps of 3 + 8 + 30 seconds.
 
----
+Speech onset and user input cancel active silence. Response completion restarts
+it. The handler dispatches only when proactive silence behavior is enabled,
+Talker is ready and no generation is active.
+
+The checked-in [gateway.toml](../gateway/gateway.toml) sets
+`[silence] enabled = false`: timers may tick, but proactive LLM dispatch is
+suppressed. Further re-engagement policy and actual playback timing require
+validation; no automatic spoken follow-up is guaranteed by the presence of a
+timer event.
 
 ## 9. Deliberative Narration Protocol
 
-The Gateway orchestrates the three phases of Deliberative Narration during slow-path Reasoner work.
+The intended experience has three parts:
 
-**Phase 1 — Immediate Acknowledgment (500-900ms):** Gateway dispatches first inference round to Talker immediately upon delegation decision. Talker generates hedged response ("Let me check on that.") and sends to TTS — user hears something within the normal response window.
+1. **Acknowledgment:** Talker can acknowledge delegated work in its original response. Receiving DelegateRequest does not itself dispatch another acknowledgment round.
+2. **Progress narration:** Gateway filters duplicate/rate-limited descriptions and suppresses narration while it is already generating or Talker is unavailable.
+3. **Resolution:** A completed task summary is recorded and supplied to Talker for a continuation when available.
 
-**Phase 2 — Narration (every 3-8s during Reasoner work):** Gateway filters Reasoner intermediate steps and forwards significant state transitions to Talker. Cadence: one utterance per meaningful state transition, not on a fixed timer. Rate-limited by Gateway to prevent manic narration.
-
-**Phase 3 — Resolution (on Reasoner completion):** Reasoner completion event arrives at Input Stream [P3]. Gateway assembles final context package and dispatches to Talker for summary generation.
-
----
+The current [NarrationFilter](../gateway/src/core/narration.rs) compares exact
+descriptions and elapsed time. It is not a semantic state-transition classifier
+or a batching/merging system. Tuning is currently supplied by startup code;
+exposing it through configuration and recording an adopted default remain work
+for R6/R8. No acknowledgment latency or narration cadence is asserted here as
+a measured guarantee.
 
 ## 10. Speculative Prefill Orchestration
 
-The Gateway triggers two phases of KV cache prefill.
+**Current:** Non-interrupted completion asks Talker to prefill the next context.
+Changed memory is pushed through UpdatePersona first. Talker's HTTP LLM client
+uses the backend's prefill/cache options; benefit depends on backend support.
+A Reasoner completion dispatches result context, but does not by itself
+unconditionally refresh persona or run prefill before that response completes.
 
-**Phase 1 — Always-On Prefix Prefill.** Immediately after the Talker finishes generating a response for turn N, the Gateway sends an updated context package to the Talker marked as prefill-only (`n_predict: 0`, `cache_prompt: true`). The GPU is idle between turns — this costs nothing. Cache invalidation: if memory context changes between turns (e.g., the post-turn `RagEngine::evaluate_and_store` adds entries that change the synthesized `memory_md`, or a Reasoner completes), the Gateway sends an `UpdatePersona` followed by a fresh `PrefillCache` call.
+The GPU is not necessarily idle: TTS, embeddings or other inference can overlap.
+R8 must measure latency benefit and contention.
 
-**Phase 2 — Partial Transcript Prefill.** The Gateway forwards each `partial_transcript` event to the Talker as an incremental prefill request, extending the cached prefix word-by-word during user speech.
-
----
+**Deferred:** Incremental prefill from partial transcripts. Current partials are
+logged rather than forwarded as cache-extension requests. Invalidation when the
+user's meaning changes is still an open design question.
 
 ## 11. Endpoint Ingress/Egress Routing
 
-### Phase 1 (dev-GUI/TUI)
+### Current Console
 
-```
-Ingress:  dev-GUI/TUI → Gateway (demux) → audio frames forwarded to Listener
-                                         → text commands to Input Stream [P1]
-                                         → control signals handled directly [P0]
+The [Axum endpoint](../gateway/src/services/endpoint.rs), behind the
+`dev-console` feature, serves `/ws`, `/health`, `/capabilities/status` and
+`/runtime/status`. The React/Vite Console proxies its Gateway connection;
+Supervisor HTTP/SSE traffic uses the Console's separate development proxy.
 
-Egress:   Talker audio → Gateway → dev-GUI/TUI → speakers
-          Gateway metadata (transcript, emotion tags) → dev-GUI/TUI → display
-```
+```text
+Console → Gateway /ws:
+  JSON {"type":"text","content":"..."} → P1
+  JSON {"type":"control","command":"stop"|"shutdown"} → P0
+  binary audio → Listener audio connection
 
-The dev-GUI/TUI is a local development interface — no network transport, no protobuf protocol. It connects to the Gateway via a simple local mechanism (e.g. WebSocket or stdio). Its purpose is to make the full voice pipeline testable before OpenPod is ready.
+Gateway → Console /ws:
+  JSON semantic metadata → turn display
+  binary audio receiver/send path exists, but has no Talker TTS producer yet
 
-### Phase 2 (OpenPod)
-
-```
-Ingress:  OpenPod → Gateway (demux) → audio frames forwarded to Listener
-                                     → text commands to Input Stream [P1]
-                                     → telemetry to Input Stream [P5]
-                                     → control signals handled directly [P0]
-
-Egress:   Talker audio → Gateway (mux into OpenPod protocol) → OpenPod → Channel D
-          Gateway metadata → Gateway (mux into OpenPod protocol) → OpenPod → Channel A
+Console → Supervisor HTTP/SSE:
+  app/process actions, status, logs and available telemetry APIs
 ```
 
-The Gateway becomes the sole component speaking OpenPod's protobuf protocol. It moves audio bytes without inspecting their content.
+The endpoint permits one active WebSocket client; a new connection replaces the
+previous one. It is a network transport, even when used on localhost.
+The Console currently has no durable session bootstrap or approval interaction;
+R1/R2/R7 introduce those contracts.
 
----
+### Deferred OpenPod
+
+OpenPod would supply text/audio/control and ambient events, with Gateway handling
+its protocol boundary. Raw audio must remain outside protobuf serialization.
+The exact endpoint integration and compatibility strategy are future work;
+Console remains the current development interface.
 
 ## 12. Output Stream
 
-Kaguya's output flows through two parallel paths back to the endpoint.
+**Current metadata:** Gateway emits sentence, emotion, response-started,
+response-complete and voice user-input events to Console. Tool/task detail,
+authoritative session identity, typing and presence are not all implemented
+merely because the UI may eventually need them.
 
-**Audio:** Synthesized speech from the Talker's TTS, Opus-encoded. Forwarded by the Gateway to the endpoint without inspection. Phase 1: streamed to the dev-GUI/TUI for local playback. Phase 2: muxed into OpenPod Channel D.
+**Current audio:** Talker plays speech on its host. Gateway's
+[OutputManager](../gateway/src/core/output.rs) has audio mute/forward primitives
+and the endpoint can send binary frames, but no current caller supplies TTS
+audio to that path. Browser playback code expects PCM; an implemented
+Opus-encoded browser egress stream must not be assumed.
 
-**Metadata:** Text transcript, emotion tags (`[EMOTION:...]`), task status updates, typing indicators, presence signals. Flows from Talker post-process → gRPC → Gateway → endpoint display. Phase 1: sent to the dev-GUI/TUI for rendering. Phase 2: muxed into OpenPod Channel A.
+**Target (R7):** Transport Talker speech to the endpoint through Gateway without
+decoding it there; agree codec/sample-rate and playback/interruption behavior.
+Keep semantic metadata independent of audio-frame transport. Verify how queued
+audio is stopped and how playback completion relates to turn/history events.
 
-Audio and metadata do not require frame-level synchronization at the endpoint. Emotion tags may slightly lead audio (expression before speech), which is intentional.
+## 13. Talker Egress — What Gateway Receives
 
-On `PREPARE` signal: the Gateway stops forwarding Talker audio to the endpoint. The Talker handles TTS/LLM cancellation internally.
+The current TalkerOutput oneof is defined in the canonical schema:
 
----
+| Payload | Gateway handling |
+| --- | --- |
+| ResponseStarted | Reset response accumulation and emit turn-start metadata |
+| SentenceEvent | Accumulate assistant text and forward sentence metadata |
+| EmotionEvent | Forward emotion metadata |
+| ToolRequest | Dispatch a known tool or record an unknown-tool error |
+| DelegateRequest | Start Gateway-side Reasoner request coordination |
+| BargeInAck | Append nonempty spoken_text and unmute; unspoken_text is not appended |
+| ResponseComplete | Conditional history/RAG/persona/prefill work, reset state, restart silence and emit completion metadata |
 
-## 13. Talker Egress — What the Gateway Receives from the Talker
+Messages have a sequence field; runtime ordering and interruption races still
+need acceptance coverage. Token streaming and audio processing remain inside
+the voice service. Raw speech audio is not a TalkerOutput protobuf payload.
 
-```
-Talker post-process produces (all arrive at Gateway via gRPC):
-  → Transcript text       → Output Stream → endpoint display
-  → Emotion tags          → Output Stream → endpoint display
-  → [TOOL:...] request    → tool dispatch
-  → [DELEGATE:...] req    → Reasoner spin-up
-  → Response complete     → triggers prefix prefill, history append, silence timer start
-  → partial_response      → on PREPARE (if Talker was speaking):
-                             { spoken: "Got it. The pipeline is health",
-                               unspoken: "y — last run was two hours ago." }
-                             Gateway appends only the spoken portion to history
-                             and discards the unspoken text
-```
+## 14. Workspace, Policy and Execution Binding
 
-Spoken audio itself stays in the Talker → TTS → endpoint directly (forwarded by Gateway without inspection).
+**Current:** Direct Gateway file tools resolve paths against the configured
+workspace root and perform local checks. sandbox_exec uses Supervisor-owned
+scratch/container state. Those paths are not yet one shared logical workspace,
+and path checks alone are not a complete user-policy system or a proof of
+isolation.
 
----
+**Target (R1–R5):** Gateway owns session/task/workspace associations and policy
+resolution. Execution binding connects those identities and constraints to an
+environment-specific path and opaque runtime handle. Supervisor provides and
+cleans up runtime resources; the selected backend enforces the guarantees it
+actually supports.
 
-## 14. Workspace Management
+Talker tools and Reasoner work should share the intended logical workspace,
+while permissions, process/host placement and physical paths can differ.
+A Reasoner adapter must use the authorized scope rather than independently
+granting itself broader access. Materialization, shared edits, publication,
+retention and restart recovery remain open until their contracts are recorded.
+Releasing access, unregistering a workspace and deleting files are distinct
+operations to define.
 
-The Gateway enforces the workspace root and manages all Toolkit tools.
+**MCP:** Basic server/tool integration remains an unresolved delivery item in R5;
+MCP clients and search_tools are not implemented. Advanced tool search and
+multi-tool scripting remain deferred.
 
-**Toolkit tools (Phase 1).** The Gateway's Toolkit exposes filesystem tools and `sandbox_exec`. Filesystem tool paths are resolved relative to the configured workspace root. For code execution, Gateway requests an opaque handle from Supervisor and forwards execution to the Supervisor-owned Sandbox Provider; provider internals never enter Gateway.
-
-**MCP servers (Phase 1).** The Gateway manages MCP server connections and exposes available MCP tools through the Tool Registry. The LLM discovers and calls MCP tools via `[TOOL:search_tools(...)]` → `[TOOL:mcp_tool_name(...)]`.
-
-**Reasoner agent workspace access (Phase 1).** When Kaguya delegates to OpenClaw or Claude Code, the Reasoner Agent has its own workspace access model — potentially broader than the Talker's direct tools. The Reasoner Adapter manages this scope. Kaguya delegates the task and the Reasoner reports results back through the Input Stream.
-
-**User host ambient telemetry (Phase 2).** OpenPod's telemetry channel carries ambient activity from the user's host: current working directory, active processes, stdout/stderr from running builds, screen context. These arrive as P5 events in the Input Stream. Phase 2 because it requires OpenPod telemetry channel implementation.
-
----
+**Ambient telemetry:** Host activity arriving from OpenPod is deferred and
+distinct from the current Supervisor logs/process metrics/event hub.
 
 ## 15. IPC Protocol
 
-gRPC with Protocol Buffers. Audio is the one exception — it rides a raw length-prefixed TCP socket so 50fps Opus frames never enter protobuf serialization (architecture invariant).
+The [canonical proto](../proto/kaguya/v1/kaguya.proto) defines the RPC contract.
+This table summarizes ownership without duplicating schema bodies:
 
-```protobuf
-// Listener: Gateway = client, Listener = server (role-flipped from earlier draft).
-service ListenerService {
-  rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
-}
+| Interface | Client | Server | Current status |
+| --- | --- | --- | --- |
+| ListenerService.Stream | Gateway | Listener inside voice stack | Implemented bidi stream |
+| TalkerService.Converse / PrefillCache / UpdatePersona | Gateway | Talker inside voice stack | Implemented |
+| ReasonerService.Delegate / Interrupt / Telemetry | Gateway or designated subscriber | Reasoner | Schema and Gateway delegation client exist; service pending |
+| RouterControlService.SendControl | External control caller | Gateway | STOP/SHUTDOWN paths exist; approval semantics pending |
+| Supervisor HTTP/SSE | Gateway and Console proxy | Supervisor | Process, sandbox, status/log/telemetry APIs |
+| Console WebSocket | Browser Console | Gateway | JSON semantic messages and separate binary audio frames |
 
-// Talker: Gateway = client, Talker = server.
-service TalkerService {
-  // Bidi: Gateway sends TalkerInput.start (context) to begin generation, then
-  // optionally TalkerInput.barge_in to interrupt mid-stream. Talker streams
-  // back TalkerOutput including BargeInAck { spoken_text, unspoken_text } when
-  // a barge-in interrupts mid-speech. Both fields are empty if Talker was
-  // already idle when the BargeIn arrived.
-  rpc Converse(stream TalkerInput) returns (stream TalkerOutput);
-  // Speculative prefix prefill (no generation).
-  rpc PrefillCache(PrefillRequest) returns (PrefillAck);
-  // Persona delivery — soul_md + identity_md + RAG-synthesized memory_md.
-  rpc UpdatePersona(PersonaConfig) returns (PersonaAck);
-}
+Current service IPC uses TCP. Gateway sends Listener audio as
+`[u32 big-endian length][raw bytes]` on the separately configured audio
+connection. Listener accepts configured PCM input or decodes configured Opus;
+the browser currently sends PCM. Gateway never decodes these bytes.
 
-// Reasoner: Gateway = client, Reasoner = server.
-service ReasonerService {
-  rpc Delegate(stream DelegateInput) returns (stream DelegateOutput);
-  rpc Interrupt(InterruptRequest) returns (InterruptAck);
-  rpc Telemetry(TelemetrySubscribe) returns (stream TelemetryEvent);
-}
-
-// Endpoint → Gateway control plane.
-service RouterControlService {
-  rpc SendControl(ControlSignal) returns (ControlAck);
-}
-```
-
-Audio frames flow on a dedicated raw TCP socket from Gateway to Listener at `listener_audio_addr:listener_audio_port`. The Gateway writes `[u32 BE length][bytes]` records; the Listener decodes Opus and feeds RealtimeSTT.
-
----
+Proto changes must regenerate Python stubs, rebuild Rust clients/servers, and
+pass buf checks. TypeScript Reasoner is planned to load the schema at runtime.
+Adding session/task/policy/binding fields is active work, not present wire state.
 
 ## 16. Implementation
 
-| Attribute                                  | Value                                                                                                                  |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Language                                   | Rust                                                                                                                   |
-| Async runtime                              | `tokio` single-threaded async                                                                                          |
-| gRPC server                                | `tonic`                                                                                                                |
-| File I/O (SOUL.md, IDENTITY.md)            | `tokio::fs` + `notify` file watcher                                                                                    |
-| RAG store                                  | `rusqlite` (bundled SQLite) + FTS5 BM25 + optional embedder via `reqwest`                                              |
-| IPC transport                              | TCP for Phase 1 (cross-platform); Unix domain sockets re-evaluated when ready                                          |
-| OpenPod connection                         | TCP/local socket per OpenPod spec                                                                                      |
-| State                                      | In-memory state machine: conversation history, active tasks, pending timers, tool list, cached persona + memory config |
+| Attribute | Current implementation |
+| --- | --- |
+| Language/runtime | Rust; default multithreaded Tokio runtime |
+| gRPC | tonic; inbound control service, outbound voice/Reasoner clients |
+| Web endpoint | Axum, enabled by dev-console |
+| Persona files | tokio::fs plus notify watcher |
+| Built-in RAG | rusqlite with bundled SQLite/FTS5; optional HTTP embedder |
+| Configuration | gateway.toml for local behavior; kaguya.runtime.toml for process/capability topology and Supervisor sandbox settings |
+| Runtime state | In-memory history, turn state, active Reasoner requests and connections; RAG SQLite persists independently |
+| Provider assembly | app.rs constructs components; main.rs initializes runtime/logging; pipeline::run handles the event loop |
+| Process/sandbox lifecycle | Supervisor; not Gateway |
 
 ### 16.1 Process Layout
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│  Process 1: Gateway (Rust)                                     │
-│  - tokio async runtime                                         │
-│  - Input Stream (priority queue)                               │
-│  - gRPC server (tonic)                                         │
-│  - Silence timers, prefill orchestration, Reasoner lifecycle   │
-└────────────────────────────────┬──────────────────────────────┘
-          gRPC (Unix socket)     │     gRPC (Unix socket)
-          ┌──────────────────────┘     └──────────────────────┐
-          ▼                                                    ▼
-  Process 2: Listener + Talker (Python)          Process 4+: Reasoner(s) (TypeScript)
+Solid arrows below show connection initiation or the stated audio path, not the
+direction of every message on a bidirectional connection. Dotted arrows show
+Supervisor ownership; the Reasoner service itself remains pending.
+
+```mermaid
+flowchart TD
+    console["Console / Vite"]
+    gateway["Gateway"]
+    supervisor["Rust Supervisor"]
+    voice["Listener + Talker<br/>Python voice stack"]
+    reasoner["Reasoner service<br/>Pending implementation"]
+    llm["Configured LLM HTTP endpoint"]
+    speakers["Voice-service host speakers<br/>Current TTS output"]
+
+    console -->|"WebSocket"| gateway
+    console -->|"HTTP/SSE via dev proxy"| supervisor
+    supervisor -. "managed process lifecycle" .-> gateway
+    supervisor -. "managed process lifecycle" .-> voice
+    supervisor -. "configured launch; service pending" .-> reasoner
+    gateway -->|"gRPC client: Stream / Converse"| voice
+    gateway -->|"Raw audio TCP ingress"| voice
+    gateway -->|"gRPC client: Delegate / Interrupt"| reasoner
+    gateway -->|"HTTP sandbox control + telemetry"| supervisor
+    voice -->|"HTTP inference"| llm
+    voice -->|"Local TTS playback"| speakers
 ```
 
----
+Providers may be external under a runtime profile; the diagram does not require
+Supervisor to launch an externally managed LLM endpoint. Console development
+startup bootstraps the Rust Supervisor; app process ownership remains there.
 
 ## 17. Phased Delivery
 
-### Phase 1 Deliverables (Gateway scope)
+The [implementation plan](implementation-plan-v0.1.0.md) is the authoritative
+progress checklist. This mapping replaces the old mixed Phase 1/Phase 2 claims
+without declaring incomplete functionality delivered.
 
-- Event loop, priority queue, silence timers.
-- **Local endpoint I/O via dev-GUI/TUI** (audio, text, control — simple local interface, no OpenPod protocol).
-- Context package assembly and Talker dispatch.
-- RAG memory: open `data/kaguya.db` (SQLite + FTS5) at startup; per-turn retrieval via `RagEngine::retrieve`; synthesize `memory_md` via `RagEngine::export_memory_md`. Optional background embedder for vector similarity.
-- Post-turn memory evaluation: `RagEngine::evaluate_and_store` extracts preference / fact / project / conversation entries; updated `memory_md` pushed via `UpdatePersona` only when content changes.
-- Conversation history management (in-memory rolling log, compaction).
-- Persona file delivery (`SOUL.md` + `IDENTITY.md` + RAG-synthesized `memory_md`) to Talker at startup and on change. File watcher tracks `SOUL.md` and `IDENTITY.md`.
-- Tool dispatch (Toolkit registry, sandboxed TypeScript).
-- Reasoner lifecycle management (spawn, monitor, cancel).
-- Reasoner output filtering and narration dispatch.
-- Inline barge-in dispatch (`TalkerInput.barge_in`) on `vad_speech_start` and `text_command`.
-- Always-on prefix prefill trigger (post-turn).
-- Silence timer management.
-- Workspace root enforcement.
-- MCP server connections.
+| Stage | Gateway-relevant outcome |
+| --- | --- |
+| Existing baseline | Event handling, voice clients, RAG, persona, local tools, reconnect, sandbox client and Console endpoint |
+| R0 | Assembly/event-loop extraction implemented; validation evidence is recorded in the plan; P0 scheduling correction remains R8 work |
+| R1 | Durable session identity, history and resume APIs |
+| R2 | Policy resolution and correlated approval |
+| R3 | Durable application task ownership/lifecycle |
+| R4 | Workspace identity, association and lifecycle |
+| R5 | Workspace/policy-aware execution binding to Supervisor; resolve basic tool/MCP inventory |
+| R6 | Real Reasoner service and provider integration |
+| R7 | Complete Console domain views, recovery and browser voice path |
+| R8 | Context limits, P0 responsiveness, interruption/recovery and cross-platform acceptance |
 
-### Phase 2 Deliverables (Gateway scope)
-
-- **OpenPod protocol integration** — replace dev-GUI/TUI local interface with OpenPod demux/mux (Channel A metadata, Channel D audio, Control channel, telemetry P5 events).
-- LLM-based memory extraction replacing the keyword-trigger heuristic in `RagEngine::extract_memories`.
-- Pre-emptive RAG retrieval on `partial_transcript` events (during user speech).
-- Partial transcript prefill forwarding to Talker.
-- Two-stage barge-in (soft fade / hard stop).
-- Tool Search Tool for large MCP registries.
-- Programmatic Tool Calling (multi-tool scripts in sandboxed environment).
-- User host ambient telemetry ingestion from OpenPod (P5 events).
-
----
+Deferred scope includes OpenPod, incremental partial-transcript prefill,
+two-stage barge-in, advanced tool search/programmatic calling, and richer
+memory extraction. Basic MCP remains tracked in R5 rather than silently
+removed. History summarization remains an open compaction choice rather than
+an existing feature.
 
 ## 18. Open Questions (Gateway-Relevant)
 
-- **RAG store growth threshold.** At what entry count does the SQLite `memories` corpus need a dedicated vector backend (sqlite-vss, external store) to keep query latency under voice-pipeline budgets? Needs empirical measurement.
-- **Post-turn memory evaluation heuristic.** Phase 1 uses keyword triggers in `RagEngine::extract_memories`. When and how to swap in a small LLM classifier without blocking the post-turn prefill window?
-- **OpenPod audio integration.** Opus frame handling within OpenPod's existing Raw channel needs implementation. Verify that protobuf wrapping overhead at 50fps (~20ms per frame) is negligible compared to frame processing time.
-- **Speculative prefill invalidation.** Strategy when user's meaning reverses at end of utterance. How to efficiently discard/rebuild KV cache state signaled to Talker.
-- **GPU contention profiling.** VRAM budget fits on paper. Actual compute contention needs empirical benchmarking (faster-whisper + llama.cpp + Kokoro concurrent on RTX 5070 Ti).
+- **Identity and durable history:** Session/conversation ID relationship, startup selection, storage format, retention and replay/duplicate handling.
+- **Policy and task lifecycle:** Precedence, grant scope/revocation, approval timeout/disconnect behavior, task transitions and restart/cancellation semantics.
+- **Workspace and execution:** Existing workspace versus checkout/snapshot, concurrent edits, runtime path mapping, supported isolation guarantees, publication and cleanup.
+- **Provider integration:** Initial Reasoner adapters, backend session lifetime and capability contracts; illustrative provider names in §1.1 do not select them.
+- **Context limits and compaction:** Aggregate size accounting, transport/model limits, overflow behavior and possible summarization. Adopted limits require rationale and configuration.
+- **Control responsiveness:** Scheduling/cancellation during slow calls, user speech versus P3 results, and measured STOP behavior.
+- **Audio and interruption:** Browser egress codec, playback completion, idle/false-onset recovery, and spoken-history accuracy during text/voice interruption.
+- **Memory quality and scaling:** Extraction quality, reranking, vector-store need and schema migration; use measurements rather than a fixed unsupported corpus threshold.
+- **Prefill and hardware:** Backend cache support, invalidation, benefit and GPU contention with STT/TTS and concurrent work.
+- **OpenPod transport:** Define raw-audio framing and endpoint compatibility while preserving the rule that audio bytes never enter protobuf serialization.

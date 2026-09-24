@@ -36,7 +36,7 @@ class OpusDecoder:
     """Decodes Opus frames to 16kHz mono 16-bit PCM.
 
     libopus handles internal resampling, so we decode directly to 16kHz —
-    no separate downsample step. See REF-002 for full rationale.
+    no separate downsample step.
     """
 
     def __init__(self) -> None:
