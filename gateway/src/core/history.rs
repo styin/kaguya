@@ -2,22 +2,31 @@
 //!
 //! In-memory storage of recent conversation turns, including user inputs, assistant responses, and tool results.
 
+use crate::instance::InstanceIdentity;
 use crate::proto;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct History {
+    instance_id: String,
+    session_id: String,
     turns: Arc<RwLock<Vec<proto::ChatMessage>>>,
     max_recent: usize,
 }
 
 impl History {
-    pub fn new(max_recent: usize) -> Self {
+    pub fn new(max_recent: usize, instance_context: &InstanceIdentity) -> Self {
         Self {
+            instance_id: instance_context.instance_id.clone(),
+            session_id: instance_context.default_session_id.clone(),
             turns: Arc::new(RwLock::new(Vec::new())),
             max_recent,
         }
+    }
+
+    pub fn matches_instance_session(&self, instance_id: &str, session_id: &str) -> bool {
+        self.instance_id == instance_id && self.session_id == session_id
     }
 
     pub async fn append_user(&self, text: &str) {
@@ -67,5 +76,32 @@ impl History {
             let excess = t.len().saturating_sub(self.max_recent);
             t.drain(0..excess);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_handle_matches_one_instance_and_session() {
+        let instance_context = InstanceIdentity {
+            schema_version: 1,
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            default_session_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let history = History::new(10, &instance_context);
+        assert!(history.matches_instance_session(
+            &instance_context.instance_id,
+            &instance_context.default_session_id
+        ));
+        assert!(!history.matches_instance_session(
+            &uuid::Uuid::new_v4().to_string(),
+            &instance_context.default_session_id
+        ));
+        assert!(!history.matches_instance_session(
+            &instance_context.instance_id,
+            &uuid::Uuid::new_v4().to_string()
+        ));
     }
 }

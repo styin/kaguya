@@ -4,6 +4,10 @@ export type ControlMessage = { type: "control"; command: "stop" | "shutdown" };
 export type IngressMessage = TextMessage | ControlMessage;
 
 // Egress: Gateway → browser
+export type SessionInitEvent = {
+  event_type: "session_init";
+  data: { instance_id: string; session_id: string; conversation_id: string };
+};
 export type SentenceEvent = { event_type: "sentence"; data: { text: string } };
 export type EmotionEvent = { event_type: "emotion"; data: { emotion: string } };
 export type ResponseStartedEvent = {
@@ -22,6 +26,7 @@ export type UserInputEvent = {
 };
 
 export type EgressMessage =
+  | SessionInitEvent
   | SentenceEvent
   | EmotionEvent
   | ResponseStartedEvent

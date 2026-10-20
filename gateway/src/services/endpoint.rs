@@ -21,12 +21,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::audio_sink::ListenerAudioSink;
+use crate::instance::InstanceIdentity;
 use crate::lifecycle::{LifecycleSnapshot, LifecycleSupervisor};
 use crate::types::*;
 
 const CLOSE_SUPERSEDED: u16 = 4001;
 
 pub struct EndpointState {
+    pub instance_context: InstanceIdentity,
     pub control_tx: mpsc::Sender<ControlSignal>,
     pub p1_tx: mpsc::Sender<InputEvent>,
     pub audio_out_rx: tokio::sync::Mutex<mpsc::Receiver<bytes::Bytes>>,
@@ -39,11 +41,14 @@ pub struct EndpointState {
 #[derive(Clone)]
 pub struct RuntimeStatusState {
     pub lifecycle: LifecycleSupervisor,
+    pub instance_context: InstanceIdentity,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatusResponse {
     pub lifecycle: LifecycleSnapshot,
+    pub instance_id: String,
+    pub session_id: String,
 }
 
 pub fn router(state: Arc<EndpointState>) -> Router {
@@ -62,7 +67,20 @@ async fn runtime_status(State(state): State<Arc<EndpointState>>) -> Json<Runtime
 fn runtime_status_response(state: &RuntimeStatusState) -> RuntimeStatusResponse {
     RuntimeStatusResponse {
         lifecycle: state.lifecycle.snapshot(),
+        instance_id: state.instance_context.instance_id.clone(),
+        session_id: state.instance_context.default_session_id.clone(),
     }
+}
+
+fn session_init(instance_context: &InstanceIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "event_type": "session_init",
+        "data": {
+            "instance_id": instance_context.instance_id,
+            "session_id": instance_context.default_session_id,
+            "conversation_id": instance_context.default_session_id,
+        }
+    })
 }
 
 async fn ws_upgrade(
@@ -84,6 +102,15 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
     }
 
     info!("dev console connected");
+
+    let bootstrap = session_init(&state.instance_context);
+    if socket
+        .send(Message::Text(bootstrap.to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
 
     // Lock output receivers — released when this connection ends (cancel or close),
     // allowing the next client to acquire them.
@@ -182,13 +209,43 @@ mod tests {
         let talker = lifecycle.register_connection("talker");
         talker.set_readiness(Readiness::Ready);
 
-        let response = runtime_status_response(&RuntimeStatusState { lifecycle });
+        let response = runtime_status_response(&RuntimeStatusState {
+            lifecycle,
+            instance_context: InstanceIdentity {
+                schema_version: 1,
+                instance_id: "11111111-1111-4111-8111-111111111111".into(),
+                default_session_id: "22222222-2222-4222-8222-222222222222".into(),
+            },
+        });
 
         assert_eq!(response.lifecycle.connections.len(), 1);
+        assert_eq!(response.session_id, "22222222-2222-4222-8222-222222222222");
         assert_eq!(response.lifecycle.connections[0].name, "talker");
         assert_eq!(
             response.lifecycle.connections[0].readiness,
             Readiness::Ready
+        );
+    }
+
+    #[test]
+    fn session_bootstrap_uses_default_session_as_conversation_carrier() {
+        let instance_context = InstanceIdentity {
+            schema_version: 1,
+            instance_id: "11111111-1111-4111-8111-111111111111".into(),
+            default_session_id: "22222222-2222-4222-8222-222222222222".into(),
+        };
+        let bootstrap = session_init(&instance_context);
+        assert_eq!(
+            bootstrap["data"]["instance_id"],
+            instance_context.instance_id
+        );
+        assert_eq!(
+            bootstrap["data"]["session_id"],
+            instance_context.default_session_id
+        );
+        assert_eq!(
+            bootstrap["data"]["conversation_id"],
+            instance_context.default_session_id
         );
     }
 }

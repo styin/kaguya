@@ -8,7 +8,6 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use crate::audio_sink::ListenerAudioSink;
 use crate::capabilities::RagCapability;
@@ -18,6 +17,7 @@ use crate::control::ControlServiceImpl;
 use crate::endpoint;
 use crate::history::History;
 use crate::input_stream;
+use crate::instance;
 use crate::lifecycle::{LifecycleSupervisor, Readiness};
 use crate::narration::NarrationFilter;
 use crate::output::OutputManager;
@@ -33,14 +33,17 @@ use crate::telemetry::TelemetryClient;
 use crate::tools::ToolRegistry;
 use crate::types::{ControlSignal, MetadataEvent};
 
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(
+    selection: crate::deployment::DeploymentSelection,
+    mut config: GatewayConfig,
+) -> anyhow::Result<()> {
     info!("Kaguya Gateway starting");
     let mut lifecycle = LifecycleSupervisor::new();
 
-    let config = GatewayConfig::load("gateway.toml").unwrap_or_else(|e| {
-        warn!("config load failed ({e}), using defaults");
-        GatewayConfig::default()
-    });
+    let instance_lease = instance::load_required(&selection)?;
+    config.files.soul_path = instance_lease.paths.soul.clone();
+    config.files.identity_path = instance_lease.paths.persona_identity.clone();
+    config.rag.db_path = instance_lease.paths.rag_db.clone();
     let clients = config.resolved_clients();
 
     // ── Channels ──
@@ -62,8 +65,9 @@ pub async fn run() -> anyhow::Result<()> {
     });
 
     // ── Components ──
-    let conversation_id = Uuid::new_v4().to_string();
-    let history = History::new(config.history.max_recent_turns);
+    // Protobuf conversation_id remains the wire-compatible SessionId carrier.
+    let conversation_id = instance_lease.identity.default_session_id.clone();
+    let history = History::new(config.history.max_recent_turns, &instance_lease.identity);
     let persona = Persona::load(&config.files.soul_path, &config.files.identity_path).await?;
     let rag_engine = RagEngine::new(&config.rag, config.files.workspace_root.clone())?;
     let rag_embedder = rag_engine.embedder.clone();
@@ -78,8 +82,35 @@ pub async fn run() -> anyhow::Result<()> {
     // Gateway holds only the client; it acquires an opaque handle lazily on the
     // first tool call. Backend policy and resource lifecycle stay in Supervisor.
     let supervisor_url = config.supervisor.resolved_url();
-    let telemetry = TelemetryClient::new(&supervisor_url, "gateway");
-    let sandbox = match SandboxClient::connect(&supervisor_url).await {
+    let telemetry = TelemetryClient::new(&supervisor_url, "gateway")
+        .with_instance_context(instance_lease.identity.clone());
+    let binding_response = reqwest::Client::new()
+        .post(format!(
+            "{}/api/owner/bind",
+            supervisor_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({
+            "instanceId": instance_lease.identity.instance_id,
+            "sessionId": instance_lease.identity.default_session_id,
+        }))
+        .send()
+        .await;
+    let supervisor_bound = match binding_response {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => anyhow::bail!(
+            "Supervisor rejected instance/session binding: {}",
+            response.text().await.unwrap_or_default()
+        ),
+        Err(error) => {
+            warn!(%error, %supervisor_url, "Supervisor instance/session binding unavailable; sandbox disabled");
+            false
+        }
+    };
+    let sandbox = match if supervisor_bound {
+        SandboxClient::connect(&supervisor_url, &instance_lease.identity).await
+    } else {
+        Ok(SandboxClient::disabled())
+    } {
         Ok(client) => {
             info!(
                 backend = client.backend().unwrap_or("unknown"),
@@ -97,12 +128,14 @@ pub async fn run() -> anyhow::Result<()> {
         config.files.workspace_root.clone(),
         task_spawner.clone(),
         Some(Arc::clone(&sandbox)),
-    );
+    )
+    .with_instance_context(instance_lease.identity.clone());
     let reasoner = ReasonerManager::new(
         clients.reasoner_addr.clone(),
         task_spawner.clone(),
         reasoner_connection,
-    );
+    )
+    .with_instance_context(instance_lease.identity.clone());
     let silence = SilenceTimers::new(
         config.silence.soft_prompt_secs,
         config.silence.follow_up_secs,
@@ -115,6 +148,7 @@ pub async fn run() -> anyhow::Result<()> {
         task_spawner.clone(),
         talker_connection,
     )
+    .with_instance_context(instance_lease.identity.clone())
     .with_telemetry(telemetry.clone());
     let output = OutputManager::new(audio_out_tx, metadata_out_tx);
     let narration = NarrationFilter::new(5);
@@ -158,15 +192,23 @@ pub async fn run() -> anyhow::Result<()> {
         }));
     let expected_voice_stack = config.runtime.runtime_expected("voice_stack");
     let shutdown_token = lifecycle.shutdown_token();
+    let binding_failure = Arc::new(RwLock::<Option<String>>::new(None));
 
     {
         let talker_recovery = talker.clone();
         let persona_recovery = shared_persona.clone();
         let shutdown = shutdown_token.clone();
+        let failure = binding_failure.clone();
+        let shutdown_tx = control_tx.clone();
         lifecycle.spawn("talker_recovery", async move {
-            talker_recovery
+            if let Err(error) = talker_recovery
                 .run_recovery_loop(persona_recovery, expected_voice_stack, shutdown)
-                .await;
+                .await
+            {
+                error!(%error, "voice process rejected instance/session binding");
+                *failure.write().await = Some(error.to_string());
+                let _ = shutdown_tx.send(ControlSignal::Shutdown).await;
+            }
         });
     }
 
@@ -180,6 +222,7 @@ pub async fn run() -> anyhow::Result<()> {
             let audio = listener_audio.clone();
             let p1 = input_tx.p1.clone();
             let p2 = input_tx.p2.clone();
+            let listener_context = instance_lease.identity.clone();
             async move {
                 crate::listener::run_recovery_loop(
                     grpc_endpoint,
@@ -191,6 +234,7 @@ pub async fn run() -> anyhow::Result<()> {
                     p1,
                     p2,
                     expected_voice_stack,
+                    Some(listener_context),
                     shutdown,
                 )
                 .await;
@@ -202,6 +246,7 @@ pub async fn run() -> anyhow::Result<()> {
     #[cfg(feature = "dev-console")]
     {
         let endpoint_state = Arc::new(endpoint::EndpointState {
+            instance_context: instance_lease.identity.clone(),
             control_tx: control_tx.clone(),
             p1_tx: input_tx.p1.clone(),
             audio_out_rx: tokio::sync::Mutex::new(_audio_out_rx),
@@ -210,6 +255,7 @@ pub async fn run() -> anyhow::Result<()> {
             listener_audio: listener_audio.clone(),
             runtime_status: endpoint::RuntimeStatusState {
                 lifecycle: lifecycle.clone(),
+                instance_context: instance_lease.identity.clone(),
             },
         });
         let ws_addr = config.server.ws_addr.clone();
@@ -286,7 +332,7 @@ pub async fn run() -> anyhow::Result<()> {
                     memory_md: rag_w.export_memory_md().await,
                 };
                 *shared_persona_w.write().await = new_persona.clone();
-                talker_w.update_persona(new_persona).await;
+                let _ = talker_w.update_persona(new_persona).await;
                 info!("persona pushed to Talker");
             }
         });
@@ -295,7 +341,8 @@ pub async fn run() -> anyhow::Result<()> {
     info!("Kaguya Gateway ready");
 
     // ── Event Loop State ──
-    let turn = TurnState::new(conversation_id.clone(), last_memory_md);
+    let turn = TurnState::new(conversation_id.clone(), last_memory_md)
+        .with_instance_id(instance_lease.identity.instance_id.clone());
     let pipeline = PipelineComponents {
         talker: &talker,
         history: &history,
@@ -321,11 +368,15 @@ pub async fn run() -> anyhow::Result<()> {
         &telemetry,
         config.silence.enabled,
     )
-    .await;
+    .await?;
 
-    // Release only the opaque conversation handle. Provider/global teardown is
+    // Release only the opaque sandbox handle. Provider/global teardown is
     // owned by Supervisor and runs after managed processes stop.
     sandbox.release().await;
+
+    if let Some(error) = binding_failure.read().await.clone() {
+        anyhow::bail!("voice process instance/session binding failed: {error}");
+    }
 
     info!("Kaguya Gateway shutdown");
     Ok(())

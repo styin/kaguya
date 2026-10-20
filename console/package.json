@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node server/dev.mjs",
+    "test": "node --test server/runtime-selection.test.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

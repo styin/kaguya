@@ -3,7 +3,8 @@ ws_addr   = "127.0.0.1:8080"
 grpc_addr = "0.0.0.0:50051"
 
 [files]
-# Paths are resolved relative to the Gateway's cwd (`<repo>/gateway`).
+# Initialization sources, resolved relative to this settings file. At runtime,
+# persona files are read from the instance-owned data directory.
 soul_path      = "../config/SOUL.md"
 identity_path  = "../config/IDENTITY.md"
 workspace_root = ".."
@@ -21,6 +22,7 @@ context_shift_secs = 30
 enabled            = false
 
 [rag]
+# Initialization source. Runtime RAG lives with the instance-owned data.
 db_path = "data/kaguya.db"
 # embedding_url = "http://127.0.0.1:8081"
 top_k = 10

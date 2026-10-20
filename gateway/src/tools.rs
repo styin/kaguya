@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::instance::InstanceIdentity;
 use crate::lifecycle::TaskSpawner;
 use crate::proto;
 use crate::sandbox::SandboxClient;
@@ -25,6 +26,7 @@ pub struct ToolRegistry {
     workspace_root: PathBuf,
     tasks: TaskSpawner,
     sandbox: Option<Arc<SandboxClient>>,
+    instance_context: Option<InstanceIdentity>,
 }
 
 impl ToolRegistry {
@@ -70,7 +72,13 @@ impl ToolRegistry {
             workspace_root,
             tasks,
             sandbox,
+            instance_context: None,
         }
+    }
+
+    pub fn with_instance_context(mut self, instance_context: InstanceIdentity) -> Self {
+        self.instance_context = Some(instance_context);
+        self
     }
 
     pub fn definitions(&self) -> Vec<proto::ToolDefinition> {
@@ -105,9 +113,34 @@ impl ToolRegistry {
         args_json: String,
         p3_tx: mpsc::Sender<InputEvent>,
     ) {
+        let (instance_id, session_id) = match &self.instance_context {
+            Some(instance_context) if conversation_id != instance_context.default_session_id => {
+                let instance_id = instance_context.instance_id.clone();
+                let session_id = instance_context.default_session_id.clone();
+                self.tasks.spawn("tool_context_rejection", async move {
+                    let _ = p3_tx
+                        .send(InputEvent::ToolResult {
+                            instance_id,
+                            session_id,
+                            request_id,
+                            tool_name,
+                            content: sandbox_error_json(
+                                "tool dispatch originating session context mismatch",
+                            ),
+                        })
+                        .await;
+                });
+                return;
+            }
+            Some(instance_context) => (
+                instance_context.instance_id.clone(),
+                instance_context.default_session_id.clone(),
+            ),
+            None => (String::new(), conversation_id.clone()),
+        };
         // ── Sandbox route ──
         // `sandbox_exec` runs through a Supervisor-owned provider handle.
-        // Files persist across calls in the conversation; the normal P3
+        // Files persist across calls in the active allocation; the normal P3
         // ToolResult path remains unchanged.
         if tool_name == "sandbox_exec" {
             let sandbox = self.sandbox.clone();
@@ -120,11 +153,13 @@ impl ToolRegistry {
             self.tasks
                 .spawn(format!("tool_dispatch:{tool_name}"), async move {
                     let content = match sandbox {
-                        Some(sb) => sb.exec_from_json(&conversation_id, &args_json).await,
+                        Some(sb) => sb.exec_from_json(&request_id, &args_json).await,
                         None => sandbox_error_json("sandbox disabled"),
                     };
                     let _ = p3_tx
                         .send(InputEvent::ToolResult {
+                            instance_id,
+                            session_id,
                             request_id,
                             tool_name,
                             content,
@@ -169,6 +204,8 @@ impl ToolRegistry {
 
                 let _ = p3_tx
                     .send(InputEvent::ToolResult {
+                        instance_id,
+                        session_id,
                         request_id,
                         tool_name,
                         content,
@@ -322,6 +359,44 @@ mod tests {
     use crate::lifecycle::LifecycleSupervisor;
 
     #[tokio::test]
+    async fn mismatched_session_rejects_tool_before_filesystem_write() {
+        let root =
+            std::env::temp_dir().join(format!("kaguya-tool-context-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let instance_context = crate::instance::InstanceIdentity {
+            schema_version: 1,
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            default_session_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let lifecycle = LifecycleSupervisor::new();
+        let tools = ToolRegistry::new(root.clone(), lifecycle.spawner(), None)
+            .with_instance_context(instance_context.clone());
+        let (result_tx, mut result_rx) = mpsc::channel(1);
+        tools.dispatch(
+            uuid::Uuid::new_v4().to_string(),
+            "wrong-context-request".into(),
+            "write_file".into(),
+            r#"{"path":"should-not-exist.txt","content":"no"}"#.into(),
+            result_tx,
+        );
+        let result = result_rx.recv().await.unwrap();
+        let InputEvent::ToolResult {
+            instance_id,
+            session_id,
+            content,
+            ..
+        } = result
+        else {
+            panic!("expected ToolResult");
+        };
+        assert_eq!(instance_id, instance_context.instance_id);
+        assert_eq!(session_id, instance_context.default_session_id);
+        assert!(content.contains("context mismatch"));
+        assert!(!root.join("should-not-exist.txt").exists());
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn sandbox_tool_dispatch_completes_full_supervisor_chain() {
         let supervisor = SupervisorApp::new(ResolvedRuntimeConfig {
             config: RuntimeConfig {
@@ -339,9 +414,16 @@ mod tests {
         });
 
         let sandbox = Arc::new(
-            SandboxClient::connect(format!("http://{addr}"))
-                .await
-                .unwrap(),
+            SandboxClient::connect(
+                format!("http://{addr}"),
+                &crate::instance::InstanceIdentity {
+                    schema_version: 1,
+                    instance_id: uuid::Uuid::new_v4().to_string(),
+                    default_session_id: uuid::Uuid::new_v4().to_string(),
+                },
+            )
+            .await
+            .unwrap(),
         );
         let lifecycle = LifecycleSupervisor::new();
         let tools = ToolRegistry::new(
@@ -364,6 +446,7 @@ mod tests {
             request_id,
             tool_name,
             content,
+            ..
         } = result
         else {
             panic!("expected ToolResult");

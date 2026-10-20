@@ -22,7 +22,9 @@ use windows::Win32::System::JobObjects::{
 
 use crate::config::SandboxConfig;
 
-use super::{read_capped, sanitize_session, script_name, ExecRequest, ExecResult, SandboxBackend};
+use super::{
+    read_capped, sanitize_allocation, script_name, ExecRequest, ExecResult, SandboxBackend,
+};
 
 /// A `HANDLE` is `!Send` because it is a raw pointer, but a Job Object is a
 /// process-wide kernel object identified by an opaque handle whose validity is
@@ -33,7 +35,7 @@ unsafe impl Send for SendHandle {}
 
 pub struct JobObjectBackend {
     root: PathBuf,
-    sessions: Mutex<HashSet<String>>,
+    allocations: Mutex<HashSet<String>>,
     mem_bytes: usize,
     pids: u32,
 }
@@ -42,34 +44,34 @@ impl JobObjectBackend {
     pub fn new(cfg: &SandboxConfig, _workspace_root: PathBuf) -> anyhow::Result<Self> {
         Ok(Self {
             root: std::env::temp_dir().join("kaguya-sandbox"),
-            sessions: Mutex::new(HashSet::new()),
+            allocations: Mutex::new(HashSet::new()),
             // Honor the same [sandbox] limits as the Docker backend so config
             // behaves consistently across backends.
             mem_bytes: (cfg.memory_limit_mb as usize) * 1024 * 1024,
             pids: cfg.pids_limit as u32,
         })
     }
-    fn session_dir(&self, session: &str) -> PathBuf {
-        self.root.join(sanitize_session(session))
+    fn session_dir(&self, allocation: &str) -> PathBuf {
+        self.root.join(sanitize_allocation(allocation))
     }
 }
 
 #[async_trait]
 impl SandboxBackend for JobObjectBackend {
-    async fn acquire(&self, session: &str) -> Result<(), String> {
-        tokio::fs::create_dir_all(self.session_dir(session))
+    async fn acquire(&self, allocation: &str) -> Result<(), String> {
+        tokio::fs::create_dir_all(self.session_dir(allocation))
             .await
             .map_err(|error| format!("mkdir failed: {error}"))?;
-        self.sessions.lock().await.insert(session.to_string());
+        self.allocations.lock().await.insert(allocation.to_string());
         Ok(())
     }
 
-    async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
-        let dir = self.session_dir(session);
+    async fn execute(&self, allocation: &str, req: ExecRequest) -> ExecResult {
+        let dir = self.session_dir(allocation);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             return ExecResult::backend_error(format!("mkdir: {e}"));
         }
-        self.sessions.lock().await.insert(session.to_string());
+        self.allocations.lock().await.insert(allocation.to_string());
         let script = dir.join(script_name(req.language.ext()));
         if let Err(e) = tokio::fs::write(&script, &req.code).await {
             return ExecResult::backend_error(format!("write: {e}"));
@@ -192,9 +194,9 @@ impl SandboxBackend for JobObjectBackend {
         }
     }
 
-    async fn cleanup(&self, session: &str) {
-        let _ = tokio::fs::remove_dir_all(self.session_dir(session)).await;
-        self.sessions.lock().await.remove(session);
+    async fn cleanup(&self, allocation: &str) {
+        let _ = tokio::fs::remove_dir_all(self.session_dir(allocation)).await;
+        self.allocations.lock().await.remove(allocation);
     }
 
     fn name(&self) -> &'static str {

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import grpc
 
+from binding import InstanceSessionBinding
 from config import TalkerConfig
 from inference.llm_client import LLMClient
 from inference.prompt_formatter import assemble_prompt
@@ -39,12 +40,18 @@ logger = logging.getLogger(__name__)
 
 
 class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
-    def __init__(self, config: TalkerConfig, speaker: Speaker) -> None:
+    def __init__(
+        self,
+        config: TalkerConfig,
+        speaker: Speaker,
+        binding: InstanceSessionBinding | None = None,
+    ) -> None:
         self._config = config
         self._llm = LLMClient(config)
         self._speaker = speaker
         self._persona = kaguya_pb2.PersonaConfig()
         self._identity = IdentityConfig()
+        self._binding = binding
 
     # ──────────────────────────────────────────
     # Converse — bidi streaming, replaces ProcessPrompt + Prepare
@@ -55,6 +62,9 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         request_iterator,
         context: grpc.aio.ServicerContext,
     ) -> AsyncGenerator[kaguya_pb2.TalkerOutput, None]:
+        session_id = (
+            await self._binding.bind_or_validate(context) if self._binding else None
+        )
         # Flush response headers immediately. Without this, grpcio-aio defers
         # the HTTP/2 HEADERS frame until the first `yield`, which only happens
         # after `start` arrives and a sentence is generated. The Gateway's
@@ -71,12 +81,28 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
             async for msg in request_iterator:
                 which = msg.WhichOneof("payload")
                 if which == "start":
+                    if (
+                        session_id is not None
+                        and msg.start.conversation_id != session_id
+                    ):
+                        await context.abort(
+                            grpc.StatusCode.FAILED_PRECONDITION,
+                            "TalkerContext session mismatch",
+                        )
                     cancel_event.clear()
                     self._speaker.reset()
                     generation_task = asyncio.create_task(
                         self._run_generation(msg.start, output_queue, cancel_event)
                     )
                 elif which == "barge_in":
+                    if (
+                        session_id is not None
+                        and msg.barge_in.conversation_id != session_id
+                    ):
+                        await context.abort(
+                            grpc.StatusCode.FAILED_PRECONDITION,
+                            "barge-in session mismatch",
+                        )
                     logger.debug("← BargeIn received")
                     cancel_event.set()
                     spoken, unspoken = self._speaker.stop()
@@ -183,11 +209,22 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
     # ──────────────────────────────────────────
 
     async def PrefillCache(self, request, context):
+        if self._binding:
+            session_id = await self._binding.bind_or_validate(context)
+            if (
+                request.conversation_id != session_id
+                or request.context.conversation_id != session_id
+            ):
+                await context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION, "prefill session mismatch"
+                )
         prompt = assemble_prompt(request.context, self._persona)
         await self._llm.prefill(prompt)
         return kaguya_pb2.PrefillAck()
 
     async def UpdatePersona(self, request, context):
+        if self._binding:
+            await self._binding.bind_or_validate(context)
         self._persona = request
         self._identity = parse_identity_config(request.identity_md or "")
         logger.info(

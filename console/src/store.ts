@@ -5,6 +5,7 @@ import type {
   AssistantTurn,
   EgressMessage,
   IngressMessage,
+  SessionInitEvent,
   Turn,
   WsEvent,
 } from "./types";
@@ -17,6 +18,7 @@ export interface AppState {
   audioEvents: AudioEvent[];
   wsStatus: WsStatus;
   wsOpenedAt: number | null;
+  sessionIdentity: SessionInitEvent["data"] | null;
 
   selTurn: string | null;
   logsCollapsed: boolean;
@@ -31,6 +33,7 @@ const initial: AppState = {
   audioEvents: [],
   wsStatus: "disconnected",
   wsOpenedAt: null,
+  sessionIdentity: null,
   selTurn: null,
   logsCollapsed: false,
   searchQuery: "",
@@ -89,7 +92,11 @@ function pushAudioEvent(ev: AudioEvent): void {
 
 export const actions = {
   recordWsIn(msg: EgressMessage): void {
-    pushEvent({ kind: "ws_in", ts: Date.now(), msg });
+    const event: WsEvent = { kind: "ws_in", ts: Date.now(), msg };
+    setState({
+      events: pushRing(state.events, event),
+      ...(msg.event_type === "session_init" ? { sessionIdentity: msg.data } : {}),
+    });
   },
   recordWsOut(msg: IngressMessage): void {
     pushEvent({ kind: "ws_out", ts: Date.now(), msg });
@@ -104,7 +111,7 @@ export const actions = {
     if (status === "connected" && state.wsOpenedAt === null) {
       setState({ wsStatus: status, wsOpenedAt: Date.now() });
     } else if (status === "disconnected") {
-      setState({ wsStatus: status, wsOpenedAt: null });
+      setState({ wsStatus: status, wsOpenedAt: null, sessionIdentity: null });
     } else {
       setState({ wsStatus: status });
     }
@@ -175,6 +182,7 @@ export function selectTurns(events: WsEvent[]): Turn[] {
 
   return turns;
 }
+
 
 function lastOpenAssistant(turns: Turn[]): AssistantTurn | null {
   for (let i = turns.length - 1; i >= 0; i--) {

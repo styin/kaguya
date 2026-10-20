@@ -219,8 +219,11 @@ echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
   `ListenerService` on `:50055`. Both run in the same asyncio loop so
   they can share the GPU context for VAD/STT/TTS/LLM.
 - **Audio bypass.** Raw 16-bit PCM/Opus frames don't go through gRPC at
-  50fps — they ride a dedicated TCP socket (`:50056` by default) with
-  length-prefixed frames.
+  50fps — they ride a dedicated TCP socket (`:50056` by default). Gateway
+  sends one 39-byte header (`KAGUYA1` plus binary InstanceId and SessionId);
+  length-prefixed frames follow. The shared `InstanceSessionBinding` guard in
+  `binding.py` rejects a different pair. This adds connection setup bytes, not
+  bytes to each audio frame; no latency benchmark is implied.
 - **Bidi handshake.** Both `Stream` and `Converse` call
   `await context.send_initial_metadata(())` on entry. Without this,
   grpcio-aio defers HTTP/2 HEADERS until the first `yield`, which would

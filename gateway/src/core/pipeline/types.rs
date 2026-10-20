@@ -13,6 +13,8 @@ use crate::types::DispatchKind;
 /// and executor across event loop iterations.
 #[derive(Debug)]
 pub struct TurnState {
+    /// Durable instance associated with this session; set by application startup.
+    pub instance_id: String,
     /// Cancellation token for the active Talker generation, if any.
     pub active_gen: Option<CancellationToken>,
     /// Cancellation token for the active silence timer cascade, if any.
@@ -26,7 +28,7 @@ pub struct TurnState {
     pub current_dispatch_kind: Option<DispatchKind>,
     /// Last exported memory markdown, used to detect changes for persona push.
     pub last_memory_md: String,
-    /// Conversation ID for this session.
+    /// Selected SessionId carried in the existing conversation_id field.
     pub conversation_id: String,
 }
 
@@ -34,6 +36,7 @@ impl TurnState {
     /// Initialize state for a new conversation session.
     pub fn new(conversation_id: String, initial_memory_md: String) -> Self {
         Self {
+            instance_id: String::new(),
             active_gen: None,
             active_silence: None,
             current_response: String::new(),
@@ -42,6 +45,11 @@ impl TurnState {
             last_memory_md: initial_memory_md,
             conversation_id,
         }
+    }
+
+    pub fn with_instance_id(mut self, instance_id: String) -> Self {
+        self.instance_id = instance_id;
+        self
     }
 
     /// Returns `true` if a Talker generation is currently in progress.

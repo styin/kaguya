@@ -6,6 +6,7 @@ gateway/
     |-- app.rs
     |-- lib.rs
     |-- config.rs
+    |-- instance.rs
     |-- error.rs
     |-- telemetry.rs
     |-- tools.rs
@@ -53,7 +54,12 @@ gateway/
 
 Module grouping:
 
-- `main.rs`: async runtime and logging initialization; calls `app::run()`.
+- `main.rs`: deployment CLI, read-only diagnostics, explicit instance operations,
+  runtime/logging setup, and resolved application entry.
+- `instance.rs`: instance-local manifest, persona/RAG adoption, init/rekey, and
+  active ownership leases; persona identity content stays in core/persona.rs.
+- `deployment`: shared source module in ../shared/deployment.rs, also compiled
+  by Supervisor, selecting the root/profile/settings/portable paths.
 - `app.rs`: component construction, startup wiring and cleanup.
 - `telemetry.rs`: async telemetry event client for Supervisor-owned event aggregation.
 - `capabilities/`: contracts for replaceable functionality.

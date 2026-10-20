@@ -1,5 +1,7 @@
 pub mod app;
 pub mod config;
+#[path = "../../shared/deployment.rs"]
+pub mod deployment;
 pub mod gateway;
 pub mod logs;
 pub mod process;

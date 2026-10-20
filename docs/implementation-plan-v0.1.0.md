@@ -2,11 +2,11 @@
 
 **Version:** 0.1.0
 
-**Updated:** 2026-09-23
+**Updated:** 2026-10-19
 
 **Scope:** Existing voice-stack baseline, Gateway refactor, and the next application systems
 
-**Progress evidence:** Original baseline inspection used `633ec49`. The approved R0 extraction is now applied on `gateway-refactor` after documentation commit `b4eecd4`; its Windows build/test evidence is recorded below. Other stages have not received fresh runtime acceptance.
+**Progress evidence:** Original baseline inspection used `633ec49`. R0 Windows evidence is recorded below. R1a instance/deployment closure is implemented on `sessions` with focused Windows validation; supported-host/deployment acceptance remains open. R1b, R1c, and the accepted R1d follow-up remain unimplemented.
 
 ## 0. How to Use This Plan
 
@@ -62,7 +62,7 @@ passed all acceptance tests. Remaining work is assigned to the active stages.
 | Historical area | Source status | Remaining work |
 | --- | --- | --- |
 | M0 — Scaffolding/proto | Rust/Python/TypeScript scaffolding, canonical schema, generators and CI exist | Contract updates and fresh checks as each new system lands |
-| M1 — Gateway | Priority queues, pipeline, in-memory history, persona, RAG, clients, timers and reconnect exist | R0–R5; durable history and identity are absent |
+| M1 — Gateway | Pipeline, in-memory history, persona/RAG, clients, and R1a durable instance/session identity exist | Durable transcript/recovery remains R1c; policy/task/workspace/binding remains R2–R5 |
 | M2 — Listener | Raw audio ingress, PCM/Opus handling, STT and turn detection exist | R7/R8 voice-path and cross-platform validation |
 | M3 — Talker | Converse, inline barge-in, prompt formatting, LLM client, sentence/tag processing and local TTS exist | R7 browser TTS egress; R8 behavioral validation |
 | M4 — Toolkit | Rust Gateway registry/filesystem tools and Supervisor `sandbox_exec` exist | R2/R4/R5 policy and workspace binding; future tool inventory remains open |
@@ -89,7 +89,7 @@ passed all acceptance tests. Remaining work is assigned to the active stages.
 
 ### 2.2 Known Gaps Carried Forward
 
-- Fresh conversation UUID on Gateway startup; no durable transcript reload or server-authoritative session bootstrap for Console → R1/R7.
+- R1a provides durable instance/session identity and Console identity bootstrap; durable transcript reload and replay remain R1c/R7.
 - Approval handling is a placeholder; no shared user-policy resolution/enforcement path → R2.
 - Active Reasoner entries are volatile client state, not durable task management → R3.
 - A configured filesystem root and sandbox scratch directories are not a workspace registry or execution binding → R4/R5.
@@ -104,8 +104,8 @@ passed all acceptance tests. Remaining work is assigned to the active stages.
 | Stage | Focus | Main prerequisites | Status |
 | --- | --- | --- | --- |
 | R0 | Structural extraction and documentation alignment | Existing baseline | Complete for this extraction; Windows checks passed; R8 responsiveness/live/cross-host acceptance remains open |
-| R1 | Instance/session identity; generation semantics; persistence | R0 | In-memory precursor only; separate work sessions R1a → R1b → R1c below |
-| R2 | Policy management | R1 identity | Pending |
+| R1 | Instance/session identity; generation semantics; persistence; configuration foundation | R0 | R1a implementation/Windows checks present; R1a host/deployment acceptance and R1b → R1c → R1d remain |
+| R2 | Policy management | R1 identity and R1d deployment policy foundation | Pending |
 | R3 | Task management and lifecycle | R1; R2 approval semantics | Volatile delegation precursor only |
 | R4 | Workspace management and lifecycle | R1/R3 association contracts | Configured-root precursor only |
 | R5 | Sandbox hookup and execution binding | R2–R4; existing Supervisor | Backend infrastructure present; binding pending |
@@ -154,17 +154,39 @@ unchanged.
 
 ### R1 — Session: Identity and Persistence
 
-**Draft guiding checklist:** Each subsection is a separate implementation work
-session; each checkbox groups changes that must land together. This planning
-update implements none of them. R1a is the current session's scope. Complete the
-dedicated R1b refactor before R1c commits new history-schema semantics.
+**Guiding checklist:** Each checkbox groups changes that must land together.
+The accepted order is R1a → R1b → R1c → R1d → R2. Complete the dedicated R1b
+refactor before R1c commits history-schema semantics. R1d handles broader
+deployment consolidation without expanding R1b's semantic refactor.
 
-#### R1a — Configuration-bound Identity and Ownership (current session)
+#### R1a — Instance Lifecycle, Deployment Selection, and Binding
 
-- [ ] **Identity + configuration + startup:** Introduce validated `InstanceId` and default `SessionId`, initialize/save them once, and resolve the same configuration under managed and standalone startup. Surface configuration failures and stop startup when identity cannot be resolved reliably; no silent default identity. Define restore versus independent-copy behavior. Keep existing protobuf `conversation_id` as an explicit compatibility mapping to `SessionId`.
-- [ ] **Associations + enforcement + exposure:** Bind pipeline/history handles, persona, and capability connections to the resolved instance/session; carry and validate owner correlation on dispatch/callback boundaries. Expose authoritative identity through runtime/endpoint bootstrap. Establish instance-owned data locations and reject incompatible service-owner bindings or duplicate ownership; UUID differences alone do not isolate the existing RAG database or shared Talker state. Retain one active session; history schemas and shared-service multiplexing are later work.
-- [ ] **Allocation lifetime + transport + telemetry:** Separate sandbox allocation keys/handles from conversation identity and tool request IDs across Gateway/Supervisor contracts, cleanup, and event correlation. Rename Docker's internal `instance` field/helper to reflect runtime ownership (for example, `supervisor_run_id`); preserve its ephemeral lifetime, existing container-label compatibility, and cleanup behavior. Full workspace/task execution binding remains R5.
+- [x] **Identity + configuration + startup:** Introduce validated `InstanceId` and default `SessionId`, initialize/save them once, and resolve the same configuration under managed and standalone startup. Surface configuration failures and stop startup when identity cannot be resolved reliably; no silent default identity. Define restore versus independent-copy behavior. Keep existing protobuf `conversation_id` as an explicit compatibility mapping to `SessionId`.
+- [x] **Associations + enforcement + exposure:** Bind pipeline/history handles, persona, and capability connections to the resolved instance/session; validate originating context/correlation on dispatch/callback boundaries. Expose identity through runtime/endpoint bootstrap. Establish instance-owned data locations and reject incompatible service bindings or duplicate local instance use. Retain one active session; history schemas and service multiplexing are later work.
+- [x] **Allocation lifetime + transport + telemetry:** Separate sandbox allocation keys/handles from conversation identity and tool request IDs across Gateway/Supervisor contracts, cleanup, and event correlation. Rename Docker's internal `instance` field/helper to reflect runtime ownership (for example, `supervisor_run_id`); preserve its ephemeral lifetime, existing container-label compatibility, and cleanup behavior. Full workspace/task execution binding remains R5.
+- [x] **Authoritative selection + portable paths:** Runtime TOML selects Gateway settings and explicit portable storage; its instance reference is portable-root-relative. One shared Rust selection/path resolver applies CLI → environment → documented discovery/profile precedence. Managed and direct Console/CLI paths propagate the absolute root/profile; no independent Gateway identity selector remains.
+- [x] **Instance-local manifest + explicit handoff:** The selected `instances/<InstanceId>/instance.toml` is the sole identity authority and its parent the exact data root. Enforce directory/manifest identity agreement, remove the duplicate owner-marker dependency, preserve schema/IDs, and retain both local leases. Init/rekey create verified new directories and print the new selection without rewriting deployment files. This uncommitted design has no legacy migration/compatibility path.
+- [x] **Terminology:** Keep `instance.rs` / `InstanceIdentity` / `InstanceLease` as the compact lifecycle module. Services use `InstanceSessionBinding`, while Gateway callbacks and telemetry carry originating context. Preserve persona identity names and all existing wire spellings.
+- [x] **Nonmutating diagnostics + trust:** `validate-config` / `show-config` resolve the implemented selection/settings/identity subset without launch, directories, leases, ports, or database writes. Initialization mode permits absent identity while rejecting invalid existing metadata. Allowlisted output and failure diagnostics redact secrets. Document shell launch configuration as trusted executable input.
 - [ ] **Acceptance:** Verify stable identity across restarts/configuration edits, independent instance initialization, invalid/missing configuration failures, mismatched-owner rejection, and allocation release without session replacement. Exercise affected Gateway/Supervisor contracts and Windows/macOS path behavior; distinguish tests actually run from unsupported-host checks.
+
+R1a's selected schema, CLI handoff, storage/binding semantics, diagnostic limits,
+and follow-ups are recorded in [instance lifecycle and deployment selection](r1a-identity.md).
+The October 19 closure reconciles the temporary configuration, local-manifest,
+instance-naming, and binding-terminology TODOs. The earlier external manifest
+and duplicate owner record were never a committed compatibility contract.
+
+**Recorded validation (2026-10-19, Windows):** Gateway `--all-targets --features
+dev-console` passed 109 library tests plus 5 black-box CLI tests. Supervisor
+with `sandbox-jobobject` passed 34 library, 3 binary preflight, 3 backend-contract,
+and 6 native integration tests. Talker passed 202 tests; Console passed 15
+selection/launcher tests and its production build. Tests cover changed cwd,
+spaces, CLI/environment/profile precedence, nonmutating/redacted success and
+failure diagnostics, source retention, local-manifest layout, rekey handoff,
+independent leases, service/callback rejection, and unchanged wire behavior.
+Rust formatting, Ruff 0.16.6 lint/format checks, and repository/link checks passed.
+macOS/Linux CI, live Docker/Bubblewrap, and a live voice pipeline remain
+unverified locally; capability-gated tests do not establish deployment coverage.
 
 #### R1b — Semantic Refactor of `turn*` (dedicated session)
 
@@ -177,9 +199,28 @@ dedicated R1b refactor before R1c commits new history-schema semantics.
 - [ ] **Schema + write boundary + ownership:** Add versioned authoritative history to `kaguya.db` using resolved instance/session ownership and R1b's correlation semantics. Define ordering, storage failures, incomplete generations, and confirmed-spoken partials; persist input independently of Talker readiness. Keep derived RAG memory distinct.
 - [ ] **Context + retention:** Separate bounded prompt selection from retained source history; share authoritative history/memory across Talker and Reasoner with role-specific prompts/projections. Define compaction and deletion propagation, preserving source links. A fresh task working context must not replace instance/session/task identity; resumable context branches and LLM summarization remain explicit design choices.
 - [ ] **Recovery + Console + acceptance:** Implement snapshot/cursor replay and deduplication together. Test restart, reconnect, duplicate delivery, unavailable Talker, storage failure, interrupted output, ownership separation, and prompt trimming without transcript loss. Replay must not blindly repeat external effects.
+- [ ] **Identity-write durability prerequisite:** Before accepting valuable persistent history, implement safe identity-file publication and deterministic recovery from interrupted init/rekey, with focused failure tests. Preserve local manifest/data consistency, fail closed, and never mint replacement IDs as error recovery. Whole-instance backup/export is tracked in R8.
 
-**[OPEN]:** Exact configuration initialization/ownership-check mechanisms (R1a),
-the complete semantic naming and compatibility map (R1b), and history schema,
+#### R1d — Broader Deployment Configuration Consolidation
+
+This accepted follow-up runs after R1c and before R2. The R1a selector and
+portable paths are already authoritative; R1d extends consistency to the
+remaining deployment values and launch interfaces.
+
+- [ ] Align actual service binds with client destinations, including Gateway's separately configured addresses and advertised endpoints.
+- [ ] Derive Console/Supervisor proxy and bootstrap connection information from the selected deployment; remove fixed routing assumptions.
+- [ ] Consolidate or reconcile the runtime readers. Preserve typed component boundaries and profile replacement semantics; specify complete supported TOML behavior.
+- [ ] Define environment, `.env`, implementation-default, generated bind-value, and credential-reference precedence. Reconcile duplicated LLM inference/health settings.
+- [ ] Clarify initialization-source settings versus ongoing instance data settings; complete deployment-wide effective configuration, provenance, validation, and redaction.
+- [ ] Introduce structured executable/argument/cwd/environment launch descriptors with explicit shell use and deliberate Windows/macOS behavior. Define any migration rules for existing command strings then; launch configuration remains trusted executable input.
+- [ ] Implement platform application-data paths behind the existing path boundary only with explicit selection, supported-host validation, and deliberate data migration. Never silently fall back to portable mode.
+
+**[OPEN]:** Exact R1d connection/bootstrap, reader, precedence, credential, and
+launch-descriptor contracts. Live reconfiguration, profile inheritance,
+provider frameworks, and moving every tuning value into the root are not
+implicitly included.
+
+**[OPEN]:** The complete semantic naming and compatibility map (R1b), and history schema,
 retention and compaction choices (R1c). Resolve each before dependent work.
 
 ### R2 — Policy Management
@@ -341,6 +382,7 @@ requirements instead of declaring them complete from unit tests alone.
 - [ ] Verify full text/voice turns, inline interruption accounting, idle barge-in, tool-result continuation and the configured silence cascade.
 - [ ] Verify RAG ingestion eligibility, retrieval, memory export, persona refresh and prefix prefill; measure prefill benefit rather than assuming it.
 - [ ] Verify session/task recovery across browser reconnect, Gateway restart, Supervisor restart, unavailable provider and failed persistence.
+- [ ] Build backup/export/restore and consistent whole-instance snapshot tooling, with broader disk/power/process-failure scenarios and operational recovery procedures. Preserve R1c's earlier focused identity-publication/recovery prerequisite; optimize performance only against observed requirements or measurements.
 - [ ] Verify authorization and workspace isolation/consistency across direct file tools and real Reasoner execution.
 - [ ] Verify full-result retrieval, targeted cancellation and cleanup without duplicate terminal outcomes or lost history.
 - [ ] Run relevant Rust/Python/TypeScript builds/tests, buf checks, browser tests and supported-host sandbox deployment checks; record results, versions and any skips.

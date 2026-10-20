@@ -25,13 +25,17 @@ pub async fn run(
     lifecycle: &mut LifecycleSupervisor,
     telemetry: &TelemetryClient,
     silence_enabled: bool,
-) {
+) -> anyhow::Result<()> {
     let talker = pipeline.talker;
     let history = pipeline.history;
     let output = pipeline.output;
     let tools = pipeline.tools;
     let reasoner = pipeline.reasoner;
     let rag = pipeline.rag;
+    anyhow::ensure!(
+        history.matches_instance_session(&turn.instance_id, &turn.conversation_id),
+        "pipeline history instance/session context does not match"
+    );
 
     loop {
         tokio::select! {
@@ -193,7 +197,11 @@ pub async fn run(
             // ── P3: Tool/Reasoner Results ──
             Some(event) = input_rx.p3.recv() => {
                 let actions = match event {
-                    InputEvent::ToolResult { request_id, tool_name, content } => {
+                    InputEvent::ToolResult { instance_id, session_id, request_id, tool_name, content } => {
+                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                            warn!(%instance_id, %session_id, %request_id, "dropping tool callback with mismatched originating instance/session correlation");
+                            continue;
+                        }
                         info!(id = %request_id, tool = %tool_name, "P3: tool result");
                         let recent = history.recent().await;
                         let tool_defs = tools.definitions();
@@ -204,7 +212,11 @@ pub async fn run(
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerStep { task_id: _, description } => {
+                    InputEvent::ReasonerStep { instance_id, session_id, task_id: _, description } => {
+                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                            warn!(%instance_id, %session_id, "dropping Reasoner step with mismatched originating instance/session correlation");
+                            continue;
+                        }
                         let should_narrate = narration.should_narrate(&description);
                         // Skip the async history fetch when the handler will
                         // short-circuit anyway (narration filtered or already
@@ -220,7 +232,11 @@ pub async fn run(
                             should_narrate, ready, recent,
                         )
                     }
-                    InputEvent::ReasonerCompleted { task_id, summary } => {
+                    InputEvent::ReasonerCompleted { instance_id, session_id, task_id, summary } => {
+                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                            warn!(%instance_id, %session_id, %task_id, "dropping Reasoner completion with mismatched originating instance/session correlation");
+                            continue;
+                        }
                         info!(task_id = %task_id, "P3: reasoner done");
                         let recent = history.recent().await;
                         let tool_defs = tools.definitions();
@@ -231,7 +247,11 @@ pub async fn run(
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerError { task_id, message, .. } => {
+                    InputEvent::ReasonerError { instance_id, session_id, task_id, message, .. } => {
+                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                            warn!(%instance_id, %session_id, %task_id, "dropping Reasoner error with mismatched originating instance/session correlation");
+                            continue;
+                        }
                         warn!(task_id = %task_id, err = %message, "P3: reasoner error");
                         continue;
                     }
@@ -267,4 +287,5 @@ pub async fn run(
             }
         }
     }
+    Ok(())
 }

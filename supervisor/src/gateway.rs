@@ -54,9 +54,8 @@ async fn _channel(endpoint: &str) -> anyhow::Result<Channel> {
 mod tests {
     use super::*;
 
-    /// BUG-SCOPING: `fetch_capability_status` uses `reqwest::get` without any
-    /// timeout. If the endpoint stalls (accepts TCP but never responds), the
-    /// call hangs indefinitely, blocking the supervisor's status refresh path.
+    /// A stalled endpoint must return within the internal request timeout.
+    /// Give the outer guard scheduling margin so equal deadlines do not race.
     #[tokio::test]
     async fn fetch_capability_status_should_not_hang_on_stalled_endpoint() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -75,14 +74,14 @@ mod tests {
         });
 
         let result = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(7),
             fetch_capability_status(&format!("http://{addr}")),
         )
         .await;
 
         assert!(
             result.is_ok(),
-            "fetch_capability_status hung for >5s on a stalled endpoint; \
+            "fetch_capability_status exceeded its request timeout plus scheduling margin; \
              it should have an internal timeout"
         );
     }

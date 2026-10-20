@@ -1,4 +1,4 @@
-//! Native backend — runs host interpreters in a per-session scratch directory.
+//! Native backend — runs host interpreters in a per-allocation scratch directory.
 //! It provides no host isolation: cwd, timeout, output caps, and tree-kill are
 //! operational controls, not a security boundary. Intended only for trusted
 //! self-hosted use or when Supervisor itself is externally isolated.
@@ -12,43 +12,43 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use super::{
-    configure_process_group, run_spawned, sanitize_session, script_name, ExecRequest, ExecResult,
-    SandboxBackend,
+    configure_process_group, run_spawned, sanitize_allocation, script_name, ExecRequest,
+    ExecResult, SandboxBackend,
 };
 
 pub struct NativeBackend {
     root: PathBuf,
-    sessions: Mutex<HashSet<String>>,
+    allocations: Mutex<HashSet<String>>,
 }
 
 impl NativeBackend {
     pub fn new(_workspace_root: PathBuf) -> Self {
         Self {
             root: std::env::temp_dir().join("kaguya-sandbox"),
-            sessions: Mutex::new(HashSet::new()),
+            allocations: Mutex::new(HashSet::new()),
         }
     }
-    fn session_dir(&self, session: &str) -> PathBuf {
-        self.root.join(sanitize_session(session))
+    fn session_dir(&self, allocation: &str) -> PathBuf {
+        self.root.join(sanitize_allocation(allocation))
     }
 }
 
 #[async_trait]
 impl SandboxBackend for NativeBackend {
-    async fn acquire(&self, session: &str) -> Result<(), String> {
-        tokio::fs::create_dir_all(self.session_dir(session))
+    async fn acquire(&self, allocation: &str) -> Result<(), String> {
+        tokio::fs::create_dir_all(self.session_dir(allocation))
             .await
             .map_err(|error| format!("mkdir failed: {error}"))?;
-        self.sessions.lock().await.insert(session.to_string());
+        self.allocations.lock().await.insert(allocation.to_string());
         Ok(())
     }
 
-    async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
-        let dir = self.session_dir(session);
+    async fn execute(&self, allocation: &str, req: ExecRequest) -> ExecResult {
+        let dir = self.session_dir(allocation);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             return ExecResult::backend_error(format!("mkdir failed: {e}"));
         }
-        self.sessions.lock().await.insert(session.to_string());
+        self.allocations.lock().await.insert(allocation.to_string());
 
         let script = dir.join(script_name(req.language.ext()));
         if let Err(e) = tokio::fs::write(&script, &req.code).await {
@@ -91,9 +91,9 @@ impl SandboxBackend for NativeBackend {
         })
     }
 
-    async fn cleanup(&self, session: &str) {
-        let _ = tokio::fs::remove_dir_all(self.session_dir(session)).await;
-        self.sessions.lock().await.remove(session);
+    async fn cleanup(&self, allocation: &str) {
+        let _ = tokio::fs::remove_dir_all(self.session_dir(allocation)).await;
+        self.allocations.lock().await.remove(allocation);
     }
 
     fn name(&self) -> &'static str {

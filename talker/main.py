@@ -36,6 +36,7 @@ async def main() -> None:
     # — the CI test environment intentionally omits RealtimeSTT/RealtimeTTS
     # to skip CUDA setup. Real runs always reach this code path and import
     # everything normally.
+    from binding import InstanceSessionBinding
     from config import TalkerConfig
     from server import TalkerServiceServicer
     from voice.listener import Listener, ListenerServiceImpl
@@ -49,10 +50,11 @@ async def main() -> None:
     logger.info("Talker Agent starting (LLM: %s)", config.llm_base_url)
 
     # Init components
+    binding = InstanceSessionBinding()
     speaker = Speaker(config)
-    talker_servicer = TalkerServiceServicer(config, speaker)
-    listener = Listener(config)
-    listener_servicer = ListenerServiceImpl(listener.event_queue)
+    talker_servicer = TalkerServiceServicer(config, speaker, binding)
+    listener = Listener(config, binding)
+    listener_servicer = ListenerServiceImpl(listener.event_queue, binding)
 
     # ── Talker gRPC server ──
     talker_server = grpc.aio.server()

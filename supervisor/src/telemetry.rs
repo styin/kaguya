@@ -19,6 +19,12 @@ pub struct TelemetryEvent {
     pub source: String,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
@@ -33,11 +39,21 @@ pub struct TelemetryEvent {
 pub struct IncomingTelemetryEvent {
     pub source: String,
     pub kind: String,
+    pub instance_id: Option<String>,
+    pub session_id: Option<String>,
+    pub allocation_id: Option<String>,
     pub conversation_id: Option<String>,
     pub turn_id: Option<String>,
     pub request_id: Option<String>,
     #[serde(default)]
     pub fields: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TelemetryCorrelation {
+    pub instance_id: Option<String>,
+    pub session_id: Option<String>,
+    pub allocation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -132,9 +148,14 @@ impl TelemetryHub {
     }
 
     pub async fn emit_incoming(&self, incoming: IncomingTelemetryEvent) -> TelemetryEvent {
-        self.emit(
+        self.emit_with_correlation(
             incoming.source,
             incoming.kind,
+            TelemetryCorrelation {
+                instance_id: incoming.instance_id,
+                session_id: incoming.session_id,
+                allocation_id: incoming.allocation_id,
+            },
             incoming.conversation_id,
             incoming.turn_id,
             incoming.request_id,
@@ -152,11 +173,36 @@ impl TelemetryHub {
         request_id: Option<String>,
         fields: serde_json::Value,
     ) -> TelemetryEvent {
+        self.emit_with_correlation(
+            source,
+            kind,
+            TelemetryCorrelation::default(),
+            conversation_id,
+            turn_id,
+            request_id,
+            fields,
+        )
+        .await
+    }
+
+    pub async fn emit_with_correlation(
+        &self,
+        source: impl Into<String>,
+        kind: impl Into<String>,
+        correlation: TelemetryCorrelation,
+        conversation_id: Option<String>,
+        turn_id: Option<String>,
+        request_id: Option<String>,
+        fields: serde_json::Value,
+    ) -> TelemetryEvent {
         let event = TelemetryEvent {
             id: self.next_id.fetch_add(1, Ordering::SeqCst),
             timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             source: source.into(),
             kind: kind.into(),
+            instance_id: correlation.instance_id,
+            session_id: correlation.session_id,
+            allocation_id: correlation.allocation_id,
             conversation_id,
             turn_id,
             request_id,

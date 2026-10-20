@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
+use crate::instance::InstanceIdentity;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::reasoner_service_client::ReasonerServiceClient;
@@ -26,6 +27,7 @@ pub struct ReasonerManager {
     tasks: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
+    instance_context: Option<InstanceIdentity>,
 }
 
 impl ReasonerManager {
@@ -46,7 +48,13 @@ impl ReasonerManager {
             tasks,
             connection,
             reconnect,
+            instance_context: None,
         }
+    }
+
+    pub fn with_instance_context(mut self, instance_context: InstanceIdentity) -> Self {
+        self.instance_context = Some(instance_context);
+        self
     }
 
     pub async fn start(
@@ -73,6 +81,15 @@ impl ReasonerManager {
         let tid = task_id.clone();
         let connection = self.connection.clone();
         let reconnect = self.reconnect;
+        let instance_context = self.instance_context.clone();
+        let instance_id = instance_context
+            .as_ref()
+            .map(|instance_context| instance_context.instance_id.clone())
+            .unwrap_or_default();
+        let session_id = instance_context
+            .as_ref()
+            .map(|instance_context| instance_context.default_session_id.clone())
+            .unwrap_or_default();
 
         self.tasks
             .spawn(format!("reasoner_task:{tid}"), async move {
@@ -116,7 +133,11 @@ impl ReasonerManager {
                     })
                     .await;
 
-                match client.delegate(outbound).await {
+                let request = match &instance_context {
+                    Some(instance_context) => instance_context.grpc_request(outbound),
+                    None => tonic::Request::new(outbound),
+                };
+                match client.delegate(request).await {
                     Ok(resp) => {
                         connection.set_readiness(Readiness::Ready);
                         let mut stream = resp.into_inner();
@@ -125,11 +146,16 @@ impl ReasonerManager {
                                 _ = child.cancelled() => {
                                     info!(task_id = %tid, "Reasoner cancelled");
                                     // Send Interrupt
-                                    let _ = client.interrupt(proto::InterruptRequest {
+                                    let interrupt = proto::InterruptRequest {
                                         signal: Some(proto::interrupt_request::Signal::Cancel(
                                             proto::TaskCancel { task_id: tid.clone() }
                                         )),
-                                    }).await;
+                                    };
+                                    let request = match &instance_context {
+                                        Some(instance_context) => instance_context.grpc_request(interrupt),
+                                        None => tonic::Request::new(interrupt),
+                                    };
+                                    let _ = client.interrupt(request).await;
                                     break;
                                 }
                                 result = stream.message() => {
@@ -141,18 +167,21 @@ impl ReasonerManager {
                                                 }
                                                 Some(proto::delegate_output::Event::Step(s)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
+                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         description: s.description,
                                                     }).await;
                                                 }
                                                 Some(proto::delegate_output::Event::Output(o)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
+                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         description: format!("[output] {}", o.content),
                                                     }).await;
                                                 }
                                                 Some(proto::delegate_output::Event::Completed(c)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerCompleted {
+                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         summary: c.summary,
                                                     }).await;
@@ -160,6 +189,7 @@ impl ReasonerManager {
                                                 }
                                                 Some(proto::delegate_output::Event::Error(e)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerError {
+                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         message: e.message,
                                                         code: e.code,
@@ -174,6 +204,7 @@ impl ReasonerManager {
                                             connection.set_readiness(Readiness::Degraded);
                                             error!("Reasoner stream error: {e}");
                                             let _ = p3_tx.send(InputEvent::ReasonerError {
+                                                instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                 task_id: tid.clone(), message: e.to_string(), code: -1,
                                             }).await;
                                             break;
@@ -188,6 +219,7 @@ impl ReasonerManager {
                         error!("Delegate failed: {e}");
                         let _ = p3_tx
                             .send(InputEvent::ReasonerError {
+                                instance_id: instance_id.clone(), session_id: session_id.clone(),
                                 task_id: tid.clone(),
                                 message: e.to_string(),
                                 code: -1,
@@ -205,11 +237,13 @@ impl ReasonerManager {
                         for i in 1..=3 {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             let _ = p3_tx.send(InputEvent::ReasonerStep {
+                                instance_id: instance_id.clone(), session_id: session_id.clone(),
                                 task_id: tid.clone(),
                                 description: format!("Step {i}: processing..."),
                             }).await;
                         }
                         let _ = p3_tx.send(InputEvent::ReasonerCompleted {
+                            instance_id: instance_id.clone(), session_id: session_id.clone(),
                             task_id: tid.clone(),
                             summary: format!("[stub] Completed: {description}"),
                         }).await;

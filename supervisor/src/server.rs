@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::app::SupervisorApp;
+use crate::app::{InstanceSessionBinding, SupervisorApp};
 use crate::telemetry::IncomingTelemetryEvent;
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +47,7 @@ pub fn router(app: SupervisorApp) -> Router {
         .route("/api/process/:name/start", post(process_start))
         .route("/api/process/:name/stop", post(process_stop))
         .route("/api/process/:name/restart", post(process_restart))
+        .route("/api/owner/bind", post(bind_instance_session))
         .route("/api/sandbox/status", get(sandbox_status))
         .route("/api/sandbox/acquire", post(sandbox_acquire))
         .route("/api/sandbox/:handle/execute", post(sandbox_execute))
@@ -60,6 +61,19 @@ pub fn router(app: SupervisorApp) -> Router {
         .route("/api/telemetry/stream", get(telemetry_stream))
         .route("/api/metrics/snapshot", get(metrics_snapshot))
         .with_state(app)
+}
+
+async fn bind_instance_session(
+    State(app): State<SupervisorApp>,
+    Json(binding): Json<InstanceSessionBinding>,
+) -> impl IntoResponse {
+    match app.bind_instance_session(binding).await {
+        Ok(binding) => (axum::http::StatusCode::OK, Json(serde_json::json!(binding))),
+        Err(error) => (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        ),
+    }
 }
 
 async fn app_status(State(app): State<SupervisorApp>) -> impl IntoResponse {
@@ -116,7 +130,9 @@ async fn sandbox_status(State(app): State<SupervisorApp>) -> Json<SandboxStatus>
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SandboxAcquireRequest {
+    instance_id: String,
     session_id: String,
+    allocation_id: String,
 }
 
 #[derive(serde::Serialize)]
@@ -129,7 +145,11 @@ async fn sandbox_acquire(
     State(app): State<SupervisorApp>,
     Json(request): Json<SandboxAcquireRequest>,
 ) -> Json<SandboxAcquireResponse> {
-    match app.acquire_sandbox(&request.session_id).await {
+    let binding = InstanceSessionBinding {
+        instance_id: request.instance_id,
+        session_id: request.session_id,
+    };
+    match app.acquire_sandbox(&binding, &request.allocation_id).await {
         Ok(handle) => Json(SandboxAcquireResponse {
             handle: Some(handle),
             error: None,
@@ -144,6 +164,9 @@ async fn sandbox_acquire(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SandboxExecuteRequest {
+    instance_id: String,
+    session_id: String,
+    request_id: String,
     args_json: String,
 }
 
@@ -157,16 +180,34 @@ async fn sandbox_execute(
     Path(handle): Path<String>,
     Json(request): Json<SandboxExecuteRequest>,
 ) -> Json<SandboxExecuteResponse> {
+    let binding = InstanceSessionBinding {
+        instance_id: request.instance_id,
+        session_id: request.session_id,
+    };
     Json(SandboxExecuteResponse {
-        content: app.execute_in_sandbox(&handle, &request.args_json).await,
+        content: app
+            .execute_in_sandbox(&binding, &handle, &request.request_id, &request.args_json)
+            .await,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxReleaseRequest {
+    instance_id: String,
+    session_id: String,
 }
 
 async fn sandbox_release(
     State(app): State<SupervisorApp>,
     Path(handle): Path<String>,
+    Json(request): Json<SandboxReleaseRequest>,
 ) -> Json<ActionResult> {
-    Json(action_result(app.release_sandbox(&handle).await))
+    let binding = InstanceSessionBinding {
+        instance_id: request.instance_id,
+        session_id: request.session_id,
+    };
+    Json(action_result(app.release_sandbox(&binding, &handle).await))
 }
 
 async fn logs_since(
@@ -209,8 +250,34 @@ async fn logs_stream(
 async fn telemetry_ingest(
     State(app): State<SupervisorApp>,
     Json(request): Json<IncomingTelemetryEvent>,
-) -> impl IntoResponse {
-    Json(app.telemetry().emit_incoming(request).await)
+) -> Result<Json<crate::telemetry::TelemetryEvent>, (axum::http::StatusCode, Json<serde_json::Value>)>
+{
+    let binding = match (&request.instance_id, &request.session_id) {
+        (Some(instance_id), Some(session_id)) => InstanceSessionBinding {
+            instance_id: instance_id.clone(),
+            session_id: session_id.clone(),
+        },
+        _ => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": "telemetry instance/session correlation is required"}),
+                ),
+            ))
+        }
+    };
+    if request
+        .conversation_id
+        .as_ref()
+        .is_some_and(|id| id != &binding.session_id)
+        || app.require_instance_session(&binding).await.is_err()
+    {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "telemetry instance/session correlation mismatch"})),
+        ));
+    }
+    Ok(Json(app.telemetry().emit_incoming(request).await))
 }
 
 async fn telemetry_since(
@@ -312,9 +379,47 @@ mod tests {
             .unwrap();
         assert_eq!(status["enabled"], true);
 
+        let instance_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let allocation_id = uuid::Uuid::new_v4().to_string();
+        let binding = serde_json::json!({"instanceId": instance_id, "sessionId": session_id});
+        let bound = client
+            .post(format!("{base}/api/owner/bind"))
+            .json(&binding)
+            .send()
+            .await
+            .unwrap();
+        assert!(bound.status().is_success());
+        let other_instance = uuid::Uuid::new_v4().to_string();
+        let rejected_bind = client
+            .post(format!("{base}/api/owner/bind"))
+            .json(&serde_json::json!({"instanceId": other_instance, "sessionId": session_id}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected_bind.status(), axum::http::StatusCode::CONFLICT);
+        let rejected_acquire: serde_json::Value = client
+            .post(format!("{base}/api/sandbox/acquire"))
+            .json(&serde_json::json!({
+                "instanceId": other_instance,
+                "sessionId": session_id,
+                "allocationId": uuid::Uuid::new_v4().to_string(),
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(rejected_acquire["handle"].is_null());
+
         let acquired: serde_json::Value = client
             .post(format!("{base}/api/sandbox/acquire"))
-            .json(&serde_json::json!({"sessionId": "http-contract"}))
+            .json(&serde_json::json!({
+                "instanceId": instance_id,
+                "sessionId": session_id,
+                "allocationId": allocation_id,
+            }))
             .send()
             .await
             .unwrap()
@@ -323,9 +428,23 @@ mod tests {
             .unwrap();
         let handle = acquired["handle"].as_str().unwrap();
 
+        let rejected_release: serde_json::Value = client
+            .delete(format!("{base}/api/sandbox/{handle}"))
+            .json(&serde_json::json!({"instanceId": other_instance, "sessionId": session_id}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rejected_release["ok"], false);
+
         let executed: serde_json::Value = client
             .post(format!("{base}/api/sandbox/{handle}/execute"))
             .json(&serde_json::json!({
+                "instanceId": instance_id,
+                "sessionId": session_id,
+                "requestId": uuid::Uuid::new_v4().to_string(),
                 "argsJson": r#"{"language":"python","code":"print('control-plane')"}"#
             }))
             .send()
@@ -344,6 +463,7 @@ mod tests {
 
         let released: serde_json::Value = client
             .delete(format!("{base}/api/sandbox/{handle}"))
+            .json(&binding)
             .send()
             .await
             .unwrap()
@@ -399,12 +519,25 @@ mod tests {
         let client = reqwest::Client::new();
         let base = format!("http://{addr}");
 
+        let instance_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        client
+            .post(format!("{base}/api/owner/bind"))
+            .json(&serde_json::json!({"instanceId": instance_id, "sessionId": session_id}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
         let event: serde_json::Value = client
             .post(format!("{base}/api/telemetry/events"))
             .json(&serde_json::json!({
                 "source": "gateway",
                 "kind": "rag.retrieve.completed",
-                "conversationId": "conversation",
+                "instanceId": instance_id,
+                "sessionId": session_id,
+                "conversationId": session_id,
                 "turnId": "turn",
                 "fields": {
                     "duration_ms": 9,
@@ -419,6 +552,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(event["kind"], "rag.retrieve.completed");
+        assert_eq!(event["instanceId"], instance_id);
         assert_eq!(event["id"], 1);
 
         let events: serde_json::Value = client

@@ -10,6 +10,7 @@ import logging
 import struct
 import time
 
+from binding import AUDIO_MAGIC, InstanceSessionBinding
 from config import TalkerConfig
 from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
 from voice.opus_decoder import OpusDecoder
@@ -36,13 +37,18 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
     handoff during Gateway restarts.
     """
 
-    def __init__(self, event_queue: asyncio.Queue) -> None:
+    def __init__(
+        self, event_queue: asyncio.Queue, binding: InstanceSessionBinding | None = None
+    ) -> None:
         self._event_queue = event_queue
+        self._binding = binding
         # Set whenever a new Stream takes over; the prior handler watches
         # this and exits when it fires.
         self._active_terminate: asyncio.Event | None = None
 
     async def Stream(self, request_iterator, context):
+        if self._binding:
+            await self._binding.bind_or_validate(context)
         # Flush response headers immediately. Without this, grpcio-aio defers
         # sending the HTTP/2 HEADERS frame until the first `yield`, but our
         # event queue is empty until ASR fires — so the client's `Stream(...)`
@@ -115,8 +121,11 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
 class Listener:
     """Owns RealtimeSTT, turn detection, audio socket, and ASR event queue."""
 
-    def __init__(self, config: TalkerConfig) -> None:
+    def __init__(
+        self, config: TalkerConfig, binding: InstanceSessionBinding | None = None
+    ) -> None:
         self._config = config
+        self._binding = binding
         self._opus = OpusDecoder()
         self._turn_detector = TurnDetector(config)
         self._event_queue: asyncio.Queue[kaguya_pb2.ListenerOutput] = asyncio.Queue()
@@ -153,6 +162,19 @@ class Listener:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         codec = self._config.audio_input_codec
+
+        if self._binding:
+            try:
+                header = await reader.readexactly(len(AUDIO_MAGIC) + 32)
+            except asyncio.IncompleteReadError:
+                writer.close()
+                await writer.wait_closed()
+                return
+            if not self._binding.matches_audio_header(header):
+                logger.warning("Rejected audio socket with mismatched binding")
+                writer.close()
+                await writer.wait_closed()
+                return
         logger.info("Audio client connected (codec=%s)", codec)
         try:
             while True:

@@ -30,8 +30,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::app::InstanceSessionBinding;
 use crate::config::{SandboxBackendKind, SandboxConfig, SandboxModeKind};
-use crate::telemetry::TelemetryHub;
+use crate::telemetry::{TelemetryCorrelation, TelemetryHub};
 
 const SANDBOX_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
@@ -136,13 +137,13 @@ impl ExecResult {
 
 #[async_trait]
 pub trait SandboxBackend: Send + Sync {
-    /// Provision or attach the session before an opaque handle is returned.
-    async fn acquire(&self, session: &str) -> Result<(), String>;
-    /// Run code in the session's sandbox. Same `session` ⇒ shared filesystem
-    /// state (per-conversation affinity).
-    async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult;
-    /// Tear down a session's resources (called when a conversation ends).
-    async fn cleanup(&self, session: &str);
+    /// Provision or attach the allocation before an opaque handle is returned.
+    async fn acquire(&self, allocation: &str) -> Result<(), String>;
+    /// Run code in the allocation's sandbox. Same `allocation` ⇒ shared filesystem
+    /// state for that allocation only.
+    async fn execute(&self, allocation: &str, req: ExecRequest) -> ExecResult;
+    /// Tear down an allocation's resources on release.
+    async fn cleanup(&self, allocation: &str);
     /// Pre-warm resources at startup (hosted Docker warm pool). Default no-op.
     async fn prewarm(&self) {}
     /// Global teardown at Supervisor shutdown. Default no-op.
@@ -207,7 +208,7 @@ impl SandboxManager {
             warn!(
                 "Sandbox: backend=native + mode=hosted runs model-authored code with NO \
                  host isolation. Only safe if each Supervisor is confined per tenant \
-                 (one container/VM per session). For shared multi-tenant hosts, use \
+                 (one container/VM per allocation). For shared multi-tenant hosts, use \
                  backend=docker."
             );
         }
@@ -255,29 +256,29 @@ impl SandboxManager {
         }
     }
 
-    pub async fn acquire(&self, session: &str) -> anyhow::Result<()> {
+    pub async fn acquire(&self, allocation: &str) -> anyhow::Result<()> {
         if !self.enabled {
             anyhow::bail!("sandbox is disabled");
         }
         debug!(
-            %session,
+            %allocation,
             backend = self.backend.name(),
-            "acquiring sandbox backend session"
+            "acquiring sandbox backend allocation"
         );
         self.backend
-            .acquire(session)
+            .acquire(allocation)
             .await
             .map_err(anyhow::Error::msg)
     }
 
-    pub async fn cleanup(&self, session: &str) {
+    pub async fn cleanup(&self, allocation: &str) {
         if self.enabled {
             debug!(
-                %session,
+                %allocation,
                 backend = self.backend.name(),
-                "cleaning up sandbox backend session"
+                "cleaning up sandbox backend allocation"
             );
-            self.backend.cleanup(session).await;
+            self.backend.cleanup(allocation).await;
         }
     }
 
@@ -297,7 +298,7 @@ impl SandboxManager {
 
     /// Parse Tool Manager arguments, execute through the selected backend, and
     /// return the canonical JSON payload placed on the P3 result path.
-    pub async fn exec_from_json(&self, session: &str, args_json: &str) -> String {
+    pub async fn exec_from_json(&self, allocation: &str, args_json: &str) -> String {
         if !self.enabled {
             return ExecResult::backend_error("sandbox is disabled").to_tool_json();
         }
@@ -335,19 +336,25 @@ impl SandboxManager {
             timeout: self.default_timeout,
             max_output_bytes: self.max_output_bytes,
         };
-        self.backend.execute(session, req).await.to_tool_json()
+        self.backend.execute(allocation, req).await.to_tool_json()
     }
 }
 
 /// Supervisor-facing handle registry around the backend manager.
 ///
-/// Handles are deliberately opaque to the Gateway. This keeps backend/session
+/// Handles are deliberately opaque to the Gateway. This keeps backend/allocation
 /// identity and cleanup authority inside the runtime owner.
 #[derive(Clone)]
 pub struct SandboxProvider {
     manager: Arc<SandboxManager>,
-    handles: Arc<Mutex<HashMap<String, String>>>,
+    handles: Arc<Mutex<HashMap<String, AllocationRecord>>>,
     telemetry: Option<TelemetryHub>,
+}
+
+#[derive(Clone)]
+struct AllocationRecord {
+    owner: InstanceSessionBinding,
+    allocation_id: String,
 }
 
 impl SandboxProvider {
@@ -380,35 +387,57 @@ impl SandboxProvider {
         self.manager.prewarm().await;
     }
 
-    pub async fn acquire(&self, session: &str) -> anyhow::Result<String> {
+    pub async fn acquire(
+        &self,
+        owner: &InstanceSessionBinding,
+        allocation_id: &str,
+    ) -> anyhow::Result<String> {
         if !self.is_enabled() {
             anyhow::bail!("sandbox provider is disabled");
         }
-        if session.trim().is_empty() {
-            anyhow::bail!("sandbox session id must not be empty");
+        owner.validate()?;
+        let allocation_uuid = Uuid::parse_str(allocation_id)
+            .map_err(|_| anyhow::anyhow!("sandbox allocation_id must be a UUID"))?;
+        if allocation_uuid.is_nil() || allocation_uuid.to_string() != allocation_id {
+            anyhow::bail!("sandbox allocation_id must be a non-nil canonical UUID");
         }
 
-        if let Some((handle, _)) = self
+        if let Some((handle, existing)) = self
             .handles
             .lock()
             .await
             .iter()
-            .find(|(_, existing)| *existing == session)
+            .find(|(_, existing)| existing.allocation_id == allocation_id)
         {
-            debug!(%session, %handle, "reusing sandbox handle");
+            if existing.owner != *owner {
+                anyhow::bail!("sandbox allocation belongs to a different owner");
+            }
+            debug!(%allocation_id, %handle, "reusing sandbox handle");
             return Ok(handle.clone());
         }
 
-        self.manager.acquire(session).await?;
+        self.manager.acquire(allocation_id).await?;
 
         let mut handles = self.handles.lock().await;
-        if let Some((handle, _)) = handles.iter().find(|(_, existing)| *existing == session) {
+        if let Some((handle, existing)) = handles
+            .iter()
+            .find(|(_, existing)| existing.allocation_id == allocation_id)
+        {
+            if existing.owner != *owner {
+                anyhow::bail!("sandbox allocation belongs to a different owner");
+            }
             return Ok(handle.clone());
         }
         let handle = Uuid::new_v4().to_string();
-        handles.insert(handle.clone(), session.to_string());
+        handles.insert(
+            handle.clone(),
+            AllocationRecord {
+                owner: owner.clone(),
+                allocation_id: allocation_id.to_string(),
+            },
+        );
         info!(
-            %session,
+            %allocation_id,
             %handle,
             backend = self.backend_name(),
             "acquired sandbox handle"
@@ -416,29 +445,49 @@ impl SandboxProvider {
         Ok(handle)
     }
 
-    pub async fn execute(&self, handle: &str, args_json: &str) -> String {
-        let session = self.handles.lock().await.get(handle).cloned();
-        match session {
-            Some(session) => {
+    pub async fn execute(
+        &self,
+        owner: &InstanceSessionBinding,
+        handle: &str,
+        request_id: &str,
+        args_json: &str,
+    ) -> String {
+        if request_id.trim().is_empty() {
+            return ExecResult::backend_error("sandbox request_id must not be empty")
+                .to_tool_json();
+        }
+        let record = self.handles.lock().await.get(handle).cloned();
+        match record {
+            Some(record) if record.owner == *owner => {
+                let allocation_id = record.allocation_id;
                 debug!(
-                    %session,
+                    %allocation_id,
                     %handle,
                     backend = self.backend_name(),
                     "executing sandbox request"
                 );
                 let started = std::time::Instant::now();
-                let content = self.manager.exec_from_json(&session, args_json).await;
+                let content = self.manager.exec_from_json(&allocation_id, args_json).await;
                 if let Some(telemetry) = &self.telemetry {
                     let result = serde_json::from_str::<serde_json::Value>(&content)
                         .unwrap_or_else(|_| serde_json::json!({}));
                     telemetry
-                        .emit(
+                        .emit_with_correlation(
                             "supervisor",
                             "sandbox.exec.completed",
-                            Some(session.clone()),
+                            TelemetryCorrelation {
+                                instance_id: Some(owner.instance_id.clone()),
+                                session_id: Some(owner.session_id.clone()),
+                                allocation_id: Some(allocation_id.clone()),
+                            },
+                            Some(owner.session_id.clone()),
                             None,
-                            Some(handle.to_string()),
+                            Some(request_id.to_string()),
                             serde_json::json!({
+                                "instance_id": owner.instance_id,
+                                "session_id": owner.session_id,
+                                "allocation_id": allocation_id,
+                                "handle": handle,
                                 "backend": self.backend_name(),
                                 "duration_ms": started.elapsed().as_millis() as u64,
                                 "exit_code": result.get("exit_code").and_then(|v| v.as_i64()),
@@ -453,35 +502,45 @@ impl SandboxProvider {
                 }
                 content
             }
+            Some(_) => ExecResult::backend_error("sandbox handle owner mismatch").to_tool_json(),
             None => ExecResult::backend_error("unknown or released sandbox handle").to_tool_json(),
         }
     }
 
-    pub async fn release(&self, handle: &str) -> anyhow::Result<()> {
-        let session = self.handles.lock().await.remove(handle);
-        let Some(session) = session else {
+    pub async fn release(
+        &self,
+        owner: &InstanceSessionBinding,
+        handle: &str,
+    ) -> anyhow::Result<()> {
+        let mut handles = self.handles.lock().await;
+        let Some(record) = handles.get(handle) else {
             anyhow::bail!("unknown or released sandbox handle");
         };
-        self.manager.cleanup(&session).await;
-        info!(%session, %handle, "released sandbox handle");
+        if record.owner != *owner {
+            anyhow::bail!("sandbox handle owner mismatch");
+        }
+        let allocation_id = handles.remove(handle).unwrap().allocation_id;
+        drop(handles);
+        self.manager.cleanup(&allocation_id).await;
+        info!(%allocation_id, %handle, "released sandbox handle");
         Ok(())
     }
 
-    pub async fn cleanup_sessions(&self) {
-        let sessions = {
+    pub async fn cleanup_allocations(&self) {
+        let allocations = {
             let mut handles = self.handles.lock().await;
             handles
                 .drain()
-                .map(|(_, session)| session)
+                .map(|(_, record)| record.allocation_id)
                 .collect::<Vec<_>>()
         };
-        for session in sessions {
-            self.manager.cleanup(&session).await;
+        for allocation_id in allocations {
+            self.manager.cleanup(&allocation_id).await;
         }
     }
 
     pub async fn shutdown(&self) {
-        self.cleanup_sessions().await;
+        self.cleanup_allocations().await;
         self.manager.shutdown().await;
     }
 }
@@ -490,7 +549,7 @@ impl SandboxProvider {
 // Shared execution primitives (used by native / bubblewrap / docker)
 // ──────────────────────────────────────────
 
-pub(crate) fn sanitize_session(s: &str) -> String {
+pub(crate) fn sanitize_allocation(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -503,7 +562,7 @@ pub(crate) fn sanitize_session(s: &str) -> String {
 }
 
 /// Unique hidden runner-script filename for a single execution. Concurrent
-/// `sandbox_exec` calls in the same session share a scratch dir, so a fixed
+/// `sandbox_exec` calls in the same allocation share a scratch dir, so a fixed
 /// name would race; only this transient script is per-exec — files the user's
 /// code creates still persist across calls.
 pub(crate) fn script_name(ext: &str) -> String {

@@ -196,14 +196,40 @@ then run the per-component commands above (PowerShell or WSL).
 
 #### Running
 
-In separate terminals:
+Copy `config/kaguya.runtime.toml` beside itself as `config/kaguya.local.toml`.
+The runtime root selects Gateway settings, explicit portable data paths, and
+the instance-local manifest used by managed and standalone startup. Initialize
+once from the repository root; persona and any existing RAG source are copied
+without modifying their originals:
+
+```sh
+cargo run --manifest-path gateway/Cargo.toml -- init-instance --runtime-config config/kaguya.local.toml
+```
+
+The JSON output contains `manifest_reference`. Set that value as `[instance]
+`manifest` in your local runtime file. Initialization and `rekey-instance`
+print their selection handoff and never rewrite deployment configuration.
+
+Inspect the selected paths without launching processes or writing data:
+
+```sh
+cargo run --manifest-path gateway/Cargo.toml -- show-config --runtime-config config/kaguya.local.toml
+```
+
+For managed startup:
+
+```sh
+cargo run --manifest-path supervisor/Cargo.toml -- --runtime-config config/kaguya.local.toml
+```
+
+For direct debugging, run in separate terminals:
 
 ```sh
 # Talker
 cd talker && uv run python main.py
 
-# Gateway
-cd gateway && cargo run
+# Gateway (from repository root)
+cargo run --manifest-path gateway/Cargo.toml --features dev-console -- --runtime-config config/kaguya.local.toml
 
 # Open the dev WebSocket
 echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
@@ -211,7 +237,8 @@ echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
 
 For per-component details and gotchas (macOS port-binding, audio
 passthrough on WSL2, etc.), see [`talker/README.md`](./talker/README.md)
-and the specs in [`docs/`](./docs/).
+and the specs in [`docs/`](./docs/). Deployment selection, validation, restore, and independent-copy behavior is
+documented in [`docs/r1a-identity.md`](./docs/r1a-identity.md).
 
 ---
 
@@ -260,7 +287,7 @@ and the specs in [`docs/`](./docs/).
 
 **gRPC with buf:** Proto schemas enforced via `buf lint` and `buf breaking` in CI. Catches backwards-incompatible changes automatically before they cause cross-language breakage.
 
-**Persona as files, memory as a store:** `SOUL.md` defines personality and `IDENTITY.md` defines constraints — both are plain Markdown that the Gateway watches and re-delivers to the Talker on edit. Long-term memory (user facts, preferences, project context) lives in a SQLite + FTS5 store (`data/kaguya.db`) populated post-turn from the conversation; retrieval uses BM25 with optional vector embeddings, fused via Reciprocal Rank Fusion before being injected into the next turn's context.
+**Persona as files, memory as a store:** `SOUL.md` defines personality and `IDENTITY.md` defines constraints — instance-owned copies are watched and re-delivered to the Talker on edit. Long-term memory (user facts, preferences, project context) lives in a SQLite + FTS5 store under `gateway/data/instances/<InstanceId>/kaguya.db`, populated post-turn from the conversation; retrieval uses BM25 with optional vector embeddings, fused via Reciprocal Rank Fusion before being injected into the next turn's context.
 
 For deeper architectural rationale, see the specs in [`docs/`](./docs/).
 

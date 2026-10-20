@@ -1,14 +1,15 @@
 //! Gateway-local configuration.
 //!
-//! [`GatewayConfig`] is loaded from `gateway.toml` and covers server addresses,
+//! [`GatewayConfig`] is loaded from the selected deployment's settings file and covers server addresses,
 //! persona file paths, history depth, silence timer tuning, RAG settings, and
-//! the runtime topology section that resolves client endpoint addresses.
+//! the runtime topology projection from that same selected deployment.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     pub server: ServerConfig,
     pub files: FilesConfig,
@@ -126,9 +127,22 @@ impl Default for RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn load_topology(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        Self::load_topology_selected(path, None)
+    }
+
+    pub fn load_topology_selected(
+        path: impl AsRef<std::path::Path>,
+        profile: Option<String>,
+    ) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let topology = toml::from_str::<RuntimeTopologyFile>(&content)?;
-        Self::from_topology(topology, selected_runtime_profile())
+        let topology =
+            toml::from_str::<RuntimeTopologyFile>(&content).map_err(|error: toml::de::Error| {
+                anyhow::anyhow!(
+                    "invalid runtime topology at byte {:?}",
+                    error.span().map(|span| span.start)
+                )
+            })?;
+        Self::from_topology(topology, profile)
     }
 
     fn from_topology(
@@ -139,10 +153,12 @@ impl RuntimeConfig {
         let processes = if let Some(profile) = selected_profile.as_deref() {
             match topology.profiles.get(profile) {
                 Some(profile_config) => profile_config.processes.clone(),
-                None if topology.profiles.is_empty() => topology.processes,
                 None => anyhow::bail!("runtime profile '{profile}' is not defined"),
             }
         } else {
+            if !topology.profiles.is_empty() {
+                anyhow::bail!("runtime profile must be selected when named profiles are defined");
+            }
             topology.processes
         };
         validate_runtime_topology(&processes)?;
@@ -258,11 +274,35 @@ impl Default for RagConfig {
 
 impl GatewayConfig {
     pub fn load(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let mut config = toml::from_str::<Self>(&content)?;
-        if let Some(runtime) = load_runtime_topology()? {
-            config.runtime = runtime;
-        }
+        let path = crate::deployment::resolve_path(&std::env::current_dir()?, path.as_ref())?;
+        let content = std::fs::read_to_string(&path)?;
+        let mut config = toml::from_str::<Self>(&content).map_err(|error: toml::de::Error| {
+            anyhow::anyhow!(
+                "invalid Gateway settings {} at byte {:?}",
+                path.display(),
+                error.span().map(|span| span.start)
+            )
+        })?;
+        let base = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Gateway settings file has no parent"))?;
+        config.files.soul_path = crate::deployment::resolve_path(base, &config.files.soul_path)?;
+        config.files.identity_path =
+            crate::deployment::resolve_path(base, &config.files.identity_path)?;
+        config.files.workspace_root =
+            crate::deployment::resolve_path(base, &config.files.workspace_root)?;
+        config.rag.db_path = crate::deployment::resolve_path(base, &config.rag.db_path)?;
+        Ok(config)
+    }
+
+    pub fn load_selected(
+        selection: &crate::deployment::DeploymentSelection,
+    ) -> anyhow::Result<Self> {
+        let mut config = Self::load(&selection.gateway_settings)?;
+        config.runtime = RuntimeConfig::load_topology_selected(
+            &selection.runtime_config,
+            selection.profile.clone(),
+        )?;
         Ok(config)
     }
 
@@ -288,30 +328,6 @@ impl GatewayConfig {
     }
 }
 
-fn load_runtime_topology() -> anyhow::Result<Option<RuntimeConfig>> {
-    if let Ok(path) = std::env::var("KAGUYA_RUNTIME_CONFIG") {
-        return RuntimeConfig::load_topology(path).map(Some);
-    }
-
-    for candidate in [
-        "../config/kaguya.runtime.toml",
-        "config/kaguya.runtime.toml",
-    ] {
-        let path = std::path::Path::new(candidate);
-        if path.exists() {
-            return RuntimeConfig::load_topology(path).map(Some);
-        }
-    }
-
-    Ok(None)
-}
-
-fn selected_runtime_profile() -> Option<String> {
-    std::env::var("KAGUYA_RUNTIME_PROFILE")
-        .ok()
-        .filter(|profile| !profile.trim().is_empty())
-}
-
 fn validate_runtime_topology(processes: &BTreeMap<String, RuntimeSpec>) -> anyhow::Result<()> {
     for (process_id, process) in processes {
         for (endpoint_name, bind_addr) in &process.bind {
@@ -320,17 +336,17 @@ fn validate_runtime_topology(processes: &BTreeMap<String, RuntimeSpec>) -> anyho
             };
             let Some(bind_port) = endpoint_port(bind_addr) else {
                 anyhow::bail!(
-                    "runtime process '{process_id}' bind.{endpoint_name} has no explicit port: {bind_addr}"
+                    "runtime process '{process_id}' bind.{endpoint_name} has no explicit port"
                 );
             };
             let Some(connect_port) = endpoint_port(connect_addr) else {
                 anyhow::bail!(
-                    "runtime process '{process_id}' endpoints.{endpoint_name} has no explicit port: {connect_addr}"
+                    "runtime process '{process_id}' endpoints.{endpoint_name} has no explicit port"
                 );
             };
             if bind_port != connect_port {
                 anyhow::bail!(
-                    "runtime process '{process_id}' bind/endpoints port mismatch for '{endpoint_name}': bind={bind_addr}, endpoint={connect_addr}"
+                    "runtime process '{process_id}' bind/endpoints port mismatch for '{endpoint_name}'"
                 );
             }
         }

@@ -13,11 +13,7 @@ import "./topbar.css";
  * message counters, Reconnect (calls `ws.reconnect()`), Start App /
  * Shutdown (call Supervisor app lifecycle endpoints).
  *
- * Deliberately omitted: server-authoritative session ID. The gateway
- * mints `conversation_id` at startup but never sends it; rather than
- * fabricate a local proxy id, we leave the slot empty and show WS
- * uptime in its place. Bind a real chip when `session_init` egress
- * lands (see console/README.md → Future work).
+ * Session identity comes from the Gateway's `session_init` bootstrap event.
  */
 export function TopBar({
   onReconnect,
@@ -30,6 +26,7 @@ export function TopBar({
 
   const wsInCount = useMemo(() => selectWsInCount(events), [events]);
   const wsOutCount = useMemo(() => selectWsOutCount(events), [events]);
+  const session = useStore((s) => s.sessionIdentity);
 
   return (
     <div className="topbar">
@@ -40,6 +37,11 @@ export function TopBar({
       <span className="version-chip">v{__APP_VERSION__}</span>
       <span className="topbar-divider" />
       <Uptime openedAt={wsOpenedAt} />
+      {session && (
+        <span className="session-chip" title={`Instance ${session.instance_id}\nSession ${session.session_id}`}>
+          session {session.session_id.slice(0, 8)}
+        </span>
+      )}
       <span className={"ws-pill " + wsStatus}>
         <span className="ws-pill-dot" />
         ws {wsStatus}

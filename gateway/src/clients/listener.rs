@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
+use crate::instance::InstanceIdentity;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::listener_service_client::ListenerServiceClient;
@@ -41,6 +42,7 @@ pub struct ListenerClient {
     tasks: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
+    instance_context: Option<InstanceIdentity>,
 }
 
 impl ListenerClient {
@@ -72,7 +74,13 @@ impl ListenerClient {
             tasks,
             connection,
             reconnect,
+            instance_context: None,
         }
+    }
+
+    pub fn with_instance_context(mut self, instance_context: InstanceIdentity) -> Self {
+        self.instance_context = Some(instance_context);
+        self
     }
 
     /// Establish the gRPC bidi stream and audio TCP socket, spawning
@@ -88,6 +96,7 @@ impl ListenerClient {
             &self.grpc_endpoint,
             self.connection.clone(),
             self.reconnect,
+            self.instance_context.as_ref(),
         )
         .await?;
 
@@ -135,6 +144,7 @@ impl ListenerClient {
         let audio_addr = self.audio_addr.clone();
         let audio_connection = self.connection.clone();
         let audio_reconnect = self.reconnect;
+        let audio_instance_context = self.instance_context.clone();
 
         self.tasks.spawn("listener_audio_forwarder", async move {
             loop {
@@ -146,6 +156,16 @@ impl ListenerClient {
                 .await
                 {
                     Ok(mut stream) => {
+                        if let Some(instance_context) = &audio_instance_context {
+                            if stream
+                                .write_all(&instance_context.audio_header())
+                                .await
+                                .is_err()
+                            {
+                                audio_connection.set_readiness(Readiness::Degraded);
+                                continue;
+                            }
+                        }
                         audio_connection.set_readiness(Readiness::Ready);
                         info!(addr = %audio_addr, "Audio socket connected to Listener");
                         while let Some(data) = audio_rx.recv().await {
@@ -184,13 +204,14 @@ impl ListenerClient {
         endpoint: &str,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
+        instance_context: Option<&InstanceIdentity>,
     ) -> anyhow::Result<tonic::Streaming<proto::ListenerOutput>> {
         let retry_delays = reconnect.retry_delays();
         connection.set_readiness(Readiness::Starting);
         for attempt in 1..=reconnect.max_attempts() {
             match tokio::time::timeout(
                 reconnect.attempt_timeout(),
-                Self::connect_stream_once(endpoint),
+                Self::connect_stream_once(endpoint, instance_context),
             )
             .await
             {
@@ -226,6 +247,7 @@ impl ListenerClient {
 
     async fn connect_stream_once(
         endpoint: &str,
+        instance_context: Option<&InstanceIdentity>,
     ) -> anyhow::Result<tonic::Streaming<proto::ListenerOutput>> {
         let channel = Channel::from_shared(endpoint.to_string())?
             .connect()
@@ -233,7 +255,11 @@ impl ListenerClient {
         let mut client = ListenerServiceClient::new(channel);
         let (_ctrl_tx, ctrl_rx) = mpsc::channel::<proto::ListenerInput>(16);
         let outbound = ReceiverStream::new(ctrl_rx);
-        Ok(client.stream(outbound).await?.into_inner())
+        let request = match instance_context {
+            Some(instance_context) => instance_context.grpc_request(outbound),
+            None => tonic::Request::new(outbound),
+        };
+        Ok(client.stream(request).await?.into_inner())
     }
 
     /// Open the raw audio TCP socket with bounded retries.
@@ -297,6 +323,7 @@ pub async fn run_recovery_loop(
     p1_tx: mpsc::Sender<InputEvent>,
     p2_tx: mpsc::Sender<InputEvent>,
     expected_runtime: bool,
+    instance_context: Option<InstanceIdentity>,
     shutdown: CancellationToken,
 ) {
     use crate::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
@@ -319,13 +346,16 @@ pub async fn run_recovery_loop(
             ) => {}
         }
 
-        let listener = ListenerClient::with_reconnect_policy(
+        let mut listener = ListenerClient::with_reconnect_policy(
             grpc_endpoint.clone(),
             audio_addr.clone(),
             task_spawner.clone(),
             connection.clone(),
             reconnect,
         );
+        if let Some(instance_context) = &instance_context {
+            listener = listener.with_instance_context(instance_context.clone());
+        }
         match listener.start(p1_tx.clone(), p2_tx.clone()).await {
             Ok(audio_tx) => {
                 listener_audio.install(audio_tx).await;
@@ -532,6 +562,7 @@ mod tests {
             p1_tx,
             p2_tx,
             true,
+            None,
             shutdown.clone(),
         ));
 

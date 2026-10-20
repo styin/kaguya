@@ -129,7 +129,7 @@ flowchart TD
 | Responsibility | Current implementation | Target / remaining work |
 | --- | --- | --- |
 | Endpoint I/O | WebSocket JSON text/control ingress, raw audio ingress forwarding, semantic metadata egress | Complete browser TTS egress and recovery in R7; OpenPod is deferred |
-| Session and history | Fresh conversation UUID at startup and an in-memory rolling message buffer | Durable identity/history and reconnect/restart continuity in R1 |
+| Session and history | R1a configuration-bound InstanceId/default SessionId, one active session, and an in-memory rolling message buffer | Durable history, replay and resume in R1c |
 | Context assembly | Structured user input, recent messages, memory, retrieval, tools, task summaries and result context | Aggregate size accounting and explicit oversize behavior in R8 |
 | Memory retrieval/storage | Built-in `RagEngine` behind `RagCapability`; SQLite, BM25, optional vectors | Future providers remain behind the capability boundary |
 | Persona delivery | Load/watch SOUL.md and IDENTITY.md; synthesize memory from RAG; deliver via UpdatePersona | Preserve startup/reconnect behavior through R0/R1 |
@@ -224,13 +224,15 @@ are separate (REF-010); retrieval/export caps are optional. There is no universa
 `ChatMessage` values in memory and discards older entries. Despite the
 `max_recent_turns` setting name, selection/truncation counts messages, not
 complete user/assistant exchanges. There is no summary, durable transcript or
-restart reload, and startup creates a new conversation UUID.
+restart reload. R1a now loads a stable default SessionId from the required
+instance manifest; protobuf `conversation_id` carries that ID.
 
-**Target (R1):** Durable session identity and authoritative history support a
-continuous conversation across connection/process restarts. Prompt-window
+**Target (R1c):** Authoritative history supports a continuous conversation
+across connection/process restarts. Prompt-window
 selection must be separate from transcript retention. Session identity does not
-require a multi-chat UI. Storage format, retention, history compaction and the
-relationship between session and conversation IDs remain open.
+require a multi-chat UI. Storage format, retention and compaction remain open.
+R1a fixes the session/conversation compatibility mapping without adding durable
+history.
 
 RAG memories remain derived knowledge, not a substitute for authoritative
 conversation history.
@@ -475,10 +477,10 @@ Console remains the current development interface.
 
 ## 12. Output Stream
 
-**Current metadata:** Gateway emits sentence, emotion, response-started,
-response-complete and voice user-input events to Console. Tool/task detail,
-authoritative session identity, typing and presence are not all implemented
-merely because the UI may eventually need them.
+**Current metadata:** Gateway emits a `session_init` identity bootstrap plus
+sentence, emotion, response-started, response-complete and voice user-input
+events to Console. Tool/task detail, typing, presence and transcript replay
+remain incomplete.
 
 **Current audio:** Talker plays speech on its host. Gateway's
 [OutputManager](../gateway/src/core/output.rs) has audio mute/forward primitives
@@ -570,10 +572,20 @@ Adding session/task/policy/binding fields is active work, not present wire state
 | Web endpoint | Axum, enabled by dev-console |
 | Persona files | tokio::fs plus notify watcher |
 | Built-in RAG | rusqlite with bundled SQLite/FTS5; optional HTTP embedder |
-| Configuration | gateway.toml for local behavior; kaguya.runtime.toml for process/capability topology and Supervisor sandbox settings |
+| Configuration | Selected runtime root/profile chooses Gateway settings, explicit portable storage, instance-local manifest, and process topology; shared deployment selection precedes component assembly |
 | Runtime state | In-memory history, turn state, active Reasoner requests and connections; RAG SQLite persists independently |
 | Provider assembly | app.rs constructs components; main.rs initializes runtime/logging; pipeline::run handles the event loop |
 | Process/sandbox lifecycle | Supervisor; not Gateway |
+
+R1a's [deployment/instance contract](r1a-identity.md) defines selection
+precedence, path bases, print-only init/rekey handoff, validation, and redacted
+diagnostics. Gateway's `instance.rs` owns `InstanceIdentity`, `InstanceLease`,
+and instance-local persona/RAG data. Services use `InstanceSessionBinding`;
+callbacks carry originating context. No physical HostId is introduced.
+Configuration containing shell launch instructions is trusted executable
+input. R1d completes broader endpoint/environment/reader consistency and
+structured launch descriptors; validation currently covers the implemented
+selection/settings/identity subset without acquiring runtime resources.
 
 ### 16.1 Process Layout
 
@@ -618,7 +630,7 @@ without declaring incomplete functionality delivered.
 | --- | --- |
 | Existing baseline | Event handling, voice clients, RAG, persona, local tools, reconnect, sandbox client and Console endpoint |
 | R0 | Assembly/event-loop extraction implemented; validation evidence is recorded in the plan; P0 scheduling correction remains R8 work |
-| R1 | Durable session identity, history and resume APIs |
+| R1 | R1a instance/deployment foundation; R1b generation semantics; R1c history/recovery; R1d broader configuration consolidation |
 | R2 | Policy resolution and correlated approval |
 | R3 | Durable application task ownership/lifecycle |
 | R4 | Workspace identity, association and lifecycle |
@@ -635,7 +647,8 @@ an existing feature.
 
 ## 18. Open Questions (Gateway-Relevant)
 
-- **Identity and durable history:** Session/conversation ID relationship, startup selection, storage format, retention and replay/duplicate handling.
+- **Durable history:** Storage format, retention, compaction, replay/deduplication, and interrupted identity-write recovery before R1c acceptance. R1a's instance/session mapping and deployment selection are implemented.
+- **Broader configuration:** R1d endpoint/proxy reconciliation, complete readers, environment/credential precedence, application-data paths, diagnostics, and explicit structured launch descriptors.
 - **Policy and task lifecycle:** Precedence, grant scope/revocation, approval timeout/disconnect behavior, task transitions and restart/cancellation semantics.
 - **Workspace and execution:** Existing workspace versus checkout/snapshot, concurrent edits, runtime path mapping, supported isolation guarantees, publication and cleanup.
 - **Provider integration:** Initial Reasoner adapters, backend session lifetime and capability contracts; illustrative provider names in §1.1 do not select them.

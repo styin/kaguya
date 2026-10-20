@@ -52,6 +52,32 @@ pub struct SupervisorApp {
     http: reqwest::Client,
     sandbox: SandboxProvider,
     telemetry: TelemetryHub,
+    instance_session_binding: std::sync::Arc<Mutex<Option<InstanceSessionBinding>>>,
+}
+
+/// The instance/session pair accepted by a single-session service.
+/// This binding is correlation and routing state, not user authentication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceSessionBinding {
+    pub instance_id: String,
+    pub session_id: String,
+}
+
+impl InstanceSessionBinding {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let instance = uuid::Uuid::parse_str(&self.instance_id)?;
+        let session = uuid::Uuid::parse_str(&self.session_id)?;
+        if instance.is_nil()
+            || session.is_nil()
+            || instance == session
+            || instance.to_string() != self.instance_id
+            || session.to_string() != self.session_id
+        {
+            anyhow::bail!("invalid instance/session binding");
+        }
+        Ok(())
+    }
 }
 
 struct SupervisorInner {
@@ -209,7 +235,38 @@ impl SupervisorApp {
             http: reqwest::Client::new(),
             sandbox,
             telemetry,
+            instance_session_binding: std::sync::Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Establish the initial pair or validate an idempotent same-pair binding.
+    pub async fn bind_instance_session(
+        &self,
+        requested: InstanceSessionBinding,
+    ) -> anyhow::Result<InstanceSessionBinding> {
+        requested.validate()?;
+        let mut binding = self.instance_session_binding.lock().await;
+        match binding.as_ref() {
+            Some(existing) if existing != &requested => {
+                anyhow::bail!("Supervisor is already bound to a different instance/session")
+            }
+            Some(existing) => Ok(existing.clone()),
+            None => {
+                *binding = Some(requested.clone());
+                Ok(requested)
+            }
+        }
+    }
+
+    /// Validate an existing binding without establishing a new one.
+    pub async fn require_instance_session(
+        &self,
+        requested: &InstanceSessionBinding,
+    ) -> anyhow::Result<()> {
+        if self.instance_session_binding.lock().await.as_ref() != Some(requested) {
+            anyhow::bail!("Supervisor instance/session binding is missing or mismatched");
+        }
+        Ok(())
     }
 
     pub fn logs(&self) -> LogStore {
@@ -292,23 +349,49 @@ impl SupervisorApp {
         self.sandbox.prewarm().await;
     }
 
-    pub async fn acquire_sandbox(&self, session: &str) -> anyhow::Result<String> {
-        self.sandbox.acquire(session).await
+    pub async fn acquire_sandbox(
+        &self,
+        owner: &InstanceSessionBinding,
+        allocation_id: &str,
+    ) -> anyhow::Result<String> {
+        self.require_instance_session(owner).await?;
+        self.sandbox.acquire(owner, allocation_id).await
     }
 
-    pub async fn execute_in_sandbox(&self, handle: &str, args_json: &str) -> String {
-        self.sandbox.execute(handle, args_json).await
+    pub async fn execute_in_sandbox(
+        &self,
+        owner: &InstanceSessionBinding,
+        handle: &str,
+        request_id: &str,
+        args_json: &str,
+    ) -> String {
+        if let Err(error) = self.require_instance_session(owner).await {
+            return serde_json::json!({
+                "stdout": "", "stderr": "", "exit_code": -1,
+                "timed_out": false, "truncated": false,
+                "error": error.to_string()
+            })
+            .to_string();
+        }
+        self.sandbox
+            .execute(owner, handle, request_id, args_json)
+            .await
     }
 
-    pub async fn release_sandbox(&self, handle: &str) -> anyhow::Result<()> {
-        self.sandbox.release(handle).await
+    pub async fn release_sandbox(
+        &self,
+        owner: &InstanceSessionBinding,
+        handle: &str,
+    ) -> anyhow::Result<()> {
+        self.require_instance_session(owner).await?;
+        self.sandbox.release(owner, handle).await
     }
 
     pub async fn start_process(&self, name: &str) -> anyhow::Result<()> {
         // A crashed Gateway cannot release its opaque handles. Clear stale
         // conversation resources before every initial start or restart.
         if name == "gateway" {
-            self.sandbox.cleanup_sessions().await;
+            self.sandbox.cleanup_allocations().await;
         }
         let mut inner = self.inner.lock().await;
         inner.restart_disabled = false;

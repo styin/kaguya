@@ -9,15 +9,32 @@ Protocol surface this UI binds to is defined in `docs/spec-endpoint-v0.1.0.md` (
 ```bash
 cd console
 npm install     # first time
-npm run dev     # http://localhost:3000
+npm run dev -- --runtime-config ../config/kaguya.local.toml --profile app
+npm test        # selection and launch-plan checks; no services started
 ```
 
 The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (Gateway). It starts the Rust `kaguya-supervisor` binary without auto-starting app processes, then proxies `/api/*` to the Supervisor HTTP/SSE API at `127.0.0.1:3001`. Runtime process and capability definitions live in `config/kaguya.runtime.toml`.
 
-Runtime mode is selected by profile:
+The deployment flags are consumed before ordinary Vite flags. CLI selection
+overrides `KAGUYA_RUNTIME_CONFIG` / `KAGUYA_RUNTIME_PROFILE`, then documented
+root discovery / the file's selected profile. An explicit invalid selection
+fails. Initialize and select an instance before starting the services; see
+[instance lifecycle and deployment selection](../docs/r1a-identity.md).
+
+One selected root/profile supplies both Supervisor-managed and direct process
+cards. The UI chooses launch ownership, without silently switching profiles:
 
 - `app`: Supervisor owns the eager app graph and starts Gateway plus first-party runtimes.
-- `dev_standalone`: Gateway and voice stack can be launched as isolated debug processes while sharing one bind/connect contract.
+- `dev_standalone`: declares first-party processes external for explicit direct debugging.
+
+All children receive the same absolute runtime root/profile after process-level
+environment overrides, and process cwd resolves from that root's directory.
+Missing profiles, required process entries, commands, or cwd fail explicitly.
+The Console projection supports the documented single-line TOML selection and
+launch subset and rejects unsupported multiline/array-of-table syntax. Full
+reader consistency, address/proxy derivation, environment policy, and structured
+launch descriptors remain R1d. Current shell launch configuration is trusted
+executable input.
 
 On Windows, managed process entries can provide `command_win32`; Supervisor uses that command with the platform shell instead of the Unix shell command.
 
@@ -67,7 +84,7 @@ Direction is browser-relative (`in` = browser RECEIVES, `out` = browser SENDS). 
 
 Derived shapes — turn lists, streaming-turn lookups, message counters, TTFS, and audio byte totals — are pure selectors over these logs (`selectTurns`, `selectStreamingTurn`, etc.). No mirror message state or per-turn counters sit alongside them.
 
-**Inference policy.** Anything that can be accurately and computationally derived from the log is derived (turn durations, first-sentence latencies, ingress/egress counters, streaming state). Anything that the gateway knows but doesn't send (tool calls, reasoner steps, session id) is *not* faked — the regions where those would render are left empty (see "Future work" below).
+**Inference policy.** Anything that can be accurately and computationally derived from the log is derived (turn durations, first-sentence latencies, ingress/egress counters, streaming state). Anything that the gateway knows but doesn't send (tool calls or reasoner steps) is *not* faked — the regions where those would render are left empty (see "Future work" below).
 
 ## Modules
 
@@ -109,7 +126,7 @@ Derived shapes — turn lists, streaming-turn lookups, message counters, TTFS, a
 For each **skeleton** row above, the underlying protocol expansion required. Pickable in any order.
 
 - [ ] **TTS audio path: talker → gateway → browser.** Today RealtimeTTS in `talker/voice/speaker.py` plays audio directly on the talker host's audio device — bytes never leave the Python process. `gateway/src/output.rs` has `OutputManager::send_audio()` and the WS-binary fanout in `gateway/src/endpoint.rs` is already wired, but nothing ever calls `send_audio()` because there's no source. Fix: (1) tap RealtimeTTS's `on_audio_chunk` callback (or wrap KokoroEngine) to copy synthesized PCM to an `asyncio.Queue`; (2) expose those bytes on a new TCP socket (e.g. `speaker_audio_port = 50057`), mirroring the mic-input direction on `:50056`; (3) add a Rust client in `gateway/src/listener.rs` (sibling of the existing audio forwarder) that connects, reads length-prefixed frames, and calls `output.send_audio(bytes)`. Once that lands the LeftRail TTS strip animates, TTFS resolves to real ms, and per-turn audio KB starts counting — no front-end changes needed. Tracked as [#36](https://github.com/styin/kaguya/issues/36).
-- [ ] **`session_init` egress event.** Gateway emits once at WS-open with `{ conversation_id, started_at }`. TopBar binds the session chip (currently shows WS uptime in its place).
+- [x] **`session_init` identity bootstrap.** Gateway emits the configured `instance_id` and `session_id` at WS-open; `conversation_id` remains the wire-compatible alias for `session_id`. TopBar shows the session chip. Transcript replay and durable session timing remain R1c/R7 work.
 - [ ] **`tool_call` egress event.** Emit from `gateway/src/main.rs` `ToolRequest` arm with `{ request_id, tool_name, args_json? }`. Timeline Tool lane plots a block at that ts; Inspector turn-detail surfaces a Tools section.
 - [ ] **`tool_result` egress event.** Emit when the P3 `ToolResult` arm processes a result. Same lane / section close out the block.
 - [ ] **`delegate_started` / `delegate_completed` egress events.** Emit from `DelegateRequest` and the reasoner-completed paths.

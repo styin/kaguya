@@ -4,16 +4,16 @@
 //! full process graph: which processes to launch, their restart policies,
 //! bind/endpoint port mappings, dependency ordering, and health-check URLs.
 //!
-//! Supports named profiles (e.g. `app`, `dev_standalone`) selected by the
-//! `KAGUYA_RUNTIME_PROFILE` environment variable or the `profile` field in
-//! the config file.
+//! The shared deployment selector supplies an absolute runtime file and its
+//! selected profile. Managed children reload that same authoritative selection.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::deployment::{resolve_path, DeploymentOptions, DeploymentSelection};
 use crate::process::{ManagedProcessRestartPolicy, ManagedProcessSpec};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -105,41 +105,45 @@ pub enum RestartPolicy {
 
 impl RuntimeConfig {
     pub fn load_discover() -> anyhow::Result<ResolvedRuntimeConfig> {
-        if let Ok(path) = std::env::var("KAGUYA_RUNTIME_CONFIG") {
-            return Self::load(path);
-        }
-
-        for candidate in [
-            "config/kaguya.runtime.toml",
-            "../config/kaguya.runtime.toml",
-        ] {
-            let path = PathBuf::from(candidate);
-            if path.exists() {
-                return Self::load(path);
-            }
-        }
-
-        anyhow::bail!("could not find config/kaguya.runtime.toml");
+        let selection = DeploymentSelection::discover(DeploymentOptions {
+            runtime_config: None,
+            profile: None,
+        })?;
+        Self::load_selected(&selection)
     }
 
-    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<ResolvedRuntimeConfig> {
-        let path = path.as_ref();
-        let content = std::fs::read_to_string(path)?;
-        let mut config = RuntimeConfigFile::parse(&content, selected_profile())?;
-        let base_dir = path
+    pub fn load_selected(selection: &DeploymentSelection) -> anyhow::Result<ResolvedRuntimeConfig> {
+        let content = std::fs::read_to_string(&selection.runtime_config)?;
+        let mut config = RuntimeConfigFile::parse(&content, selection.profile.clone())?;
+        let base_dir = selection
+            .runtime_config
             .parent()
-            .unwrap_or_else(|| Path::new("."))
+            .ok_or_else(|| anyhow::anyhow!("selected runtime configuration has no parent"))?
             .to_path_buf();
+        if !base_dir.is_absolute() {
+            anyhow::bail!("selected runtime configuration must be absolute");
+        }
+        let runtime_path = selection.runtime_config.to_str().ok_or_else(|| {
+            anyhow::anyhow!("runtime configuration path cannot be represented in child environment")
+        })?;
         for process in config.processes.values_mut() {
             if let Some(cwd) = &process.cwd {
-                if cwd.is_relative() {
-                    process.cwd = Some(base_dir.join(cwd));
-                }
+                process.cwd = Some(resolve_path(&base_dir, cwd)?);
+            }
+            // Selection is authoritative even when process.env tries to replace
+            // it. Production discovery rejects an empty inherited profile.
+            process
+                .env
+                .insert("KAGUYA_RUNTIME_CONFIG".into(), runtime_path.into());
+            if let Some(profile) = &selection.profile {
+                process
+                    .env
+                    .insert("KAGUYA_RUNTIME_PROFILE".into(), profile.clone());
+            } else {
+                process.env.remove("KAGUYA_RUNTIME_PROFILE");
             }
         }
-        if config.sandbox.workspace_root.is_relative() {
-            config.sandbox.workspace_root = base_dir.join(&config.sandbox.workspace_root);
-        }
+        config.sandbox.workspace_root = resolve_path(&base_dir, &config.sandbox.workspace_root)?;
         Ok(ResolvedRuntimeConfig { config, base_dir })
     }
 
@@ -153,15 +157,22 @@ impl RuntimeConfig {
 
 impl RuntimeConfigFile {
     fn parse(content: &str, profile_override: Option<String>) -> anyhow::Result<RuntimeConfig> {
-        let file = toml::from_str::<RuntimeConfigFile>(content)?;
+        let file = toml::from_str::<RuntimeConfigFile>(content).map_err(|error| {
+            anyhow::anyhow!(
+                "invalid Supervisor runtime topology at byte {:?}",
+                error.span().map(|span| span.start)
+            )
+        })?;
         let selected_profile = profile_override.or(file.profile.clone());
         let mut processes = if let Some(profile) = selected_profile.as_deref() {
             match file.profiles.get(profile) {
                 Some(profile_config) => profile_config.processes.clone(),
-                None if file.profiles.is_empty() => file.processes,
                 None => anyhow::bail!("runtime profile '{profile}' is not defined"),
             }
         } else {
+            if !file.profiles.is_empty() {
+                anyhow::bail!("runtime profile must be selected when named profiles are defined");
+            }
             file.processes
         };
         validate_runtime_topology(&processes)?;
@@ -184,12 +195,6 @@ impl RuntimeConfigFile {
             processes,
         })
     }
-}
-
-fn selected_profile() -> Option<String> {
-    std::env::var("KAGUYA_RUNTIME_PROFILE")
-        .ok()
-        .filter(|profile| !profile.trim().is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -406,17 +411,17 @@ fn validate_runtime_topology(processes: &BTreeMap<String, ProcessSpec>) -> anyho
             };
             let Some(bind_port) = endpoint_port(bind_addr) else {
                 anyhow::bail!(
-                    "runtime process '{process_id}' bind.{endpoint_name} has no explicit port: {bind_addr}"
+                    "runtime process '{process_id}' bind.{endpoint_name} has no explicit port"
                 );
             };
             let Some(connect_port) = endpoint_port(connect_addr) else {
                 anyhow::bail!(
-                    "runtime process '{process_id}' endpoints.{endpoint_name} has no explicit port: {connect_addr}"
+                    "runtime process '{process_id}' endpoints.{endpoint_name} has no explicit port"
                 );
             };
             if bind_port != connect_port {
                 anyhow::bail!(
-                    "runtime process '{process_id}' bind/endpoints port mismatch for '{endpoint_name}': bind={bind_addr}, endpoint={connect_addr}"
+                    "runtime process '{process_id}' bind/endpoints port mismatch for '{endpoint_name}'"
                 );
             }
         }
@@ -459,12 +464,125 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selected_deployment_is_absolute_and_authoritative_for_children() {
+        let root = std::env::temp_dir().join(format!(
+            "kaguya selected config {} with spaces",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let config_path = root.join("deployment.toml");
+        std::fs::write(root.join("gateway settings.toml"), "").unwrap();
+        std::fs::write(
+            &config_path,
+            r#"
+            profile = "app"
+            gateway_settings = "gateway settings.toml"
+            [paths]
+            mode = "portable"
+            portable_root = "instance data"
+            [sandbox]
+            workspace_root = "scratch/../sandbox work"
+            [profiles.app.processes.gateway]
+            cwd = "gateway work"
+            [profiles.app.processes.gateway.env]
+            KAGUYA_RUNTIME_CONFIG = "wrong.toml"
+            KAGUYA_RUNTIME_PROFILE = "wrong"
+            [profiles.standalone.processes.gateway]
+            cwd = "scratch/../standalone work"
+            [profiles.standalone.processes.gateway.env]
+            KAGUYA_RUNTIME_CONFIG = "wrong.toml"
+            KAGUYA_RUNTIME_PROFILE = "wrong"
+            "#,
+        )
+        .unwrap();
+        let selection = DeploymentSelection::load(&config_path, Some("standalone".into())).unwrap();
+        let resolved = RuntimeConfig::load_selected(&selection).unwrap();
+        let gateway = &resolved.config.processes["gateway"];
+        let selected_root = selection.runtime_config.parent().unwrap();
+        assert_eq!(resolved.base_dir, selected_root);
+        assert_eq!(resolved.config.profile.as_deref(), Some("standalone"));
+        assert_eq!(gateway.cwd, Some(selected_root.join("standalone work")));
+        assert_eq!(
+            resolved.config.sandbox.workspace_root,
+            selected_root.join("sandbox work")
+        );
+        assert_eq!(
+            gateway.resolved_env()["KAGUYA_RUNTIME_CONFIG"],
+            selection.runtime_config.to_str().unwrap()
+        );
+        assert_eq!(
+            gateway.resolved_env()["KAGUYA_RUNTIME_PROFILE"],
+            "standalone"
+        );
+
+        std::fs::write(
+            &config_path,
+            r#"
+            gateway_settings = "gateway settings.toml"
+            [paths]
+            mode = "portable"
+            portable_root = "instance data"
+            [processes.gateway.env]
+            KAGUYA_RUNTIME_PROFILE = "wrong"
+            "#,
+        )
+        .unwrap();
+        let no_profile = DeploymentSelection::load(&config_path, None).unwrap();
+        let resolved = RuntimeConfig::load_selected(&no_profile).unwrap();
+        assert!(!resolved.config.processes["gateway"]
+            .resolved_env()
+            .contains_key("KAGUYA_RUNTIME_PROFILE"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_parse_errors_do_not_echo_configured_values() {
+        let error =
+            RuntimeConfigFile::parse("[processes.gateway]\nenabled = 'never-print-this'", None)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("invalid Supervisor runtime topology"));
+        assert!(!error.to_string().contains("never-print-this"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selected_child_paths_reject_windows_drive_relative_and_root_relative_forms() {
+        let root = std::env::temp_dir().join(format!(
+            "kaguya child path selection {} with spaces",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("gateway.toml"), "").unwrap();
+        let runtime = root.join("deployment.toml");
+        for (cwd, workspace_root) in [
+            (r"C:relative", "workspace"),
+            (r"\root-relative", "workspace"),
+            ("gateway", r"C:relative"),
+            ("gateway", r"\root-relative"),
+        ] {
+            std::fs::write(
+                &runtime,
+                format!(
+                    "gateway_settings = 'gateway.toml'\n[paths]\nmode = 'portable'\nportable_root = 'data'\n[sandbox]\nworkspace_root = '{workspace_root}'\n[processes.gateway]\ncwd = '{cwd}'\n"
+                ),
+            )
+            .unwrap();
+            let selection = DeploymentSelection::load(&runtime, None).unwrap();
+            assert!(RuntimeConfig::load_selected(&selection).is_err());
+        }
+        assert!(!root.join("data").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parses_runtime_process_graph() {
         let toml = r#"
             profile = "test"
             supervisor_addr = "127.0.0.1:3001"
 
-            [processes.gateway]
+            [profiles.test.processes.gateway]
             enabled = true
             launch = "eager"
             criticality = "required"
@@ -474,10 +592,10 @@ mod tests {
             cwd = "../gateway"
             provides = ["gateway"]
 
-            [processes.gateway.endpoints]
+            [profiles.test.processes.gateway.endpoints]
             grpc = "http://127.0.0.1:50051"
 
-            [processes.llm_server]
+            [profiles.test.processes.llm_server]
             launch = "external"
             health_url = "http://localhost:1234/v1/models"
             poll_interval_ms = 5000
@@ -525,6 +643,14 @@ mod tests {
             Criticality::DegradedUsable
         );
         assert!(!config.processes["voice_stack"].is_managed());
+    }
+
+    #[test]
+    fn named_profile_never_falls_back_to_top_level_processes() {
+        let content = "profile = 'missing'\n[processes.gateway]\n";
+        assert!(RuntimeConfigFile::parse(content, None).is_err());
+        assert!(RuntimeConfigFile::parse("[processes.gateway]\n", Some("missing".into())).is_err());
+        assert!(RuntimeConfigFile::parse("[profiles.app.processes.gateway]\n", None).is_err());
     }
 
     #[test]
@@ -604,5 +730,30 @@ mod tests {
         let err = RuntimeConfigFile::parse(toml, None).expect_err("mismatch should fail");
 
         assert!(err.to_string().contains("port mismatch"));
+    }
+
+    #[test]
+    fn endpoint_validation_errors_do_not_echo_address_values() {
+        for (bind, endpoint) in [
+            ("secret-bind-without-port", "http://host:50053"),
+            ("0.0.0.0:50053", "https://never-print-this@host"),
+            ("0.0.0.0:50053", "https://never-print-this@host:50054"),
+        ] {
+            let content = format!(
+                "[processes.voice_stack.bind]\ntalker_grpc = '{bind}'\n[processes.voice_stack.endpoints]\ntalker_grpc = '{endpoint}'\n"
+            );
+            let error = RuntimeConfigFile::parse(&content, None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                !error.contains(bind),
+                "bind address appeared in error: {error}"
+            );
+            assert!(
+                !error.contains(endpoint),
+                "endpoint address appeared in error: {error}"
+            );
+            assert!(!error.contains("never-print-this"));
+        }
     }
 }

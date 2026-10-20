@@ -1,13 +1,13 @@
 //! Client for the Supervisor-owned Sandbox Provider.
 //!
 //! The Gateway keeps only Tool Manager concerns: advertise `sandbox_exec`,
-//! request opaque handles, forward execution, and release handles when
-//! conversations end. Backend choice and lifecycle remain in Supervisor.
+//! request opaque handles, forward execution, and release allocations.
+//! Backend choice and lifecycle remain in Supervisor.
 
-use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::instance::InstanceIdentity;
 use crate::proto;
 
 pub struct SandboxClient {
@@ -15,7 +15,14 @@ pub struct SandboxClient {
     http: reqwest::Client,
     enabled: bool,
     backend: Option<String>,
-    handles: Mutex<HashMap<String, String>>,
+    instance_id: String,
+    session_id: String,
+    allocation: Mutex<Option<AllocationLease>>,
+}
+
+struct AllocationLease {
+    allocation_id: String,
+    handle: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -28,7 +35,9 @@ struct StatusResponse {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AcquireRequest<'a> {
+    instance_id: &'a str,
     session_id: &'a str,
+    allocation_id: &'a str,
 }
 
 #[derive(serde::Deserialize)]
@@ -40,7 +49,23 @@ struct AcquireResponse {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecuteRequest<'a> {
+    instance_id: &'a str,
+    session_id: &'a str,
+    request_id: &'a str,
     args_json: &'a str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReleaseRequest<'a> {
+    instance_id: &'a str,
+    session_id: &'a str,
+}
+
+#[derive(serde::Deserialize)]
+struct ReleaseResponse {
+    ok: bool,
+    error: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -49,9 +74,20 @@ struct ExecuteResponse {
 }
 
 impl SandboxClient {
-    pub async fn connect(base_url: impl Into<String>) -> anyhow::Result<Self> {
+    pub async fn connect(
+        base_url: impl Into<String>,
+        instance_context: &InstanceIdentity,
+    ) -> anyhow::Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let http = reqwest::Client::new();
+        http.post(format!("{base_url}/api/owner/bind"))
+            .json(&serde_json::json!({
+                "instanceId": instance_context.instance_id,
+                "sessionId": instance_context.default_session_id,
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
         let status = http
             .get(format!("{base_url}/api/sandbox/status"))
             .send()
@@ -65,7 +101,9 @@ impl SandboxClient {
             http,
             enabled: status.enabled,
             backend: Some(status.backend),
-            handles: Mutex::new(HashMap::new()),
+            instance_id: instance_context.instance_id.clone(),
+            session_id: instance_context.default_session_id.clone(),
+            allocation: Mutex::new(None),
         })
     }
 
@@ -75,7 +113,9 @@ impl SandboxClient {
             http: reqwest::Client::new(),
             enabled: false,
             backend: None,
-            handles: Mutex::new(HashMap::new()),
+            instance_id: String::new(),
+            session_id: String::new(),
+            allocation: Mutex::new(None),
         }
     }
 
@@ -88,7 +128,7 @@ impl SandboxClient {
             name: "sandbox_exec".into(),
             description: "Execute code through the Supervisor-managed runtime provider and \
                           return {stdout, stderr, exit_code}. Files persist across calls in \
-                          this conversation. Optional 'stdin' is fed to the program. \
+                          the active allocation. Optional 'stdin' is fed to the program. \
                           Languages: python, node, bash."
                 .into(),
             args_schema: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","node","bash"]},"code":{"type":"string"},"stdin":{"type":"string"}},"required":["language","code"]}"#
@@ -96,17 +136,18 @@ impl SandboxClient {
         })
     }
 
-    pub async fn exec_from_json(&self, session_id: &str, args_json: &str) -> String {
+    pub async fn exec_from_json(&self, request_id: &str, args_json: &str) -> String {
         if !self.enabled {
             return error_json("sandbox provider is unavailable");
         }
 
-        let handle = match self.ensure_handle(session_id).await {
+        let handle = match self.ensure_handle().await {
             Ok(handle) => handle,
             Err(error) => return error_json(error),
         };
         debug!(
-            session_id = %session_id,
+            session_id = %self.session_id,
+            request_id = %request_id,
             handle = %handle,
             backend = self.backend.as_deref().unwrap_or("unknown"),
             "forwarding sandbox execution to Supervisor"
@@ -114,7 +155,12 @@ impl SandboxClient {
         let response = self
             .http
             .post(format!("{}/api/sandbox/{handle}/execute", self.base_url))
-            .json(&ExecuteRequest { args_json })
+            .json(&ExecuteRequest {
+                instance_id: &self.instance_id,
+                session_id: &self.session_id,
+                request_id,
+                args_json,
+            })
             .send()
             .await;
 
@@ -131,38 +177,57 @@ impl SandboxClient {
     }
 
     pub async fn release(&self) {
-        let handles = {
-            let mut current = self.handles.lock().await;
-            current
-                .drain()
-                .map(|(_, handle)| handle)
-                .collect::<Vec<_>>()
+        let mut current = self.allocation.lock().await;
+        let Some(lease) = current.as_ref() else {
+            return;
         };
-        for handle in handles {
-            if let Err(error) = self
-                .http
-                .delete(format!("{}/api/sandbox/{handle}", self.base_url))
+        let result: Result<ReleaseResponse, String> = async {
+            self.http
+                .delete(format!("{}/api/sandbox/{}", self.base_url, lease.handle))
+                .json(&ReleaseRequest {
+                    instance_id: &self.instance_id,
+                    session_id: &self.session_id,
+                })
                 .send()
                 .await
-                .and_then(|response| response.error_for_status())
-            {
-                warn!(%error, %handle, "failed to release Supervisor sandbox handle");
-            } else {
-                info!(%handle, "released Supervisor sandbox handle");
+                .map_err(|error| error.to_string())?
+                .error_for_status()
+                .map_err(|error| error.to_string())?
+                .json::<ReleaseResponse>()
+                .await
+                .map_err(|error| error.to_string())
+        }
+        .await;
+        match result {
+            Ok(response) if response.ok => {
+                info!(handle = %lease.handle, allocation_id = %lease.allocation_id, "released Supervisor sandbox handle");
+                *current = None;
+            }
+            Ok(response) => {
+                warn!(handle = %lease.handle, allocation_id = %lease.allocation_id, error = ?response.error, "Supervisor rejected sandbox release");
+            }
+            Err(error) => {
+                warn!(%error, handle = %lease.handle, allocation_id = %lease.allocation_id, "failed to release Supervisor sandbox handle");
             }
         }
     }
 
-    async fn ensure_handle(&self, session_id: &str) -> Result<String, String> {
-        if let Some(handle) = self.handles.lock().await.get(session_id).cloned() {
-            debug!(%session_id, %handle, "reusing Supervisor sandbox handle");
-            return Ok(handle);
+    async fn ensure_handle(&self) -> Result<String, String> {
+        let mut current = self.allocation.lock().await;
+        if let Some(lease) = current.as_ref() {
+            debug!(allocation_id = %lease.allocation_id, handle = %lease.handle, "reusing Supervisor sandbox handle");
+            return Ok(lease.handle.clone());
         }
+        let allocation_id = uuid::Uuid::new_v4().to_string();
 
         let response = self
             .http
             .post(format!("{}/api/sandbox/acquire", self.base_url))
-            .json(&AcquireRequest { session_id })
+            .json(&AcquireRequest {
+                instance_id: &self.instance_id,
+                session_id: &self.session_id,
+                allocation_id: &allocation_id,
+            })
             .send()
             .await
             .map_err(|error| format!("failed to acquire sandbox: {error}"))?
@@ -178,35 +243,12 @@ impl SandboxClient {
                 .unwrap_or_else(|| "sandbox unavailable".into())
         })?;
 
-        let raced_handle = {
-            let mut current = self.handles.lock().await;
-            if let Some(existing) = current.get(session_id) {
-                Some(existing.clone())
-            } else {
-                current.insert(session_id.to_string(), handle.clone());
-                None
-            }
-        };
-        if let Some(existing) = raced_handle {
-            if existing == handle {
-                return Ok(existing);
-            }
-            if let Err(error) = self
-                .http
-                .delete(format!("{}/api/sandbox/{handle}", self.base_url))
-                .send()
-                .await
-            {
-                warn!(
-                    %error,
-                    %handle,
-                    "failed to release duplicate Supervisor sandbox handle"
-                );
-            }
-            return Ok(existing);
-        }
+        *current = Some(AllocationLease {
+            allocation_id: allocation_id.clone(),
+            handle: handle.clone(),
+        });
         info!(
-            %session_id,
+            %allocation_id,
             %handle,
             backend = self.backend.as_deref().unwrap_or("unknown"),
             "acquired Supervisor sandbox handle"
@@ -230,7 +272,6 @@ fn error_json(error: impl Into<String>) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use kaguya_supervisor::app::SupervisorApp;
@@ -238,6 +279,14 @@ mod tests {
     use kaguya_supervisor::server;
 
     use super::*;
+
+    fn test_instance_context() -> InstanceIdentity {
+        InstanceIdentity {
+            schema_version: 1,
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            default_session_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
 
     #[tokio::test]
     async fn concurrent_acquisitions_preserve_shared_handle_and_files() {
@@ -250,44 +299,30 @@ mod tests {
             },
             base_dir: ".".into(),
         });
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let router = server::router(app.clone()).layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let barrier = Arc::clone(&barrier);
-                async move {
-                    let acquiring = request.uri().path() == "/api/sandbox/acquire";
-                    let response = next.run(request).await;
-                    // Both requests must reach Supervisor before either response
-                    // can populate the client's cache.
-                    if acquiring {
-                        barrier.wait().await;
-                    }
-                    response
-                }
-            },
-        ));
+        let router = server::router(app.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let client = SandboxClient::connect(format!("http://{addr}"))
+        let client = SandboxClient::connect(format!("http://{addr}"), &test_instance_context())
             .await
             .unwrap();
-        let session = format!("concurrent-acquire-{}", uuid::Uuid::new_v4());
+        let first_request = uuid::Uuid::new_v4().to_string();
+        let second_request = uuid::Uuid::new_v4().to_string();
         let outputs = tokio::time::timeout(Duration::from_secs(10), async {
             let (first, second) = tokio::join!(
                 client.exec_from_json(
-                    &session,
+                    &first_request,
                     r#"{"language":"python","code":"open('first.txt','w').write('first')"}"#,
                 ),
                 client.exec_from_json(
-                    &session,
+                    &second_request,
                     r#"{"language":"python","code":"open('second.txt','w').write('second')"}"#,
                 ),
             );
             let third = client.exec_from_json(
-                &session,
+                "third-request",
                 r#"{"language":"python","code":"print(open('first.txt').read() + ':' + open('second.txt').read())"}"#,
             ).await;
             [first, second, third]
@@ -322,7 +357,7 @@ mod tests {
             server::serve_on(app, listener).await.unwrap();
         });
 
-        let client = SandboxClient::connect(format!("http://{addr}"))
+        let client = SandboxClient::connect(format!("http://{addr}"), &test_instance_context())
             .await
             .unwrap();
         assert_eq!(client.backend(), Some("native"));
@@ -343,7 +378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_caches_handles_per_session_without_cross_session_leakage() {
+    async fn release_reacquires_allocation_without_replacing_session() {
         let app = SupervisorApp::new(ResolvedRuntimeConfig {
             config: RuntimeConfig {
                 profile: Some("test".into()),
@@ -359,7 +394,7 @@ mod tests {
             server::serve_on(app, listener).await.unwrap();
         });
 
-        let client = SandboxClient::connect(format!("http://{addr}"))
+        let client = SandboxClient::connect(format!("http://{addr}"), &test_instance_context())
             .await
             .unwrap();
 
@@ -371,15 +406,33 @@ mod tests {
             .await;
         let write_value: serde_json::Value = serde_json::from_str(&write).unwrap();
         assert_eq!(write_value["exit_code"], 0, "{write}");
+        let old_allocation_id = client
+            .allocation
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .allocation_id
+            .clone();
+        client.release().await;
 
         let read_other = client
             .exec_from_json(
-                "session-b",
+                "second-request",
                 r#"{"language":"python","code":"import pathlib; print(pathlib.Path('secret.txt').exists())"}"#,
             )
             .await;
         let read_other_value: serde_json::Value = serde_json::from_str(&read_other).unwrap();
         assert_eq!(read_other_value["exit_code"], 0, "{read_other}");
+        let new_allocation_id = client
+            .allocation
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .allocation_id
+            .clone();
+        assert_ne!(old_allocation_id, new_allocation_id);
         assert!(
             read_other_value["stdout"]
                 .as_str()

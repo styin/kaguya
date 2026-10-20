@@ -61,6 +61,13 @@
   margin-right: 4px;
 }
 
+.session-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
 /* ─── WS pill (replaces flat dot + word) ─── */
 .ws-pill {
   display: inline-flex;

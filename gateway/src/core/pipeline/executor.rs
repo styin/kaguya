@@ -201,7 +201,7 @@ impl<'a> ActionExecutor<'a> {
                         memory_md: self.state.last_memory_md.clone(),
                     };
                     *self.shared_persona.write().await = new_persona.clone();
-                    self.talker.update_persona(new_persona).await;
+                    let _ = self.talker.update_persona(new_persona).await;
                 }
             }
 

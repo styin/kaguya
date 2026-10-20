@@ -52,20 +52,30 @@ pub enum InputEvent {
         text: String,
     },
 
+    /// Tool adapter result correlated with its originating instance/session.
     ToolResult {
+        instance_id: String,
+        session_id: String,
         request_id: String,
         tool_name: String,
         content: String,
     },
+    /// Gateway adapter correlation; does not independently authenticate the provider.
     ReasonerStep {
+        instance_id: String,
+        session_id: String,
         task_id: String,
         description: String,
     },
     ReasonerCompleted {
+        instance_id: String,
+        session_id: String,
         task_id: String,
         summary: String,
     },
     ReasonerError {
+        instance_id: String,
+        session_id: String,
         task_id: String,
         message: String,
         code: i32,

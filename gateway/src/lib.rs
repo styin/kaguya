@@ -15,6 +15,7 @@
 //! - [`lifecycle`] — Task supervision, connection readiness, and reconnect policies.
 //! - [`services`] — Inbound gRPC/WebSocket servers the Gateway exposes.
 //! - [`config`] — Gateway-local and runtime topology configuration.
+//! - [`instance`] — Durable instance identity, data paths, and lifecycle.
 //! - [`rag`] — Retrieval-augmented generation (embedding, retrieval, memory store).
 //! - [`sandbox`] — Client for the Supervisor-owned `sandbox_exec` provider.
 //! - [`tools`] — Tool registry and dispatch for the Talker's tool-use protocol.
@@ -22,7 +23,10 @@
 pub mod app;
 pub mod capabilities;
 pub mod config;
+#[path = "../../shared/deployment.rs"]
+pub mod deployment;
 pub mod error;
+pub mod instance;
 pub mod lifecycle;
 pub mod rag;
 pub mod sandbox;

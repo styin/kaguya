@@ -1,5 +1,14 @@
 profile = "app"
+gateway_settings = "../gateway/gateway.toml"
 supervisor_addr = "127.0.0.1:3001"
+
+[paths]
+mode = "portable"
+portable_root = "../gateway/data"
+
+[instance]
+# After init-instance/rekey-instance, select the printed manifest_reference.
+# manifest = "instances/<InstanceId>/instance.toml"
 
 [sandbox]
 # Supervisor-owned provider used by Gateway's sandbox_exec tool.

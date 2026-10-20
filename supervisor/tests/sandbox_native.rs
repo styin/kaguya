@@ -2,6 +2,7 @@
 //! the default config and actually run code through it. Guards the port of the
 //! Supervisor-owned sandbox provider beyond mere compilation.
 
+use kaguya_supervisor::app::InstanceSessionBinding;
 use kaguya_supervisor::config::SandboxConfig;
 use kaguya_supervisor::sandbox::{SandboxManager, SandboxProvider};
 
@@ -199,16 +200,23 @@ async fn opaque_handle_controls_execution_and_release() {
     let cfg = SandboxConfig::default();
     let provider =
         SandboxProvider::new(SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap());
-    let handle = provider.acquire("handle-session").await.unwrap();
+    let owner = InstanceSessionBinding {
+        instance_id: uuid::Uuid::new_v4().to_string(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let allocation_id = uuid::Uuid::new_v4().to_string();
+    let handle = provider.acquire(&owner, &allocation_id).await.unwrap();
     assert_eq!(
-        provider.acquire("handle-session").await.unwrap(),
+        provider.acquire(&owner, &allocation_id).await.unwrap(),
         handle,
         "acquisition retries must return the existing opaque handle"
     );
 
     let output = provider
         .execute(
+            &owner,
             &handle,
+            "request-one",
             r#"{"language":"python","code":"print('through-supervisor')"}"#,
         )
         .await;
@@ -219,9 +227,14 @@ async fn opaque_handle_controls_execution_and_release() {
         .unwrap()
         .contains("through-supervisor"));
 
-    provider.release(&handle).await.unwrap();
+    provider.release(&owner, &handle).await.unwrap();
     let after_release = provider
-        .execute(&handle, r#"{"language":"python","code":"print('no')"}"#)
+        .execute(
+            &owner,
+            &handle,
+            "request-two",
+            r#"{"language":"python","code":"print('no')"}"#,
+        )
         .await;
     let value: serde_json::Value = serde_json::from_str(&after_release).unwrap();
     assert!(value["error"]

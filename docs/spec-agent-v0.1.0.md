@@ -154,7 +154,7 @@ service ListenerService {
 }
 ```
 
-`ListenerOutput` carries one of: `vad_speech_start`, `vad_speech_end`, `partial_transcript`, `final_transcript`. `ListenerInput` carries optional `ListenerControl` (e.g. reset on new session). Audio is delivered out-of-band: the Gateway opens a length-prefixed TCP connection to `listener_audio_addr:listener_audio_port` and writes Opus frames as `[u32 BE length][bytes]`.
+`ListenerOutput` carries one of: `vad_speech_start`, `vad_speech_end`, `partial_transcript`, `final_transcript`. `ListenerInput` carries optional `ListenerControl` (e.g. reset on new session). Audio is delivered out-of-band: the Gateway opens a TCP connection to `listener_audio_addr:listener_audio_port`, writes a 39-byte owner header (`KAGUYA1` followed by the 16-byte binary InstanceId and SessionId), then sends frames as `[u32 BE length][bytes]`. The Listener rejects a header that differs from its bound owner. Audio bytes still never enter protobuf.
 
 ---
 
@@ -455,7 +455,7 @@ service ReasonerService {
 }
 ```
 
-Audio frames (Opus, 50fps) flow on a dedicated raw TCP socket between Gateway and Listener — Gateway opens the socket and writes `[u32 BE length][bytes]` records, never via gRPC.
+Audio frames flow on a dedicated raw TCP socket between Gateway and Listener. Gateway writes the R1a instance/session header once, then `[u32 BE length][bytes]` records, never via gRPC. `InstanceSessionBinding` in `talker/binding.py` is shared by Talker, Listener gRPC, and audio ingress; `bind_or_validate()` pins the first valid pair and rejects a different instance or session. Persona identity content remains a separate responsibility. The metadata, frame, and payload spellings are unchanged by this naming refactor.
 
 ---
 

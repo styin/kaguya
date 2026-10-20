@@ -7,7 +7,7 @@
 //!   proc:  /proc                              — some runtimes stat /proc
 //!   dev:   /dev (minimal devtmpfs: null/zero/urandom/tty)
 //!   tmpfs: /tmp                               — scratch, isolated per run
-//!   bind:  <session dir> → /home/sandbox      — the only writable workspace,
+//!   bind:  <allocation dir> → /home/sandbox      — the only writable workspace,
 //!                                                persistent across calls in a
 //!                                                conversation
 //! Namespaces: `--unshare-all` (including network) + `--die-with-parent`.
@@ -22,13 +22,13 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use super::{
-    configure_process_group, run_spawned, sanitize_session, script_name, ExecRequest, ExecResult,
-    SandboxBackend,
+    configure_process_group, run_spawned, sanitize_allocation, script_name, ExecRequest,
+    ExecResult, SandboxBackend,
 };
 
 pub struct BubblewrapBackend {
     root: PathBuf,
-    sessions: Mutex<HashSet<String>>,
+    allocations: Mutex<HashSet<String>>,
 }
 
 impl BubblewrapBackend {
@@ -47,30 +47,30 @@ impl BubblewrapBackend {
         }
         Ok(Self {
             root: std::env::temp_dir().join("kaguya-sandbox"),
-            sessions: Mutex::new(HashSet::new()),
+            allocations: Mutex::new(HashSet::new()),
         })
     }
-    fn session_dir(&self, session: &str) -> PathBuf {
-        self.root.join(sanitize_session(session))
+    fn session_dir(&self, allocation: &str) -> PathBuf {
+        self.root.join(sanitize_allocation(allocation))
     }
 }
 
 #[async_trait]
 impl SandboxBackend for BubblewrapBackend {
-    async fn acquire(&self, session: &str) -> Result<(), String> {
-        tokio::fs::create_dir_all(self.session_dir(session))
+    async fn acquire(&self, allocation: &str) -> Result<(), String> {
+        tokio::fs::create_dir_all(self.session_dir(allocation))
             .await
             .map_err(|error| format!("mkdir failed: {error}"))?;
-        self.sessions.lock().await.insert(session.to_string());
+        self.allocations.lock().await.insert(allocation.to_string());
         Ok(())
     }
 
-    async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
-        let dir = self.session_dir(session);
+    async fn execute(&self, allocation: &str, req: ExecRequest) -> ExecResult {
+        let dir = self.session_dir(allocation);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             return ExecResult::backend_error(format!("mkdir failed: {e}"));
         }
-        self.sessions.lock().await.insert(session.to_string());
+        self.allocations.lock().await.insert(allocation.to_string());
 
         let script = script_name(req.language.ext());
         if let Err(e) = tokio::fs::write(dir.join(&script), &req.code).await {
@@ -94,7 +94,7 @@ impl SandboxBackend for BubblewrapBackend {
             .arg("/dev")
             .arg("--tmpfs")
             .arg("/tmp")
-            // The only writable mount: this session's scratch dir.
+            // The only writable mount: this allocation's scratch dir.
             .arg("--bind")
             .arg(&dir)
             .arg("/home/sandbox")
@@ -138,9 +138,9 @@ impl SandboxBackend for BubblewrapBackend {
         result
     }
 
-    async fn cleanup(&self, session: &str) {
-        let _ = tokio::fs::remove_dir_all(self.session_dir(session)).await;
-        self.sessions.lock().await.remove(session);
+    async fn cleanup(&self, allocation: &str) {
+        let _ = tokio::fs::remove_dir_all(self.session_dir(allocation)).await;
+        self.allocations.lock().await.remove(allocation);
     }
 
     fn name(&self) -> &'static str {
