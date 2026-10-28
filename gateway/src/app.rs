@@ -9,29 +9,29 @@ use tokio::sync::{mpsc, RwLock};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 
-use crate::audio_sink::ListenerAudioSink;
 use crate::capabilities::RagCapability;
+use crate::clients::audio_sink::ListenerAudioSink;
+use crate::clients::reasoner::ReasonerManager;
+use crate::clients::talker::TalkerClient;
 use crate::config::GatewayConfig;
-use crate::control::ControlServiceImpl;
-#[cfg(feature = "dev-console")]
-use crate::endpoint;
-use crate::history::History;
-use crate::input_stream;
+use crate::core::history::History;
+use crate::core::input_stream;
+use crate::core::narration::NarrationFilter;
+use crate::core::output::OutputManager;
+use crate::core::persona::Persona;
+use crate::core::pipeline::{self, PipelineComponents, SessionState};
+use crate::core::silence::SilenceTimers;
+use crate::core::types::{ControlSignal, MetadataEvent};
 use crate::instance;
 use crate::lifecycle::{LifecycleSupervisor, Readiness};
-use crate::narration::NarrationFilter;
-use crate::output::OutputManager;
-use crate::persona::Persona;
-use crate::pipeline::{self, PipelineComponents, SessionState};
 use crate::proto;
 use crate::rag::RagEngine;
-use crate::reasoner::ReasonerManager;
 use crate::sandbox::SandboxClient;
-use crate::silence::SilenceTimers;
-use crate::talker::TalkerClient;
+use crate::services::control::ControlServiceImpl;
+#[cfg(feature = "dev-console")]
+use crate::services::endpoint;
 use crate::telemetry::TelemetryClient;
 use crate::tools::ToolRegistry;
-use crate::types::{ControlSignal, MetadataEvent};
 
 pub async fn run(
     selection: crate::deployment::DeploymentSelection,
@@ -45,15 +45,13 @@ pub async fn run(
     let (instance_id, session_id) = instance::validate_session_ref(Some(&scope))?;
     config.files.soul_path = instance_lease.paths.soul.clone();
     config.files.identity_path = instance_lease.paths.persona_identity.clone();
-    config.rag.db_path = instance_lease.paths.rag_db.clone();
     let clients = config.resolved_clients();
 
     // ── Channels ──
     let (control_tx, control_rx) = mpsc::channel::<ControlSignal>(64);
     let (input_tx, input_rx) = input_stream::create(256);
     let (talker_output_tx, talker_output_rx) = mpsc::channel::<proto::TalkerOutput>(256);
-    let (audio_out_tx, _audio_out_rx) = mpsc::channel::<bytes::Bytes>(512);
-    let (metadata_out_tx, _metadata_out_rx) = mpsc::channel::<MetadataEvent>(256);
+    let (metadata_out_tx, _) = tokio::sync::broadcast::channel::<MetadataEvent>(256);
 
     let signal_tx = control_tx.clone();
     lifecycle.spawn("os_signal_shutdown", async move {
@@ -69,7 +67,7 @@ pub async fn run(
     // ── Components ──
     let history = History::new(config.history.max_recent_turns, &scope);
     let persona = Persona::load(&config.files.soul_path, &config.files.identity_path).await?;
-    let rag_engine = RagEngine::new(&config.rag, config.files.workspace_root.clone())?;
+    let rag_engine = RagEngine::new(&config.rag, &instance_lease.paths.rag_db)?;
     let rag_embedder = rag_engine.embedder.clone();
     let rag: Arc<dyn RagCapability> = Arc::new(rag_engine);
     let task_spawner = lifecycle.spawner();
@@ -149,7 +147,7 @@ pub async fn run(
         scope.clone(),
     )
     .with_telemetry(telemetry.clone());
-    let output = OutputManager::new(audio_out_tx, metadata_out_tx);
+    let output = OutputManager::new(metadata_out_tx.clone());
     let narration = NarrationFilter::new(5);
 
     // ── Start optional RAG embedder using the handle retained during construction ──
@@ -223,7 +221,7 @@ pub async fn run(
             let p2 = input_tx.p2.clone();
             let listener_context = scope.clone();
             async move {
-                crate::listener::run_recovery_loop(
+                crate::clients::listener::run_recovery_loop(
                     grpc_endpoint,
                     audio_addr,
                     spawner,
@@ -248,8 +246,7 @@ pub async fn run(
             session: scope.clone(),
             control_tx: control_tx.clone(),
             p1_tx: input_tx.p1.clone(),
-            audio_out_rx: tokio::sync::Mutex::new(_audio_out_rx),
-            metadata_rx: tokio::sync::Mutex::new(_metadata_out_rx),
+            metadata_tx: metadata_out_tx,
             active_client: std::sync::Mutex::new(None),
             listener_audio: listener_audio.clone(),
             runtime_status: endpoint::RuntimeStatusState {

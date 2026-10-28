@@ -380,7 +380,7 @@ impl DeploymentSelection {
             },
             "sources": self.sources,
             "overridden_sources": self.overridden_sources,
-            "launch_configuration_trust": "deployment files contain trusted executable launch instructions; shell-command migration is tracked in R1d",
+            "launch_configuration_trust": "deployment files contain trusted executable launch instructions",
             "deferred_diagnostics": ["endpoint reconciliation", "environment/default precedence", "launch descriptors"],
         })
     }

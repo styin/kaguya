@@ -46,10 +46,16 @@ Kaguya is intended to run across multiple desktop platforms, especially Windows 
 | Talker Agent | Python (asyncio, grpcio)            |
 | Reasoner     | TypeScript (Node.js)                |
 | Toolkit      | TypeScript (Node.js)                |
-| Proto schema | buf (generates stubs for all three) |
+| Proto schema | Protobuf; buf lint/format, tonic-build for Rust, grpcio-tools for Python |
 
 ## Workflow
 
 - Run `make proto` to regenerate all gRPC stubs after editing `proto/kaguya/v1/kaguya.proto`.
 - Proto changes must pass `buf lint proto/` before committing.
-- Implement milestones in order (M0 → M7). Each milestone produces a testable artifact.
+- Follow the active R0 → R8 sequence and acceptance gates in the implementation plan; M0 → M7 labels describe the existing baseline.
+
+## Unpublished Contracts
+
+- Update all producers, consumers, tests, and documentation together when a contract changes.
+- Do not preserve obsolete APIs, fields, aliases, migration code, or compatibility adapters for earlier repository versions.
+- Keep third-party protocol support and platform abstractions that are required by the current implementation.

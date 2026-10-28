@@ -19,7 +19,7 @@ pub struct GatewayConfig {
     pub rag: RagConfig,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
-    #[serde(default)]
+    #[serde(skip)]
     pub runtime: RuntimeConfig,
 }
 
@@ -64,7 +64,7 @@ pub enum LaunchMode {
     External,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub profile: Option<String>,
     #[serde(default)]
@@ -116,20 +116,7 @@ fn default_enabled() -> bool {
     true
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            profile: None,
-            runtimes: BTreeMap::new(),
-        }
-    }
-}
-
 impl RuntimeConfig {
-    pub fn load_topology(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-        Self::load_topology_selected(path, None)
-    }
-
     pub fn load_topology_selected(
         path: impl AsRef<std::path::Path>,
         profile: Option<String>,
@@ -221,9 +208,7 @@ pub struct SilenceConfig {
     pub context_shift_secs: u64,
     /// Gate the proactive silence-triggered LLM dispatch (P4 SilenceExceeded).
     /// Timers themselves keep running — tiers still tick and emit events for
-    /// telemetry — but the dispatch is suppressed when this is `false`. See
-    /// B10 in TODO.md for the eventual prompt-engineering fix that will make
-    /// the LLM optionally silent and let this flag flip back to `true`.
+    /// telemetry — but the dispatch is suppressed when this is `false`.
     #[serde(default = "default_silence_enabled")]
     pub enabled: bool,
 }
@@ -233,10 +218,13 @@ fn default_silence_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RagConfig {
-    pub db_path: PathBuf,
     pub embedding_url: Option<String>,
     pub top_k: usize,
+    /// Reciprocal-rank fusion denominator offset; must be finite and positive.
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f64,
     /// Hard cap on stored memory content length (chars). Defensive only;
     /// real voice utterances never approach this. Prevents pathological
     /// inputs (paste-bombs, adversarial content) from poisoning the index.
@@ -255,6 +243,10 @@ pub struct RagConfig {
     pub max_chars_per_md_entry: Option<usize>,
 }
 
+fn default_rrf_k() -> f64 {
+    60.0
+}
+
 fn default_max_storage_chars() -> Option<usize> {
     Some(4096)
 }
@@ -262,9 +254,9 @@ fn default_max_storage_chars() -> Option<usize> {
 impl Default for RagConfig {
     fn default() -> Self {
         Self {
-            db_path: "data/kaguya.db".into(),
             embedding_url: None,
             top_k: 10,
+            rrf_k: default_rrf_k(),
             max_storage_chars: default_max_storage_chars(),
             max_chars_per_result: None,
             max_chars_per_md_entry: None,
@@ -283,6 +275,10 @@ impl GatewayConfig {
                 error.span().map(|span| span.start)
             )
         })?;
+        anyhow::ensure!(
+            config.rag.rrf_k.is_finite() && config.rag.rrf_k > 0.0,
+            "rag.rrf_k must be finite and positive"
+        );
         let base = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Gateway settings file has no parent"))?;
@@ -291,7 +287,6 @@ impl GatewayConfig {
             crate::deployment::resolve_path(base, &config.files.identity_path)?;
         config.files.workspace_root =
             crate::deployment::resolve_path(base, &config.files.workspace_root)?;
-        config.rag.db_path = crate::deployment::resolve_path(base, &config.rag.db_path)?;
         Ok(config)
     }
 
@@ -443,45 +438,30 @@ mod tests {
     #[test]
     fn runtime_endpoints_override_default_clients() {
         let toml = r#"
-            [server]
-            ws_addr = "127.0.0.1:8080"
-            grpc_addr = "0.0.0.0:50051"
 
-            [files]
-            soul_path = "SOUL.md"
-            identity_path = "IDENTITY.md"
-            workspace_root = "."
-
-            [history]
-            max_recent_turns = 50
-
-            [silence]
-            soft_prompt_secs = 3
-            follow_up_secs = 8
-            context_shift_secs = 30
-
-            [runtime]
-            profile = "test"
-
-            [runtime.runtimes.voice_stack]
+            [processes.voice_stack]
             enabled = true
             criticality = "required"
             provides = ["talker", "listener"]
 
-            [runtime.runtimes.voice_stack.endpoints]
+            [processes.voice_stack.endpoints]
             talker_grpc = "http://runtime-talker"
             listener_grpc = "http://runtime-listener"
             listener_audio = "runtime-audio:1"
 
-            [runtime.runtimes.reasoner]
+            [processes.reasoner]
             enabled = true
             criticality = "degraded_usable"
 
-            [runtime.runtimes.reasoner.endpoints]
+            [processes.reasoner.endpoints]
             grpc = "http://runtime-reasoner"
         "#;
 
-        let config: GatewayConfig = toml::from_str(toml).expect("config should parse");
+        let topology = toml::from_str::<RuntimeTopologyFile>(toml).unwrap();
+        let config = GatewayConfig {
+            runtime: RuntimeConfig::from_topology(topology, None).unwrap(),
+            ..GatewayConfig::default()
+        };
         let clients = config.resolved_clients();
 
         assert_eq!(clients.talker_addr, "http://runtime-talker");
@@ -491,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_config_parses_without_clients_block() {
+    fn gateway_component_settings_parse() {
         let toml = r#"
             [server]
             ws_addr = "127.0.0.1:8080"

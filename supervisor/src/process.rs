@@ -73,10 +73,6 @@ impl ManagedProcessSpec {
         self.restart_policy
     }
 
-    pub fn command(&self) -> &str {
-        &self.command
-    }
-
     fn command_for_platform(&self) -> &str {
         if cfg!(windows) {
             self.command_win32.as_deref().unwrap_or(&self.command)

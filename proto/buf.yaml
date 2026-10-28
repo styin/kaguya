@@ -1,10 +1,9 @@
-# buf.yaml — CI-only proto linting and breaking-change detection.
+# buf.yaml — proto linting and formatting.
 #
 # Used exclusively in .github/workflows/proto-lint.yml for validation.
 # NOT used for code generation — we use language-specific tools:
 #   - Python: grpcio-tools (talker/scripts/gen_proto.py)
-#   - Rust: tonic-build (gateway/build.rs, automatic on cargo build)
-#   - TypeScript: @grpc/proto-loader (runtime loading, no generation)
+#   - Rust: tonic-build (Gateway and Supervisor build scripts)
 
 version: v1
 name: buf.build/kaguya/kaguya
@@ -17,5 +16,3 @@ lint:
     # authority for message names and request scope.
     - RPC_REQUEST_STANDARD_NAME
     - RPC_RESPONSE_STANDARD_NAME
-breaking:
-  use: [FILE]

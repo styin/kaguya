@@ -26,7 +26,7 @@ if _version_not_supported:
 
 
 class ListenerServiceStub(object):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -35,7 +35,7 @@ class ListenerServiceStub(object):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
 
     """
 
@@ -53,7 +53,7 @@ class ListenerServiceStub(object):
 
 
 class ListenerServiceServicer(object):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -62,12 +62,12 @@ class ListenerServiceServicer(object):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
 
     """
 
     def Stream(self, request_iterator, context):
-        """Bidi: Gateway sends control signals; Listener streams ASR events.
+        """Gateway initializes scope, then may send controls; Listener streams ASR events.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -90,7 +90,7 @@ def add_ListenerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class ListenerService(object):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -99,7 +99,7 @@ class ListenerService(object):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
 
     """
 
@@ -132,7 +132,7 @@ class ListenerService(object):
 
 
 class TalkerServiceStub(object):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
 
     """
@@ -161,7 +161,7 @@ class TalkerServiceStub(object):
 
 
 class TalkerServiceServicer(object):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
 
     """
@@ -213,7 +213,7 @@ def add_TalkerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class TalkerService(object):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
 
     """

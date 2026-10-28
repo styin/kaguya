@@ -13,7 +13,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 
-from proto import kaguya_pb2  # type: ignore[import]
+from proto import kaguya_pb2
 
 logger = logging.getLogger(__name__)
 

@@ -4,12 +4,8 @@ Domain role: Streams token completions from the local LLM server (llama.cpp,
 LM Studio, or any OpenAI-compatible backend) and triggers KV cache prefill
 between turns.
 
-[DECISION] HTTP client, not gRPC. llama.cpp/LM Studio speak OpenAI-compatible
-HTTP. Overhead is ~0.1ms on localhost — negligible.
-
-TODO: Migrate from /v1/completions (raw prompt) to /v1/chat/completions
-(structured messages[]) when prompt_formatter returns messages instead of
-a string. See prompt_formatter.py module docstring.
+Uses /v1/completions with the raw chat-template prompt assembled by
+prompt_formatter.py.
 """
 
 import asyncio
@@ -56,7 +52,7 @@ class LLMClient:
         Args:
             prompt: The full prompt string to send to the LLM.
             cancel_event: If set, the stream is aborted immediately.
-                Used by PREPARE to interrupt mid-generation during barge-in.
+                Used by inline BargeInSignal to interrupt generation.
 
         Retries up to max_retries on connection/server errors before yielding
         any tokens. Once tokens have been yielded, errors are not retried
@@ -84,16 +80,13 @@ class LLMClient:
                         has_yielded = True
                         yield token
                     return  # stream completed successfully
-            except (
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                httpx.HTTPStatusError,
-            ) as exc:
+            except httpx.HTTPError as exc:
                 # Don't retry if we've already yielded tokens — retrying
                 # would re-send the same prompt and produce duplicate output.
                 if has_yielded:
-                    logger.error("LLM stream failed after yielding tokens: %s", exc)
-                    return
+                    raise ConnectionError(
+                        "LLM stream failed after yielding tokens"
+                    ) from exc
                 last_exc = exc
                 logger.warning(
                     "LLM server request failed (attempt %d/%d): %s",
@@ -105,7 +98,7 @@ class LLMClient:
                     await asyncio.sleep(self._retry_delay * attempt)
 
         raise ConnectionError(
-            f"LLM server unreachable after {self._max_retries} attempts"
+            f"LLM completion failed after {self._max_retries} attempts"
         ) from last_exc
 
     async def prefill(self, prompt: str) -> None:
@@ -137,9 +130,9 @@ async def _parse_sse_cancellable(
 ) -> AsyncIterator[str]:
     """Parse Server-Sent Events with cancellation support.
 
-    Expected format (llama.cpp / LM Studio):
-        data: {"content": "Hello", "stop": false}
-        data: {"content": "", "stop": true}
+    Expected /v1/completions format:
+        data: {"choices": [{"text": "Hello", "finish_reason": null}]}
+        data: {"choices": [{"text": "", "finish_reason": "stop"}]}
         data: [DONE]
 
     If cancel_event is set, the iterator returns immediately —
@@ -166,7 +159,7 @@ async def _parse_sse_cancellable(
                     # Drain the cancelled task. If we don't, an httpx.ReadError
                     # raised inside the aborted aiter sits as "Task exception
                     # was never retrieved" and pollutes the logs on every
-                    # barge-in / reasoner-result cancellation (B12).
+                    # barge-in / reasoner-result cancellation.
                     try:
                         await task
                     except BaseException as exc:  # noqa: BLE001 — expected on abort
@@ -217,7 +210,7 @@ async def _strip_think_blocks(tokens: AsyncIterator[str]) -> AsyncIterator[str]:
     detector, soul container) only see spoken content.
 
     Handles partial tags across token boundaries (e.g., "<" then "think>")
-    and nested/repeated <think> tags.
+    and repeated <think> blocks.
     """
     in_think = False
     buf = ""

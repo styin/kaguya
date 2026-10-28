@@ -5,7 +5,7 @@ import logging
 
 import grpc
 
-from proto import kaguya_pb2_grpc  # type: ignore[import]
+from proto import kaguya_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +15,8 @@ def _bind_or_raise(server: grpc.aio.Server, addr: str, name: str) -> int:
 
     `grpc.aio.Server.add_insecure_port()` returns the chosen port on
     success and `0` on failure (address-in-use, permission denied, malformed
-    address). The original code ignored the return value and logged
-    "listening" regardless — bind failures showed up later as opaque
-    "connection refused" errors at the client. This helper makes the
-    failure mode obvious: process exits with the offending address in
-    the message, no more "but the log said it was listening!" debugging.
+    address). Refuse startup when binding fails and include the offending
+    address in the error.
     """
     port = server.add_insecure_port(addr)
     if port == 0:

@@ -25,7 +25,6 @@ pub mod capabilities;
 pub mod config;
 #[path = "../../shared/deployment.rs"]
 pub mod deployment;
-pub mod error;
 pub mod instance;
 pub mod lifecycle;
 pub mod rag;
@@ -61,14 +60,6 @@ pub mod services {
     #[cfg(feature = "dev-console")]
     pub mod endpoint;
 }
-
-pub use clients::{audio_sink, listener, probe, reasoner, talker};
-pub use core::{
-    context, history, input_stream, narration, output, persona, pipeline, silence, types,
-};
-pub use services::control;
-#[cfg(feature = "dev-console")]
-pub use services::endpoint;
 
 pub mod proto {
     tonic::include_proto!("kaguya.v1");

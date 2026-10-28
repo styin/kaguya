@@ -303,7 +303,8 @@ mod tests {
                 processes: BTreeMap::new(),
             },
             base_dir: ".".into(),
-        });
+        })
+        .unwrap();
         let router = server::router(app.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -355,7 +356,8 @@ mod tests {
                 processes: BTreeMap::new(),
             },
             base_dir: ".".into(),
-        });
+        })
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
@@ -392,7 +394,8 @@ mod tests {
                 processes: BTreeMap::new(),
             },
             base_dir: ".".into(),
-        });
+        })
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {

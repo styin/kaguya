@@ -13,7 +13,7 @@ import { useEffect, useRef } from "react";
  * bars idle even while TTS played.
  *
  * `getAnalyser` is polled rather than passed once so the meter survives
- * mic/tts start/stop without remounting.
+ * mic start/stop without remounting.
  */
 export function useMeterBars(
   getAnalyser: () => AnalyserNode | null,

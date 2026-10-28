@@ -14,7 +14,7 @@ GitHub templates; this file is the durable quality contract for the project.
 
 - [Raising Bugs and Giving Suggestions](#raising-bugs-and-giving-suggestions)
 - [Project Standards](#project-standards)
-- [Development Console](#development-console)
+- [Developer Console](#developer-console)
 - [Gateway](#gateway)
 - [Talker](#talker)
 - [Reasoner](#reasoner)
@@ -35,34 +35,39 @@ implementation questions.
 
 ## Project Standards
 
-- Preserve the three-process architecture: Rust Gateway, Python Talker, and
-  TypeScript Reasoner.
+- Preserve the component boundaries: Rust Gateway and Supervisor, Python voice
+  service, and the planned TypeScript Reasoner.
 - Keep privacy and local execution as default assumptions. Do not add external
   services to core flows without a clear opt-in path.
-- Treat proto schemas as public contracts across Rust, Python, and TypeScript.
+- Treat proto schemas as the shared contracts across components. Kaguya is
+  unpublished: update all producers and consumers together instead of retaining
+  old fields, aliases, migration paths, or compatibility adapters.
 - Avoid OS-specific behavior unless it is isolated, documented, and covered by
   a cross-platform fallback.
 - Prefer small, reviewable changes with focused tests over broad rewrites. 
   Large PRs slow down our mission.
-- Do not hand-edit generated artifacts unless the generator is unavailable and
-  the PR explains why.
+- Do not hand-edit generated artifacts. Update the schema or generator and
+  regenerate the output.
 - Document behavior changes that affect contributors, operators, or downstream
   integrations.
 
 ## Developer Console
 
-We encourage you to test your code in real user flows using the the local developer console.
+We encourage you to test your code in real user flows using the local developer console.
 It may reveal issues with endpoint I/O, conversation flow, text commands, audio forwarding,
 metadata rendering, barge-in, or user-visible behavior.
 
 Note, however, that the console is not perfect. Treat the logs, output, and demonstrated 
 behavior of the console only as reference, not as a source of truth.
 
-Building the developer console:
+Running and checking the developer console after initializing a local deployment:
 
 ```sh
 cd console
-npm run dev
+npm ci
+npm test
+npm run build
+npm run dev -- --runtime-config ../config/kaguya.local.toml
 ``` 
 
 ## Gateway
@@ -78,8 +83,7 @@ Quality guarantees:
 - Preserve P0-P5 event priority semantics and cancellation behavior.
 - Be careful with async backpressure, channel bounds, task lifetimes, and
   shutdown paths.
-- Keep public module paths stable unless the PR is explicitly a breaking
-  refactor.
+- Keep module ownership clear and update callers directly when moving a module.
 - Add or update tests for changes to event routing, memory persistence,
   retrieval behavior, path safety, or protocol handling.
 - Regenerate or rebuild Rust proto bindings through `cargo build`; do not edit
@@ -139,7 +143,7 @@ Type checking:
 cd talker
 uv venv
 uv pip install pydantic-settings opuslib grpcio httpx mypy
-uv run --no-project mypy config.py voice/ inference/ --ignore-missing-imports
+uv run --no-project mypy config.py binding.py main.py server.py voice/ inference/ --ignore-missing-imports
 ```
 
 Proto regeneration:
@@ -151,34 +155,18 @@ uv run python scripts/gen_proto.py
 
 ## Reasoner
 
-The Reasoner is currently scaffolded and not yet implemented. Treat it as the
-future slow-path delegation adapter, not as production-ready behavior.
+The Reasoner service is not implemented. Its planned boundary is documented in
+`reasoner/README.md`; the Gateway client and protobuf contract already exist.
 
 Quality guarantees:
 
 - Do not imply Reasoner capabilities that are not implemented.
-- Keep dependency installation deterministic with `package-lock.json`.
 - Preserve the intended boundary: Reasoner handles long-running delegation and
   streamed progress; Gateway remains the orchestrator.
 - When adding implementation, include cancellation, process-boundary, and
   protocol-shape tests early.
-- Add tests and restore the TypeScript build gate once real source files exist
-  under `reasoner/src/`.
-
-Verification today:
-
-```sh
-cd reasoner
-npm ci
-npm test --if-present
-```
-
-When Reasoner has authored TypeScript sources, PRs should also pass:
-
-```sh
-cd reasoner
-npm run build
-```
+- Add a package, lockfile, tests, and a TypeScript build gate with the service
+  implementation. An empty package or skipped test command is not validation.
 
 ## Proto Changes
 
@@ -187,13 +175,11 @@ components.
 
 Quality guarantees:
 
-- Do not reuse field numbers.
-- Do not rename, remove, or change the meaning of fields without documenting the
-  migration.
-- Prefer additive changes for backwards compatibility.
+- Change field names, numbers, and shapes directly when the contract needs it.
+  There are no published wire or persisted-data compatibility obligations.
+- Update every affected producer, consumer, test, and specification in the same
+  change. Do not retain obsolete fields or reserve them solely for compatibility.
 - Run linting and generation after proto edits.
-- Breaking changes must be explicit in the PR and should use the
-  `proto-breaking-change` label in GitHub.
 
 Verification:
 

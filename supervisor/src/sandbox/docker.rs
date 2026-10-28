@@ -12,7 +12,7 @@
 //!
 //! Every container is labeled so orphans from a hard crash can be reaped:
 //!   `kaguya.sandbox=1`                    — all Kaguya sandbox containers
-//!   `kaguya.sandbox.instance=<uuid>`      — this Supervisor process only
+//!   `kaguya.sandbox.supervisor_run=<uuid>` — this Supervisor process only
 //! Graceful `shutdown()` sweeps this run's label; `make sandbox-clean`
 //! reaps the global label after a crash.
 
@@ -44,8 +44,7 @@ pub struct DockerBackend {
     pids: u64,
     cpus: f64,
     network: bool,
-    /// Per-Supervisor-run label value. The persisted Docker label retains its
-    /// legacy name for cleanup compatibility.
+    /// Unique label value for this Supervisor process lifetime.
     supervisor_run_id: String,
     state: Mutex<DockerState>,
 }
@@ -98,7 +97,10 @@ impl DockerBackend {
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
             format!("--label={LABEL_ALL}"),
-            format!("--label=kaguya.sandbox.instance={}", self.supervisor_run_id),
+            format!(
+                "--label=kaguya.sandbox.supervisor_run={}",
+                self.supervisor_run_id
+            ),
             format!("--memory={}m", self.mem_mb),
             format!("--memory-swap={}m", self.mem_mb), // == memory ⇒ swap disabled
             format!("--pids-limit={}", self.pids),
@@ -139,7 +141,10 @@ impl DockerBackend {
 
     /// Force-remove containers lost between `docker run` and state insertion.
     async fn reap_supervisor_run(&self) {
-        let filter = format!("label=kaguya.sandbox.instance={}", self.supervisor_run_id);
+        let filter = format!(
+            "label=kaguya.sandbox.supervisor_run={}",
+            self.supervisor_run_id
+        );
         let out = Command::new(&self.docker_cli)
             .args(["ps", "-aq", "--filter", &filter])
             .output()
@@ -218,6 +223,7 @@ impl SandboxBackend for DockerBackend {
             Some(req.code.clone()),
             backstop,
             req.max_output_bytes,
+            || {},
         )
         .await;
         if upload.exit_code != 0 {
@@ -242,7 +248,7 @@ impl SandboxBackend for DockerBackend {
         };
 
         // Outer backstop in case docker itself hangs.
-        let mut r = run_spawned(child, req.stdin, backstop, req.max_output_bytes).await;
+        let mut r = run_spawned(child, req.stdin, backstop, req.max_output_bytes, || {}).await;
         if r.exit_code == 124 {
             // coreutils `timeout` ⇒ timed out
             r.timed_out = true;

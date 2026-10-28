@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::deployment::{resolve_path, DeploymentOptions, DeploymentSelection};
+use crate::deployment::{resolve_path, DeploymentSelection};
 use crate::process::{ManagedProcessRestartPolicy, ManagedProcessSpec};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -41,6 +41,7 @@ struct RuntimeConfigFile {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct RuntimeProfile {
     #[serde(default)]
     pub processes: BTreeMap<String, ProcessSpec>,
@@ -48,6 +49,7 @@ struct RuntimeProfile {
 
 /// Declarative specification for a single process in the runtime topology.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessSpec {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -68,6 +70,8 @@ pub struct ProcessSpec {
     #[serde(default)]
     pub provides: Vec<String>,
     #[serde(default)]
+    pub capabilities: BTreeMap<String, CapabilitySpec>,
+    #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub endpoints: BTreeMap<String, String>,
@@ -77,6 +81,16 @@ pub struct ProcessSpec {
     pub max_restarts: Option<u32>,
     #[serde(default)]
     pub restart_window_secs: Option<u64>,
+}
+
+/// Gateway interprets these overrides; Supervisor validates their shape as
+/// part of the shared deployment file.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitySpec {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub criticality: Option<Criticality>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -104,14 +118,6 @@ pub enum RestartPolicy {
 }
 
 impl RuntimeConfig {
-    pub fn load_discover() -> anyhow::Result<ResolvedRuntimeConfig> {
-        let selection = DeploymentSelection::discover(DeploymentOptions {
-            runtime_config: None,
-            profile: None,
-        })?;
-        Self::load_selected(&selection)
-    }
-
     pub fn load_selected(selection: &DeploymentSelection) -> anyhow::Result<ResolvedRuntimeConfig> {
         let content = std::fs::read_to_string(&selection.runtime_config)?;
         let mut config = RuntimeConfigFile::parse(&content, selection.profile.clone())?;
@@ -146,7 +152,6 @@ impl RuntimeConfig {
                     .insert("KAGUYA_RUNTIME_PROFILE".into(), profile.clone());
             }
         }
-        config.sandbox.workspace_root = resolve_path(&base_dir, &config.sandbox.workspace_root)?;
         Ok(ResolvedRuntimeConfig { config, base_dir })
     }
 
@@ -316,6 +321,7 @@ pub enum SandboxModeKind {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
     #[serde(default = "sandbox_enabled")]
     pub enabled: bool,
@@ -323,8 +329,6 @@ pub struct SandboxConfig {
     pub backend: SandboxBackendKind,
     #[serde(default)]
     pub mode: SandboxModeKind,
-    #[serde(default = "sandbox_workspace_root")]
-    pub workspace_root: PathBuf,
     #[serde(default = "sandbox_timeout")]
     pub default_timeout_secs: u64,
     #[serde(default = "sandbox_output")]
@@ -347,10 +351,6 @@ pub struct SandboxConfig {
 
 fn sandbox_enabled() -> bool {
     true
-}
-
-fn sandbox_workspace_root() -> PathBuf {
-    PathBuf::from("..")
 }
 
 fn sandbox_timeout() -> u64 {
@@ -387,7 +387,6 @@ impl Default for SandboxConfig {
             enabled: sandbox_enabled(),
             backend: SandboxBackendKind::default(),
             mode: SandboxModeKind::default(),
-            workspace_root: sandbox_workspace_root(),
             default_timeout_secs: sandbox_timeout(),
             max_output_bytes: sandbox_output(),
             image: sandbox_image(),
@@ -489,6 +488,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_capability_overrides_are_validated_with_process_settings() {
+        let config = RuntimeConfigFile::parse(
+            "[processes.voice_stack.capabilities.listener]\nenabled = false\ncriticality = 'optional'\n",
+            None,
+        ).unwrap();
+        assert!(!config.processes["voice_stack"].capabilities["listener"].enabled);
+        for content in [
+            "[processes.voice_stack]\nstale_setting = true\n",
+            "[processes.voice_stack.capabilities.listener]\nstale_setting = true\n",
+            "[sandbox]\nworkspace_root = '../old-workspace'\n",
+        ] {
+            assert!(RuntimeConfigFile::parse(content, None).is_err());
+        }
+    }
+
+    #[test]
     fn selected_deployment_is_absolute_and_authoritative_for_children() {
         let root = std::env::temp_dir().join(format!(
             "kaguya selected config {} with spaces",
@@ -505,8 +520,6 @@ mod tests {
             [paths]
             mode = "portable"
             portable_root = "instance data"
-            [sandbox]
-            workspace_root = "scratch/../sandbox work"
             [profiles.app.processes.gateway]
             cwd = "gateway work"
             [profiles.app.processes.gateway.env]
@@ -532,10 +545,6 @@ mod tests {
         assert_eq!(resolved.base_dir, selected_root);
         assert_eq!(resolved.config.profile.as_deref(), Some("standalone"));
         assert_eq!(gateway.cwd, Some(selected_root.join("standalone work")));
-        assert_eq!(
-            resolved.config.sandbox.workspace_root,
-            selected_root.join("sandbox work")
-        );
         assert_eq!(
             gateway.resolved_env()["KAGUYA_RUNTIME_CONFIG"],
             selection.runtime_config.to_str().unwrap()
@@ -619,16 +628,11 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("gateway.toml"), "").unwrap();
         let runtime = root.join("deployment.toml");
-        for (cwd, workspace_root) in [
-            (r"C:relative", "workspace"),
-            (r"\root-relative", "workspace"),
-            ("gateway", r"C:relative"),
-            ("gateway", r"\root-relative"),
-        ] {
+        for cwd in [r"C:relative", r"\root-relative"] {
             std::fs::write(
                 &runtime,
                 format!(
-                    "gateway_settings = 'gateway.toml'\n[paths]\nmode = 'portable'\nportable_root = 'data'\n[sandbox]\nworkspace_root = '{workspace_root}'\n[processes.gateway]\ncwd = '{cwd}'\n"
+                    "gateway_settings = 'gateway.toml'\n[paths]\nmode = 'portable'\nportable_root = 'data'\n[processes.gateway]\ncwd = '{cwd}'\n"
                 ),
             )
             .unwrap();
@@ -725,7 +729,6 @@ mod tests {
             enabled = true
             backend = "docker"
             mode = "hosted"
-            workspace_root = "../workspace"
             pool_size = 2
         "#;
 
@@ -733,7 +736,6 @@ mod tests {
 
         assert_eq!(config.sandbox.backend, SandboxBackendKind::Docker);
         assert_eq!(config.sandbox.mode, SandboxModeKind::Hosted);
-        assert_eq!(config.sandbox.workspace_root, PathBuf::from("../workspace"));
         assert_eq!(config.sandbox.pool_size, 2);
     }
 

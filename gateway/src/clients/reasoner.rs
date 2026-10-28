@@ -1,4 +1,4 @@
-//! Reasoner Manager — adapted for new Delegate/Interrupt/Telemetry proto.
+//! Scoped Reasoner delegation, cancellation, and failure reporting.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,11 +8,11 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
+use crate::core::types::*;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::reasoner_service_client::ReasonerServiceClient;
 use crate::proto::SessionRef;
-use crate::types::*;
 
 struct Agent {
     task_id: String,
@@ -111,7 +111,15 @@ impl ReasonerManager {
             let maybe_client = match maybe_client {
                 Some(c) => Some(c),
                 None => {
-                    match Self::connect_with_policy(&endpoint, connection.clone(), reconnect).await {
+                    let connected = tokio::select! {
+                        biased;
+                        _ = child.cancelled() => {
+                            agents.write().await.remove(&tid);
+                            return;
+                        }
+                        result = Self::connect_with_policy(&endpoint, connection.clone(), reconnect) => result,
+                    };
+                    match connected {
                         Some(c) => {
                             *client_arc.write().await = Some(c.clone());
                             Some(c)
@@ -121,6 +129,10 @@ impl ReasonerManager {
                 }
             };
 
+            if child.is_cancelled() {
+                agents.write().await.remove(&tid);
+                return;
+            }
             if let Some(mut client) = maybe_client {
                 connection.set_readiness(Readiness::Ready);
                 // Open Delegate bidi stream
@@ -141,12 +153,21 @@ impl ReasonerManager {
                     })
                     .await;
 
-                match client.delegate(outbound).await {
+                let delegated = tokio::select! {
+                    biased;
+                    _ = child.cancelled() => {
+                        agents.write().await.remove(&tid);
+                        return;
+                    }
+                    result = client.delegate(outbound) => result,
+                };
+                match delegated {
                     Ok(resp) => {
                         connection.set_readiness(Readiness::Ready);
                         let mut stream = resp.into_inner();
                         loop {
                             tokio::select! {
+                                biased;
                                 _ = child.cancelled() => {
                                     info!(task_id = %tid, "Reasoner cancelled");
                                     // Send Interrupt
@@ -162,6 +183,16 @@ impl ReasonerManager {
                                 result = stream.message() => {
                                     match result {
                                         Ok(Some(event)) => {
+                                            if event.task_id != tid {
+                                                connection.set_readiness(Readiness::Degraded);
+                                                let _ = p3_tx.send(InputEvent::ReasonerError {
+                                                    instance_id: instance_id.clone(), session_id: session_id.clone(),
+                                                    task_id: tid.clone(),
+                                                    message: "Reasoner response task differs from its stream".into(),
+                                                    code: -1,
+                                                }).await;
+                                                break;
+                                            }
                                             match event.event {
                                                 Some(proto::delegate_output::Event::Started(_)) => {
                                                     info!(task_id = %tid, "Reasoner started");
@@ -200,7 +231,16 @@ impl ReasonerManager {
                                                 None => {}
                                             }
                                         }
-                                        Ok(None) => break,
+                                        Ok(None) => {
+                                            connection.set_readiness(Readiness::Degraded);
+                                            let _ = p3_tx.send(InputEvent::ReasonerError {
+                                                instance_id: instance_id.clone(), session_id: session_id.clone(),
+                                                task_id: tid.clone(),
+                                                message: "Reasoner stream ended without a terminal result".into(),
+                                                code: -1,
+                                            }).await;
+                                            break;
+                                        },
                                         Err(e) => {
                                             connection.set_readiness(Readiness::Degraded);
                                             error!("Reasoner stream error: {e}");
@@ -229,27 +269,15 @@ impl ReasonerManager {
                     }
                 }
             } else {
-                // ── Stub fallback ──
                 connection.set_readiness(Readiness::Degraded);
-                warn!(task_id = %tid, "Reasoner unavailable, using stub");
-                tokio::select! {
-                    _ = child.cancelled() => {}
-                    _ = async {
-                        for i in 1..=3 {
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            let _ = p3_tx.send(InputEvent::ReasonerStep {
-                                instance_id: instance_id.clone(), session_id: session_id.clone(),
-                                task_id: tid.clone(),
-                                description: format!("Step {i}: processing..."),
-                            }).await;
-                        }
-                        let _ = p3_tx.send(InputEvent::ReasonerCompleted {
-                            instance_id: instance_id.clone(), session_id: session_id.clone(),
-                            task_id: tid.clone(),
-                            summary: format!("[stub] Completed: {description}"),
-                        }).await;
-                    } => {}
-                }
+                warn!(task_id = %tid, "Reasoner unavailable after connection attempts");
+                let _ = p3_tx.send(InputEvent::ReasonerError {
+                    instance_id,
+                    session_id,
+                    task_id: tid.clone(),
+                    message: "Reasoner unavailable after connection attempts".into(),
+                    code: -1,
+                }).await;
             }
 
             agents.write().await.remove(&tid);
@@ -332,7 +360,7 @@ mod tests {
     use crate::lifecycle::LifecycleSupervisor;
 
     #[tokio::test]
-    async fn start_degrades_readiness_and_uses_stub_after_policy_exhaustion() {
+    async fn unavailable_reasoner_reports_failure_without_simulated_progress_or_success() {
         let lifecycle = LifecycleSupervisor::new();
         let connection = lifecycle.register_connection("reasoner");
         let reasoner = ReasonerManager::with_reconnect_policy(
@@ -359,18 +387,55 @@ mod tests {
         reasoner
             .start("task-1".into(), "test unavailable reasoner".into(), p3_tx)
             .await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
+        let event = tokio::time::timeout(Duration::from_secs(1), p3_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, InputEvent::ReasonerError { task_id, message, .. }
+            if task_id == "task-1" && message.contains("unavailable"))
+        );
         assert_eq!(connection.readiness(), Readiness::Degraded);
-        assert_eq!(reasoner.active_tasks().await.len(), 1);
-
-        reasoner.cancel_all().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(p3_rx.try_recv().is_err());
+        assert!(
+            p3_rx.recv().await.is_none(),
+            "failure must be the only callback"
+        );
+        assert!(reasoner.active_tasks().await.is_empty());
     }
 
     struct RecordingReasoner {
         calls: mpsc::UnboundedSender<(String, SessionRef, String)>,
+        response_task_id: Option<String>,
+        close_after_step: bool,
+        pending_headers: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_connection_does_not_report_a_stale_failure() {
+        let lifecycle = LifecycleSupervisor::new();
+        let reasoner = ReasonerManager::new(
+            "not a valid uri".into(),
+            lifecycle.spawner(),
+            lifecycle.register_connection("reasoner"),
+            SessionRef {
+                instance_id: Some(proto::InstanceId {
+                    value: uuid::Uuid::new_v4().to_string(),
+                }),
+                session_id: Some(proto::SessionId {
+                    value: uuid::Uuid::new_v4().to_string(),
+                }),
+            },
+        );
+        let (tx, mut rx) = mpsc::channel(2);
+        reasoner
+            .start("task-1".into(), "cancelled request".into(), tx)
+            .await;
+        reasoner.cancel_all().await;
+        assert!(tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(reasoner.active_tasks().await.is_empty());
     }
 
     #[tonic::async_trait]
@@ -382,8 +447,6 @@ mod tests {
             &self,
             request: tonic::Request<tonic::Streaming<proto::DelegateInput>>,
         ) -> Result<tonic::Response<Self::DelegateStream>, tonic::Status> {
-            assert!(!request.metadata().contains_key("x-kaguya-instance-id"));
-            assert!(!request.metadata().contains_key("x-kaguya-session-id"));
             let first = request.into_inner().message().await?.unwrap();
             let Some(proto::delegate_input::Payload::StartTask(task)) = first.payload else {
                 return Err(tonic::Status::invalid_argument(
@@ -396,9 +459,13 @@ mod tests {
             self.calls
                 .send(("delegate".into(), session, task.task_id.clone()))
                 .unwrap();
+            if let Some(gate) = &self.pending_headers {
+                gate.notified().await;
+                return Err(tonic::Status::unavailable("delayed failure"));
+            }
             let (tx, rx) = mpsc::channel(2);
             tx.send(Ok(proto::DelegateOutput {
-                task_id: task.task_id,
+                task_id: self.response_task_id.clone().unwrap_or(task.task_id),
                 timestamp_ms: 0,
                 event: Some(proto::delegate_output::Event::Step(
                     proto::ReasonerIntermediateStep {
@@ -408,10 +475,12 @@ mod tests {
             }))
             .await
             .unwrap();
-            tokio::spawn(async move {
-                std::future::pending::<()>().await;
-                drop(tx);
-            });
+            if !self.close_after_step {
+                tokio::spawn(async move {
+                    std::future::pending::<()>().await;
+                    drop(tx);
+                });
+            }
             Ok(tonic::Response::new(ReceiverStream::new(rx)))
         }
 
@@ -419,8 +488,6 @@ mod tests {
             &self,
             request: tonic::Request<proto::InterruptRequest>,
         ) -> Result<tonic::Response<proto::InterruptAck>, tonic::Status> {
-            assert!(!request.metadata().contains_key("x-kaguya-instance-id"));
-            assert!(!request.metadata().contains_key("x-kaguya-session-id"));
             let request = request.into_inner();
             crate::instance::validate_session_ref(request.session.as_ref())
                 .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
@@ -458,6 +525,9 @@ mod tests {
             tonic::transport::Server::builder()
                 .add_service(ReasonerServiceServer::new(RecordingReasoner {
                     calls: calls_tx,
+                    response_task_id: None,
+                    close_after_step: false,
+                    pending_headers: None,
                 }))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(tcp), token.cancelled())
                 .await
@@ -530,5 +600,88 @@ mod tests {
             .unwrap();
         assert_eq!(cancelled, ("interrupt".into(), session, "task-1".into()));
         shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn malformed_or_incomplete_reasoner_streams_report_failure() {
+        use crate::proto::reasoner_service_server::ReasonerServiceServer;
+        use tokio_stream::wrappers::TcpListenerStream;
+
+        for (response_task_id, cancel_open) in [
+            (None, false),
+            (Some("wrong-task".to_string()), false),
+            (None, true),
+        ] {
+            let wrong_task = response_task_id.is_some();
+            let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = tcp.local_addr().unwrap();
+            let (calls, mut calls_rx) = mpsc::unbounded_channel();
+            let pending_headers = cancel_open.then(|| Arc::new(tokio::sync::Notify::new()));
+            let server_gate = pending_headers.clone();
+            let shutdown = CancellationToken::new();
+            let token = shutdown.clone();
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(ReasonerServiceServer::new(RecordingReasoner {
+                        calls,
+                        response_task_id,
+                        close_after_step: true,
+                        pending_headers: server_gate,
+                    }))
+                    .serve_with_incoming_shutdown(TcpListenerStream::new(tcp), token.cancelled())
+                    .await
+                    .unwrap();
+            });
+            let lifecycle = LifecycleSupervisor::new();
+            let session = SessionRef {
+                instance_id: Some(proto::InstanceId {
+                    value: uuid::Uuid::new_v4().to_string(),
+                }),
+                session_id: Some(proto::SessionId {
+                    value: uuid::Uuid::new_v4().to_string(),
+                }),
+            };
+            let reasoner = ReasonerManager::new(
+                format!("http://{addr}"),
+                lifecycle.spawner(),
+                lifecycle.register_connection("reasoner"),
+                session,
+            );
+            let (tx, mut rx) = mpsc::channel(4);
+            reasoner
+                .start("task-1".into(), "test stream failure".into(), tx)
+                .await;
+            if let Some(gate) = pending_headers {
+                tokio::time::timeout(Duration::from_secs(3), calls_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                reasoner.cancel_all().await;
+                gate.notify_one();
+                assert!(tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                    .await
+                    .unwrap()
+                    .is_none());
+            } else {
+                if !wrong_task {
+                    assert!(matches!(
+                        rx.recv().await.unwrap(),
+                        InputEvent::ReasonerStep { .. }
+                    ));
+                }
+                let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    matches!(event, InputEvent::ReasonerError { task_id, message, .. }
+                if task_id == "task-1" && message.contains(if wrong_task { "differs" } else { "terminal" }))
+                );
+                assert!(rx.recv().await.is_none());
+            }
+            assert!(reasoner.active_tasks().await.is_empty());
+            shutdown.cancel();
+            server.await.unwrap();
+        }
     }
 }

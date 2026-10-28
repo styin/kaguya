@@ -7,7 +7,7 @@ from collections import abc as _abc
 from grpc import aio as _aio
 import abc as _abc_1
 import grpc as _grpc
-import kaguya_pb2 as _kaguya_pb2
+from . import kaguya_pb2 as _kaguya_pb2
 import sys
 import typing as _typing
 
@@ -27,7 +27,7 @@ GRPC_GENERATED_VERSION: str
 GRPC_VERSION: str
 
 class ListenerServiceStub:
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -36,7 +36,7 @@ class ListenerServiceStub:
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
     """
 
     @_typing.overload
@@ -44,11 +44,11 @@ class ListenerServiceStub:
     @_typing.overload
     def __new__(cls, channel: _aio.Channel) -> ListenerServiceAsyncStub: ...
     Stream: _grpc.StreamStreamMultiCallable[_kaguya_pb2.ListenerInput, _kaguya_pb2.ListenerOutput]
-    """Bidi: Gateway sends control signals; Listener streams ASR events."""
+    """Gateway initializes scope, then may send controls; Listener streams ASR events."""
 
 @_typing.type_check_only
 class ListenerServiceAsyncStub(ListenerServiceStub):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -57,15 +57,15 @@ class ListenerServiceAsyncStub(ListenerServiceStub):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
     """
 
     def __init__(self, channel: _aio.Channel) -> None: ...
     Stream: _aio.StreamStreamMultiCallable[_kaguya_pb2.ListenerInput, _kaguya_pb2.ListenerOutput]  # type: ignore[assignment]
-    """Bidi: Gateway sends control signals; Listener streams ASR events."""
+    """Gateway initializes scope, then may send controls; Listener streams ASR events."""
 
 class ListenerServiceServicer(metaclass=_abc_1.ABCMeta):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -74,7 +74,7 @@ class ListenerServiceServicer(metaclass=_abc_1.ABCMeta):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
     """
 
     @_abc_1.abstractmethod
@@ -83,12 +83,12 @@ class ListenerServiceServicer(metaclass=_abc_1.ABCMeta):
         request_iterator: _MaybeAsyncIterator[_kaguya_pb2.ListenerInput],
         context: _ServicerContext,
     ) -> _typing.Union[_abc.Iterator[_kaguya_pb2.ListenerOutput], _abc.AsyncIterator[_kaguya_pb2.ListenerOutput]]:
-        """Bidi: Gateway sends control signals; Listener streams ASR events."""
+        """Gateway initializes scope, then may send controls; Listener streams ASR events."""
 
 def add_ListenerServiceServicer_to_server(servicer: ListenerServiceServicer, server: _typing.Union[_grpc.Server, _aio.Server]) -> None: ...
 
 class TalkerServiceStub:
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
     """
 
@@ -104,7 +104,7 @@ class TalkerServiceStub:
 
 @_typing.type_check_only
 class TalkerServiceAsyncStub(TalkerServiceStub):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
     """
 
@@ -116,7 +116,7 @@ class TalkerServiceAsyncStub(TalkerServiceStub):
     UpdatePersona: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.UpdatePersonaRequest, _kaguya_pb2.PersonaAck]  # type: ignore[assignment]
 
 class TalkerServiceServicer(metaclass=_abc_1.ABCMeta):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
     """
 

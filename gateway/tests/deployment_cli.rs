@@ -36,13 +36,6 @@ impl Fixture {
         fs::create_dir(root.join("workspace")).unwrap();
         fs::write(sources.join("SOUL.md"), "source soul\n").unwrap();
         fs::write(sources.join("IDENTITY.md"), "source persona identity\n").unwrap();
-        let database = rusqlite::Connection::open(sources.join("legacy.db")).unwrap();
-        database
-            .execute_batch(
-                "CREATE TABLE retained(value TEXT); INSERT INTO retained VALUES ('kept');",
-            )
-            .unwrap();
-        drop(database);
         fs::write(
             &settings,
             r#"[server]
@@ -59,7 +52,6 @@ soft_prompt_secs = 1
 follow_up_secs = 2
 context_shift_secs = 3
 [rag]
-db_path = "../init sources/legacy.db"
 top_k = 4
 "#,
         )
@@ -258,10 +250,6 @@ fn diagnostics_are_read_only_and_explicit_selection_wins_over_environment() {
             fixture.sources.join("IDENTITY.md")
         );
         assert_eq!(
-            json_path(&output["initialization_sources"]["rag_db_path"]),
-            fixture.sources.join("legacy.db")
-        );
-        assert_eq!(
             snapshot(&fixture.root),
             before,
             "{operation} must not write files or locks"
@@ -301,6 +289,12 @@ fn init_and_rekey_publish_handoffs_without_rewriting_the_deployment_or_sources()
         initialized["manifest_reference"],
         format!("instances/{instance_id}/instance.toml")
     );
+    assert!(!directory.join("kaguya.db").exists());
+    let database = rusqlite::Connection::open(directory.join("kaguya.db")).unwrap();
+    database
+        .execute_batch("CREATE TABLE retained(value TEXT); INSERT INTO retained VALUES ('kept');")
+        .unwrap();
+    drop(database);
     assert_instance_data(&directory);
     assert_eq!(snapshot(&fixture.sources), source_before);
     assert_eq!(fs::read(&fixture.runtime).unwrap(), root_before);
@@ -454,6 +448,24 @@ fn failed_endpoint_diagnostics_redact_credentials_and_query_values_without_write
             );
             assert_eq!(snapshot(&fixture.root), before);
         }
+    }
+}
+
+#[test]
+fn initialization_diagnostics_reject_removed_or_invalid_settings() {
+    let fixture = Fixture::new();
+    let settings = fs::read_to_string(&fixture.settings).unwrap();
+    for extra in [
+        "db_path = 'old.db'\n",
+        "rrf_k = 0\n",
+        "rrf_k = nan\n",
+        "[runtime]\nprofile = 'ignored'\n",
+    ] {
+        fs::write(&fixture.settings, format!("{settings}{extra}")).unwrap();
+        let before = snapshot(&fixture.root);
+        let output = fixture.invoke("validate-config", &["--for-init"]);
+        assert!(!output.status.success(), "must reject {extra}");
+        assert_eq!(snapshot(&fixture.root), before);
     }
 }
 

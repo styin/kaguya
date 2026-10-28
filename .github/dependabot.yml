@@ -23,8 +23,20 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  - package-ecosystem: cargo
+    directory: /supervisor
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Hong_Kong
+    groups:
+      rust-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
   - package-ecosystem: npm
-    directory: /reasoner
+    directory: /console
     schedule:
       interval: weekly
       day: monday

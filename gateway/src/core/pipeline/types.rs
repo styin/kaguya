@@ -6,9 +6,9 @@
 
 use tokio_util::sync::CancellationToken;
 
+use crate::core::types::DispatchKind;
 use crate::proto;
 use crate::proto::SessionRef;
-use crate::types::DispatchKind;
 
 /// Mutable session state shared between the orchestrator, handlers,
 /// and executor across event loop iterations.
@@ -65,7 +65,7 @@ impl SessionState {
     }
 }
 
-/// A side effect requested by a handler, executed by [`ActionExecutor`].
+/// A side effect requested by a handler, executed by [`ActionExecutor`](super::ActionExecutor).
 ///
 /// One variant per I/O operation. Handlers return `Vec<PipelineAction>`
 /// and never call components directly.
@@ -101,8 +101,6 @@ pub enum PipelineAction {
     SendUserInput {
         text: String,
     },
-    MuteOutput,
-    UnmuteOutput,
 
     // ── History ──
     AppendUserHistory {
@@ -215,25 +213,5 @@ mod tests {
 
         assert!(state.active_silence.is_none());
         assert!(child.is_cancelled());
-    }
-
-    #[test]
-    fn pipeline_action_variants_are_comparable() {
-        // Verify PartialEq works for test assertions.
-        let a = PipelineAction::MuteOutput;
-        let b = PipelineAction::MuteOutput;
-        assert_eq!(a, b);
-
-        let c = PipelineAction::SendSentence {
-            generation_id: "generation-1".into(),
-            text: "hello".into(),
-        };
-        let d = PipelineAction::SendSentence {
-            generation_id: "generation-1".into(),
-            text: "hello".into(),
-        };
-        assert_eq!(c, d);
-
-        assert_ne!(PipelineAction::MuteOutput, PipelineAction::UnmuteOutput,);
     }
 }

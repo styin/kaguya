@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::context;
+use crate::core::context;
+use crate::core::types::{ActiveTask, DispatchKind};
 use crate::proto;
-use crate::types::{ActiveTask, DispatchKind};
 
 use super::types::{PipelineAction, SessionState};
 
@@ -87,7 +87,7 @@ pub fn handle_delegate_request(task_id: &str, description: &str) -> Vec<Pipeline
     }]
 }
 
-/// Record partial spoken text (if any) and unmute output. Called on `BargeInAck`.
+/// Record partial spoken text (if any). Called on `BargeInAck`.
 pub fn handle_barge_in_ack(spoken_text: &str) -> Vec<PipelineAction> {
     let mut actions = Vec::new();
     if !spoken_text.is_empty() {
@@ -95,7 +95,6 @@ pub fn handle_barge_in_ack(spoken_text: &str) -> Vec<PipelineAction> {
             spoken_text: spoken_text.to_string(),
         });
     }
-    actions.push(PipelineAction::UnmuteOutput);
     actions
 }
 
@@ -140,7 +139,6 @@ pub fn handle_response_complete(
     // Reset generation state regardless of interruption.
     state.cancel_active_silence();
     actions.push(PipelineAction::StartSilenceTimers);
-    actions.push(PipelineAction::UnmuteOutput);
     state.cancel_active_gen();
     state.current_dispatch_kind = None;
     state.current_response.clear();
@@ -201,7 +199,6 @@ pub fn handle_user_intent(
     );
 
     state.cancel_active_gen();
-    actions.push(PipelineAction::UnmuteOutput);
     state.current_dispatch_kind = Some(DispatchKind::UserIntent);
     actions.push(PipelineAction::DispatchTalker {
         context: ctx,
@@ -211,10 +208,10 @@ pub fn handle_user_intent(
     actions
 }
 
-/// P2: Barge-in on speech start — cancel silence, interrupt Talker, mute output.
+/// P2: Barge-in on speech start — cancel silence and interrupt Talker playback.
 pub fn handle_vad_speech_start(state: &mut SessionState) -> Vec<PipelineAction> {
     state.cancel_active_silence();
-    vec![PipelineAction::BargeIn, PipelineAction::MuteOutput]
+    vec![PipelineAction::BargeIn]
 }
 
 /// P3: Record a tool result in history and dispatch a continuation to Talker.
@@ -248,7 +245,6 @@ pub fn handle_tool_result(
     );
 
     state.cancel_active_gen();
-    actions.push(PipelineAction::UnmuteOutput);
 
     if talker_ready {
         state.current_dispatch_kind = Some(DispatchKind::ToolResult);
@@ -331,7 +327,6 @@ pub fn handle_reasoner_completed(
     );
 
     state.cancel_active_gen();
-    actions.push(PipelineAction::UnmuteOutput);
     state.current_dispatch_kind = Some(DispatchKind::ReasonerResult);
 
     if talker_ready {
@@ -343,6 +338,39 @@ pub fn handle_reasoner_completed(
         state.current_dispatch_kind = None;
     }
 
+    actions
+}
+
+/// Record a failed delegation and ask Talker to explain its actual failure.
+pub fn handle_reasoner_failed(
+    state: &mut SessionState,
+    failure: proto::ReasonerFailure,
+    talker_ready: bool,
+    history: Vec<proto::ChatMessage>,
+    tools: Vec<proto::ToolDefinition>,
+    active_tasks: &[ActiveTask],
+) -> Vec<PipelineAction> {
+    let mut actions = vec![PipelineAction::AppendToolResultHistory {
+        tool_name: failure.task_id.clone(),
+        content: format!("Task failed ({}): {}", failure.code, failure.message),
+    }];
+    state.cancel_active_gen();
+    state.current_dispatch_kind = None;
+    if talker_ready {
+        state.current_dispatch_kind = Some(DispatchKind::ReasonerFailure);
+        actions.push(PipelineAction::DispatchTalker {
+            context: context::with_reasoner_failure_from_data(
+                &state.scope,
+                &Uuid::new_v4().to_string(),
+                failure,
+                history,
+                &state.last_memory_md,
+                tools,
+                active_tasks,
+            ),
+            kind: DispatchKind::ReasonerFailure,
+        });
+    }
     actions
 }
 
@@ -405,6 +433,28 @@ mod tests {
     }
 
     // ── TalkerOutput handlers ──────────────────────────────────────
+
+    #[test]
+    fn reasoner_failure_is_recorded_and_dispatched_as_failure() {
+        let mut state = fresh_state();
+        let failure = proto::ReasonerFailure {
+            task_id: "task-1".into(),
+            message: "unavailable".into(),
+            code: -1,
+        };
+        let actions =
+            handle_reasoner_failed(&mut state, failure.clone(), true, vec![], vec![], &[]);
+        assert!(
+            matches!(&actions[0], PipelineAction::AppendToolResultHistory { content, .. }
+            if content == "Task failed (-1): unavailable")
+        );
+        assert!(
+            matches!(&actions[1], PipelineAction::DispatchTalker { context, kind }
+            if *kind == DispatchKind::ReasonerFailure
+                && context.trigger == Some(proto::generation_start::Trigger::ReasonerFailure(failure)))
+        );
+        assert!(!state.current_dispatch_kind.unwrap().should_persist_memory());
+    }
 
     #[test]
     fn response_started_clears_response_buffer() {
@@ -495,19 +545,16 @@ mod tests {
         let actions = handle_barge_in_ack("I was say");
         assert_eq!(
             actions,
-            vec![
-                PipelineAction::AppendAssistantPartialHistory {
-                    spoken_text: "I was say".into()
-                },
-                PipelineAction::UnmuteOutput,
-            ]
+            vec![PipelineAction::AppendAssistantPartialHistory {
+                spoken_text: "I was say".into()
+            },]
         );
     }
 
     #[test]
     fn barge_in_ack_skips_partial_when_empty() {
         let actions = handle_barge_in_ack("");
-        assert_eq!(actions, vec![PipelineAction::UnmuteOutput]);
+        assert!(actions.is_empty());
     }
 
     // ── ResponseComplete ───────────────────────────────────────────
@@ -717,15 +764,12 @@ mod tests {
     // ── P2: VAD ────────────────────────────────────────────────────
 
     #[test]
-    fn vad_speech_start_triggers_barge_in_and_mute() {
+    fn vad_speech_start_triggers_barge_in() {
         let mut state = fresh_state();
 
         let actions = handle_vad_speech_start(&mut state);
 
-        assert_eq!(
-            actions,
-            vec![PipelineAction::BargeIn, PipelineAction::MuteOutput]
-        );
+        assert_eq!(actions, vec![PipelineAction::BargeIn]);
     }
 
     #[test]
@@ -1035,8 +1079,7 @@ mod tests {
         //  2: UpdatePersonaIfChanged
         //  3: PrefillCache
         //  4: StartSilenceTimers
-        //  5: UnmuteOutput
-        //  6: SendResponseComplete
+        //  5: SendResponseComplete
         assert!(
             matches!(&actions[0], PipelineAction::AppendAssistantHistory { .. }),
             "action[0] should be AppendAssistantHistory, got {:?}",
@@ -1050,18 +1093,17 @@ mod tests {
         assert_eq!(actions[2], PipelineAction::UpdatePersonaIfChanged);
         assert_eq!(actions[3], PipelineAction::PrefillCache);
         assert_eq!(actions[4], PipelineAction::StartSilenceTimers);
-        assert_eq!(actions[5], PipelineAction::UnmuteOutput);
         assert!(
             matches!(
-                &actions[6],
+                &actions[5],
                 PipelineAction::SendResponseComplete {
                     was_interrupted: false,
                     ..
                 }
             ),
-            "action[6] should be SendResponseComplete"
+            "action[5] should be SendResponseComplete"
         );
-        assert_eq!(actions.len(), 7);
+        assert_eq!(actions.len(), 6);
     }
 
     #[test]

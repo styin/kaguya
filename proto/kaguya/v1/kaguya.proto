@@ -39,7 +39,7 @@ message ToolDefinition {
   string args_schema = 3;
 }
 
-// LISTENER SERVICE — Bidi streaming
+// LISTENER SERVICE — Bidirectional streaming
 // Gateway = client, Listener = server
 //
 // Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -48,29 +48,30 @@ message ToolDefinition {
 // overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
 // HTTP/2 framing adds head-of-line blocking that voice latency can't
 // afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-// `gateway/src/listener.rs`.
+// `gateway/src/clients/listener.rs`.
 
 service ListenerService {
-  // Bidi: Gateway sends control signals; Listener streams ASR events.
+  // Gateway initializes scope, then may send controls; Listener streams ASR events.
   rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
 }
 
 message ListenerInput {
-  // Initialize the stream before controls; audio uses the separate raw socket.
   oneof payload {
-    ListenerInit init = 1;
+    ListenerInit init = 1; // required first, once per stream
     ListenerControl control = 2;
   }
 }
 
-// First message on every Listener stream, before controls or session events.
+// Scope assertion for every Listener subscription.
 message ListenerInit {
   SessionRef session = 1;
 }
 
+// Extension point for Listener lifecycle controls. Reset is declared but
+// currently returns UNIMPLEMENTED; future controls require defined semantics.
 message ListenerControl {
   oneof signal {
-    ListenerReset reset = 1; // clear VAD state on new session
+    ListenerReset reset = 1;
   }
 }
 message ListenerReset {}
@@ -97,7 +98,7 @@ message FinalTranscript {
   float confidence = 2;
 }
 
-// TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+// TALKER SERVICE — Bidi Converse + unary helpers
 // Gateway = client, Talker = server
 
 service TalkerService {
@@ -112,7 +113,7 @@ service TalkerService {
 message TalkerInput {
   oneof payload {
     GenerationStart start = 1; // first message; one generation per RPC
-    BargeInSignal barge_in = 2; // interrupt mid-stream (was separate Prepare RPC)
+    BargeInSignal barge_in = 2; // interrupt mid-stream
   }
 }
 
@@ -145,6 +146,7 @@ message GenerationStart {
     ReasonerResult reasoner_result = 7;
     ReasonerProgress reasoner_progress = 8;
     SilenceTrigger silence = 9;
+    ReasonerFailure reasoner_failure = 10;
   }
 }
 message UserInput {
@@ -162,15 +164,20 @@ message ReasonerProgress {
   string task_id = 1;
   string description = 2;
 }
+message ReasonerFailure {
+  string task_id = 1;
+  string message = 2;
+  int32 code = 3;
+}
 message SilenceTrigger {
   uint64 duration_ms = 1;
 }
 
-// NEW: RAG 检索结果，注入到 context 中
+// Retrieved memories included in the prompt snapshot.
 message RetrievalResult {
   string id = 1;
   string content = 2;
-  string source = 3; // "bm25" | "vector" | "lsp" | "structured"
+  string source = 3; // "bm25" | "vector"
   float score = 4;
 }
 
@@ -185,7 +192,7 @@ message TalkerOutput {
     ToolRequest tool_request = 6;
     DelegateRequest delegate_request = 7;
     ResponseComplete response_complete = 8;
-    BargeInAck barge_in_ack = 9; // NEW: inline response to barge-in
+    BargeInAck barge_in_ack = 9;
   }
 }
 
@@ -250,7 +257,7 @@ service ReasonerService {
 message DelegateInput {
   oneof payload {
     TaskRequest start_task = 1;
-    TaskContext context_update = 2; // NEW: send updated context mid-task
+    TaskContext context_update = 2; // send updated context mid-task
   }
 }
 
@@ -342,6 +349,8 @@ message ControlSignal {
   }
 }
 message StopSignal {}
+
+// Declared for the approval contract; Gateway currently returns UNIMPLEMENTED.
 message ApprovalSignal {
   string context = 1;
 }

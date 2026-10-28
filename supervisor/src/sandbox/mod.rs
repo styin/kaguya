@@ -16,7 +16,6 @@ mod job_object;
 mod native;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 #[cfg(windows)]
 use std::process::Stdio;
 use std::sync::Arc;
@@ -50,10 +49,10 @@ pub enum Language {
 
 impl Language {
     pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().as_str() {
-            "python" | "python3" | "py" => Some(Self::Python),
-            "node" | "javascript" | "js" => Some(Self::Node),
-            "bash" | "sh" | "shell" => Some(Self::Bash),
+        match s {
+            "python" => Some(Self::Python),
+            "node" => Some(Self::Node),
+            "bash" => Some(Self::Bash),
             _ => None,
         }
     }
@@ -98,6 +97,14 @@ pub struct ExecRequest {
     pub stdin: Option<String>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecArguments {
+    language: String,
+    code: String,
+    stdin: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -165,21 +172,27 @@ pub struct SandboxManager {
 }
 
 impl SandboxManager {
-    pub fn from_config(cfg: &SandboxConfig, workspace_root: PathBuf) -> anyhow::Result<Self> {
+    pub fn from_config(cfg: &SandboxConfig) -> anyhow::Result<Self> {
+        if !cfg.enabled {
+            return Ok(Self::disabled());
+        }
         let allowed: Vec<Language> = cfg
             .allowed_languages
             .iter()
-            .filter_map(|s| Language::parse(s))
-            .collect();
+            .map(|language| {
+                Language::parse(language).ok_or_else(|| {
+                    anyhow::anyhow!("unsupported sandbox allowed_languages entry: {language}")
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
 
         let backend: Box<dyn SandboxBackend> = match cfg.backend {
-            SandboxBackendKind::Native => Box::new(native::NativeBackend::new(workspace_root)),
+            SandboxBackendKind::Native => Box::new(native::NativeBackend::new()),
             SandboxBackendKind::Docker => Box::new(docker::DockerBackend::new(cfg)?),
             SandboxBackendKind::Bubblewrap => {
                 #[cfg(unix)]
                 {
-                    Box::new(bubblewrap::BubblewrapBackend::new(workspace_root)?)
-                        as Box<dyn SandboxBackend>
+                    Box::new(bubblewrap::BubblewrapBackend::new()?) as Box<dyn SandboxBackend>
                 }
                 #[cfg(not(unix))]
                 {
@@ -189,12 +202,10 @@ impl SandboxManager {
             SandboxBackendKind::JobObject => {
                 #[cfg(all(windows, feature = "sandbox-jobobject"))]
                 {
-                    Box::new(job_object::JobObjectBackend::new(cfg, workspace_root)?)
-                        as Box<dyn SandboxBackend>
+                    Box::new(job_object::JobObjectBackend::new(cfg)?) as Box<dyn SandboxBackend>
                 }
                 #[cfg(not(all(windows, feature = "sandbox-jobobject")))]
                 {
-                    let _ = workspace_root;
                     anyhow::bail!(
                         "job_object backend requires Windows + `--features sandbox-jobobject`"
                     );
@@ -213,16 +224,6 @@ impl SandboxManager {
                  backend=docker."
             );
         }
-        // A non-empty allow-list that parsed to nothing is almost certainly a
-        // typo; the empty list otherwise means "allow all" (see exec_from_json).
-        if allowed.is_empty() && !cfg.allowed_languages.is_empty() {
-            warn!(
-                "Sandbox: allowed_languages={:?} parsed to zero known languages; \
-                 ALL languages will be permitted. Valid values: python, node, bash.",
-                cfg.allowed_languages
-            );
-        }
-
         info!(
             "Sandbox: backend={} mode={:?} enabled={}",
             backend.name(),
@@ -239,11 +240,11 @@ impl SandboxManager {
         })
     }
 
-    /// Disabled facade used when configuration turns the provider off or
-    /// backend initialization fails. Backend methods remain gated by `enabled`.
+    /// Disabled facade used when configuration turns the provider off.
+    /// Backend methods remain gated by `enabled`.
     pub fn disabled() -> Self {
         Self {
-            backend: Box::new(native::NativeBackend::new(std::env::temp_dir())),
+            backend: Box::new(native::NativeBackend::new()),
             enabled: false,
             default_timeout: Duration::from_secs(30),
             max_output_bytes: 16 * 1024,
@@ -303,16 +304,13 @@ impl SandboxManager {
         if !self.enabled {
             return ExecResult::backend_error("sandbox is disabled").to_tool_json();
         }
-        let v: serde_json::Value = match serde_json::from_str(args_json) {
+        let args: ExecArguments = match serde_json::from_str(args_json) {
             Ok(v) => v,
             Err(e) => {
                 return ExecResult::backend_error(format!("bad args JSON: {e}")).to_tool_json()
             }
         };
-        let lang_s = v
-            .get("language")
-            .and_then(|x| x.as_str())
-            .unwrap_or("python");
+        let lang_s = &args.language;
         let language = match Language::parse(lang_s) {
             Some(l) => l,
             None => {
@@ -324,16 +322,10 @@ impl SandboxManager {
             return ExecResult::backend_error(format!("language not allowed: {lang_s}"))
                 .to_tool_json();
         }
-        let code = match v.get("code").and_then(|x| x.as_str()) {
-            Some(c) => c.to_string(),
-            None => return ExecResult::backend_error("missing 'code'").to_tool_json(),
-        };
-        let stdin = v.get("stdin").and_then(|x| x.as_str()).map(str::to_string);
-
         let req = ExecRequest {
             language,
-            code,
-            stdin,
+            code: args.code,
+            stdin: args.stdin,
             timeout: self.default_timeout,
             max_output_bytes: self.max_output_bytes,
         };
@@ -365,10 +357,6 @@ impl SandboxProvider {
             handles: Arc::new(Mutex::new(HashMap::new())),
             telemetry: None,
         }
-    }
-
-    pub fn disabled() -> Self {
-        Self::new(SandboxManager::disabled())
     }
 
     pub fn with_telemetry(mut self, telemetry: TelemetryHub) -> Self {
@@ -603,14 +591,14 @@ pub(crate) async fn run_spawned(
     program_stdin: Option<String>,
     timeout: Duration,
     cap: usize,
+    on_exit: impl FnOnce(),
 ) -> ExecResult {
-    if let Some(input) = program_stdin {
-        if let Some(mut si) = child.stdin.take() {
-            let _ = si.write_all(input.as_bytes()).await;
+    let stdin = child.stdin.take();
+    let stdin_task = tokio::spawn(async move {
+        if let (Some(input), Some(mut stdin)) = (program_stdin, stdin) {
+            let _ = stdin.write_all(input.as_bytes()).await;
         } // dropped → EOF
-    } else {
-        let _ = child.stdin.take(); // close so stdin-reading programs get EOF
-    }
+    });
 
     let mut so = child.stdout.take();
     let mut se = child.stderr.take();
@@ -628,9 +616,14 @@ pub(crate) async fn run_spawned(
     });
 
     let mut timed_out = false;
+    let mut backend_error = None;
     let exit_code = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status.code().unwrap_or(-1),
-        Ok(Err(e)) => return ExecResult::backend_error(format!("wait failed: {e}")),
+        Ok(Err(e)) => {
+            backend_error = Some(format!("wait failed: {e}"));
+            kill_tree(&mut child).await;
+            -1
+        }
         Err(_) => {
             timed_out = true;
             kill_tree(&mut child).await;
@@ -638,6 +631,10 @@ pub(crate) async fn run_spawned(
             -1
         }
     };
+    stdin_task.abort();
+    let _ = stdin_task.await;
+    // Resource owners can close a job before draining pipes held by descendants.
+    on_exit();
 
     let (out, ot) = collect_reader_task(out_task).await;
     let (err, et) = collect_reader_task(err_task).await;
@@ -647,7 +644,7 @@ pub(crate) async fn run_spawned(
         exit_code,
         timed_out,
         truncated: ot || et,
-        backend_error: None,
+        backend_error,
     }
 }
 
@@ -678,13 +675,18 @@ pub(crate) async fn kill_tree(child: &mut Child) {
         if let Some(pid) = child.id() {
             // taskkill /T walks the parent-child tree by PID — no process
             // group needed, dependency-free.
-            let _ = Command::new("taskkill")
+            let mut command = Command::new("taskkill");
+            command
                 .args(["/F", "/T", "/PID", &pid.to_string()])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
-                .await;
-            return;
+                .kill_on_drop(true);
+            if matches!(
+                tokio::time::timeout(SANDBOX_CLEANUP_GRACE, command.status()).await,
+                Ok(Ok(status)) if status.success()
+            ) {
+                return;
+            }
         }
     }
     #[cfg(unix)]
@@ -704,5 +706,3 @@ pub(crate) async fn kill_tree(child: &mut Child) {
     }
     let _ = child.start_kill();
 }
-
-pub use SandboxBackend as _SandboxBackend; // keep trait importable via module

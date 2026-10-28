@@ -4,7 +4,7 @@
 
 **Components:** Listener Agent, Talker Agent
 **Version:** 0.1.0
-**Updated:** 2026-10-23
+**Updated:** 2026-10-28
 **Audience:** Developers working on the Listener and Talker modules
 
 ---
@@ -25,7 +25,7 @@ The Listener and Talker share a single Python process to avoid GPU context switc
 └───────────────────────────────────────────────────────────────┘
 ```
 
-Both run as persistent `asyncio` tasks. Custom code total: ~700-1150 lines of Python.
+Both run as persistent `asyncio` tasks.
 
 **Current deployment scope:** One Gateway serves one instance and one selected
 session. Its dedicated Supervisor/voice services accept that same fixed pair;
@@ -80,7 +80,7 @@ Both layers run inside the Listener, solving different problems at different tim
 - Fires `vad_speech_start` when voice energy appears.
 - Fires `vad_speech_end` after ~200-300ms of silence.
 - Gates STT processing (faster-whisper only runs on speech-containing frames, saving GPU cycles).
-- Provides immediate state signals to the Gateway for PREPARE dispatch and silence timer cancellation.
+- Provides immediate state signals to the Gateway for inline barge-in and silence timer cancellation.
 
 **Turn detection** answers: "Has the user finished their conversational turn?" Uses richer signals:
 
@@ -91,7 +91,7 @@ Both layers run inside the Listener, solving different problems at different tim
 
 ### 2.4 Turn Detection — Phase 1 (Rule-Based)
 
-Custom turn detection using silence duration and syntactic analysis. Implementation: ~50-100 lines of Python combining silence duration tracking with regex-based syntactic completeness checks on the current STT buffer.
+Custom turn detection using silence duration and syntactic analysis. The implementation combines silence tracking with syntactic completeness checks on the current STT buffer.
 
 - Silence < 300ms: likely mid-sentence pause. Continue accumulating.
 - Silence 300-800ms with incomplete syntax (no terminal punctuation, dangling preposition, open clause): likely still speaking. Wait.
@@ -100,7 +100,7 @@ Custom turn detection using silence duration and syntactic analysis. Implementat
 
 Thresholds are configurable per deployment environment.
 
-Phase 2 replaces rule-based thresholds with a learned turn detection model (e.g., LiveKit's open-weights model: 85% true positive, 97% true negative for end-of-turn).
+A learned turn detector remains a candidate for future evaluation (REF-004). No provider accuracy figure is a Kaguya acceptance result.
 
 ### 2.5 Example Event Flow
 
@@ -130,7 +130,7 @@ Gateway Input Stream (resulting events):
 14:30:02.400  final_transcript: "Can you check the Goedel..."  [P1]  ← turn detected
 ```
 
-The Gateway uses `vad_speech_start/end` for PREPARE signal dispatch and silence timer cancellation. It uses `partial_transcript` for speculative prefill (Phase 2). It uses `final_transcript` as the trigger to assemble a context package and invoke the Talker.
+The Gateway uses `vad_speech_start/end` for inline barge-in and silence timer cancellation. It uses `partial_transcript` for speculative prefill (Phase 2). It uses `final_transcript` as the trigger to assemble a context package and invoke the Talker.
 
 ### 2.6 Why VAD Lives in the Listener (Not in the Transport Layer)
 
@@ -146,24 +146,22 @@ The Listener is built on **RealtimeSTT** (KoljaB/RealtimeSTT).
 - faster-whisper integration for GPU-accelerated streaming transcription.
 - Configurable silence thresholds and recording parameters.
 - Callback-based architecture: `on_vad_detect_start`, `on_vad_detect_stop`, `on_realtime_transcription_update`, `on_transcription_complete`.
-- Wake word detection support (Porcupine, OpenWakeWord) for optional "Hey Kaguya" activation.
 
 RealtimeSTT handles the audio frame → VAD → STT → partial/final transcript pipeline. The Listener wraps RealtimeSTT's callbacks, translating them into gRPC events sent to the Gateway, and adding the custom turn detection logic on top.
 
 - Language: Python.
 - Runs as a persistent `asyncio` task within Process 2 (shared with Talker).
 - Exposes a gRPC server (`ListenerService.Stream`); the Gateway connects as the client. Audio bytes do not flow over gRPC — see §2.9.
-- ~200-300 lines of custom code wrapping RealtimeSTT callbacks + turn detection logic.
 
 ### 2.8 Component Selection (STT + VAD)
 
-| Component       | Selection                              | VRAM     | Key Metric              | Rationale                                                 |
-| --------------- | -------------------------------------- | -------- | ----------------------- | --------------------------------------------------------- |
-| **STT**         | faster-whisper (distil-large-v3, INT8) | ~1 GB    | WER 6-7%, RTF ~0.3×     | Community standard, CTranslate2 backend, streams partials |
-| **VAD**         | Silero VAD                             | CPU only | ~30-50ms onset          | Endpoint-side (ONNX) + Listener-side                      |
-| **Turn detect** | Rule-based (Phase 1)                   | N/A      | Configurable thresholds | LiveKit model (85% TP, 97% TN) for Phase 2                |
+Current defaults use faster-whisper for STT, RealtimeSTT's VAD integration and
+Kaguya's rule-based turn detector. Configuration owns model/device selections
+and timing thresholds. Recognition quality, memory use and endpointing accuracy
+need evaluation on the selected host and speech corpus; no provider benchmark
+is adopted as a Kaguya acceptance result.
 
-Cloud fallback (STT): Deepgram Nova-3.
+Planned cloud fallback (STT): Deepgram Nova-3; no adapter is implemented.
 
 ### 2.9 IPC: Gateway ↔ Listener
 
@@ -171,16 +169,24 @@ The Listener is a gRPC **server**; the Gateway is the client. Audio bytes do not
 
 ```protobuf
 service ListenerService {
-  // Bidi: Gateway pushes control signals; Listener pushes ASR events.
+  // First input establishes scope; later input carries Listener controls.
   rpc Stream(stream ListenerInput) returns (stream ListenerOutput);
 }
 ```
 
-Every stream starts with `ListenerInput.init = ListenerInit { session:
-SessionRef }`. The Listener validates it before sending response headers or
-session events; missing/invalid initialization and repeated initialization fail.
-Only Listener control messages may follow. The Gateway queues Init before
-awaiting stream acceptance, then opens the audio connection.
+The first `ListenerInput` must be `init: ListenerInit { session: SessionRef }`.
+Gateway queues it before awaiting response headers. Listener validates the
+configured scope before accepting the subscription or replacing its prior
+subscriber; missing, invalid or mismatched scope fails. Gateway opens the
+separate audio connection after the subscription is accepted.
+
+Later inputs use `ListenerInput.control`. `ListenerControl` retains a typed
+`reset` variant as an extension point, but reset handling is not implemented:
+a valid reset request terminates the RPC with gRPC `UNIMPLEMENTED`. Empty inputs
+or controls and repeated initialization are invalid. Closing only the request
+side leaves the ASR subscription active; cancellation closes it. Future pause
+and reconfiguration controls can extend the same `oneof` once their semantics
+are defined; they are not currently declared or implemented.
 
 `ListenerOutput` carries `vad_speech_start`, `vad_speech_end`,
 `partial_transcript`, or `final_transcript`; events inherit the validated stream
@@ -218,7 +224,7 @@ not own durable conversation state or load instance data itself.
 - Run streaming LLM inference on the fast-path local model (Qwen3-8B via llama.cpp HTTP).
 - Detect sentence boundaries in the token stream.
 - Post-process LLM output through the soul container.
-- Stream spoken text to TTS for synthesis → audio out to OpenPod (Channel D, via Gateway mux).
+- Stream spoken text to local TTS playback. Endpoint speech transport remains R7 work.
 - Send post-process metadata to the Gateway via gRPC: transcript text, emotion tags, tool requests, delegation requests, response completion signal.
 - Prefill from `PrefillRequest { session, prompt_context }`; prefill has no synthetic generation ID or trigger.
 
@@ -256,10 +262,11 @@ records, and retrieval results. `GenerationStart` adds one of:
 - `ToolResult { request_id, content }`;
 - `ReasonerResult { task_id, summary }`;
 - `ReasonerProgress { task_id, description }`;
+- `ReasonerFailure { task_id, message, code }`;
 - `SilenceTrigger { duration_ms }`.
 
 A result reference and its content stay together. Tool results consistently use
-`request_id`; Reasoner progress/results use the existing `task_id`. They do not
+`request_id`; Reasoner progress/results/failures use the existing `task_id`. They do not
 introduce new task/run identities. Prompt formatting remains Talker's concern;
 typed progress and silence retain the existing rendered prompt cues.
 
@@ -270,7 +277,7 @@ Talker never reads persona files directly.
 
 ### 3.4 The Soul Container (Post-Processing Middleware)
 
-Between LLM output and TTS synthesis, a deterministic post-processing layer enforces persona consistency and validates structured output. Inspired by Project Airi's "soul container" pattern. Operates on complete sentences after boundary detection — not on individual tokens. Pure function: stateless, deterministic, no LLM calls. ~50-100 lines of Python.
+Between LLM output and TTS synthesis, a deterministic post-processing layer enforces persona consistency and validates structured output. Inspired by Project Airi's "soul container" pattern. Operates on complete sentences after boundary detection — not on individual tokens. Pure function: stateless, deterministic, no LLM calls.
 
 ```
 LLM tokens stream in
@@ -296,7 +303,7 @@ The soul container splits spoken text from action tags. The user hears the natur
 1. Soul container extracts [TOOL:web_fetch("https://...")] from sentence
 2. Spoken text ("Let me check that for you.") → TTS → audio out
 3. Simultaneously: Talker sends tool request to Gateway via gRPC
-4. Gateway dispatches to TypeScript Toolkit
+4. Gateway dispatches to its Rust tool registry
    [LLM generation is now complete — it stopped after emitting the tool tag]
 5. Toolkit executes web_fetch, returns result
 6. Tool result → Input Stream as P3 event → Gateway assembles new context
@@ -321,7 +328,7 @@ Boundary between tool calls and delegation: can the tool complete in under ~2 se
 
 ### 3.7 Sentence Boundary Detection (Custom)
 
-LLM tokens accumulate in a buffer. Flushed to TTS when a sentence-ending pattern is detected: `.`, `?`, `!` followed by a space and uppercase letter (or end-of-generation). Edge cases (abbreviations like "Dr.", decimals like "3.14", URLs) handled by regex. Implementation: ~50-80 lines of Python.
+LLM tokens accumulate in a buffer. Flushed to TTS when a sentence-ending pattern is detected: `.`, `?`, `!` followed by a space and uppercase letter (or end-of-generation). Edge cases (abbreviations like "Dr.", decimals like "3.14", URLs) handled by regex. See [sentence detector](../talker/inference/sentence_detector.py).
 
 Phase 1: sentence-level boundaries for correct TTS intonation. Phase 2: clause-level exploration.
 
@@ -333,15 +340,17 @@ Barge-in is delivered as a `BargeInSignal { session }` on the active `TalkerServ
 
 1. Set the cancel event observed by the LLM streaming loop and the sentence emitter.
 2. Stop RealtimeTTS playback (mid-word if necessary).
-3. Compute the spoken / unspoken split for the in-flight response.
-4. Emit `BargeInAck { spoken_text, unspoken_text }` back on the same Converse stream. Gateway uses `spoken_text` to append only the spoken portion to conversation history, then unmutes audio.
+3. Acknowledge only sentence batches whose playback completed naturally without error; interrupted and queued batches remain unspoken.
+4. Emit `BargeInAck { spoken_text, unspoken_text }` back on the same Converse stream. Gateway uses `spoken_text` to append only the spoken portion to conversation history, using the acknowledged split.
 5. The current Converse stream completes naturally with `TalkerOutput { generation_id, response_complete: { was_interrupted: true } }`.
 
 **IF the Talker is already idle (no active Converse stream):**
 
 1. No-op. The Gateway's `barge_in()` finds no live stream and logs at debug.
 
-Implementation: ~100-150 lines of Python, tracking playback position against the LLM token stream. RealtimeTTS supports playback interruption natively, which simplifies the audio cutoff. Token accounting — knowing exactly which sentence was playing when the barge-in arrived — is the harder part.
+Current accounting acknowledges completed playback batches, so an interrupted
+batch can undercount speech already heard. It does not establish exact word or
+device-latency accounting; those remain live playback acceptance work.
 
 ### 3.9 KV Cache Prefill Strategy
 
@@ -357,7 +366,10 @@ The LLM prompt has two parts: a _stable prefix_ (system prompt + memory + conver
 }
 ```
 
-GPU is idle between turns — this costs nothing. When `final_transcript` arrives, the Talker sends the complete prompt — llama.cpp detects the cached prefix, processes only the user's ~10-50 new tokens, and begins generation almost immediately. Reduces first-token latency from ~200-400ms to ~50-100ms.
+Prefill requests consume provider resources and can overlap TTS or other work.
+Their benefit depends on provider cache behavior and prefix equality. Measure
+first-token/first-sentence latency and contention on the selected deployment; no
+local speedup is established by this specification.
 
 Cache invalidation: if memory context changes between turns (e.g., the post-turn `RagEngine::evaluate_and_store` adds entries that change the synthesized `memory_md`, or a Reasoner completes), the Gateway sends a fresh `UpdatePersona` followed by a new `PrefillCache` call with the updated context.
 
@@ -377,67 +389,61 @@ Each partial extends the cache by a few tokens. When `final_transcript` arrives,
 
 ### 3.10 Talker Egress — What the Talker Sends to the Gateway
 
-```
-Talker post-process produces:
-  → Spoken audio          → stays in Talker → TTS → endpoint (Gateway mux)
-  → Transcript text       → gRPC → Gateway → endpoint display
-  → Emotion tags          → gRPC → Gateway → endpoint display
-  → [TOOL:...] request    → gRPC → Gateway → tool dispatch
-  → [DELEGATE:...] req    → gRPC → Gateway → Reasoner spin-up
-  → Response complete     → gRPC → Gateway (triggers prefix prefill, history append)
-  → partial_response      → gRPC → Gateway on PREPARE (if was mid-speech):
-                             { spoken_text: string, unspoken_text: string }
-                             Gateway appends spoken_text to history only;
-                             unspoken_text is discarded
-```
+| Output | Current destination |
+| --- | --- |
+| Synthesized speech | Voice-service host audio device; browser transport remains R7 |
+| Complete sentence / emotion | Scoped generation output over gRPC, then Console metadata |
+| Tool request | Gateway tool dispatch |
+| Delegation request | Gateway Reasoner client; the service is unimplemented |
+| Response completion | Gateway history/persona/prefill handling |
+| `BargeInAck` | Completed-batch `spoken_text` / remaining `unspoken_text` split for Gateway history |
+
+All semantic outputs carry `TalkerOutput.generation_id`. Audio bytes never enter
+that protobuf envelope.
 
 ### 3.11 Implementation — RealtimeTTS
 
 The Talker's TTS layer is built on **RealtimeTTS** (KoljaB/RealtimeTTS).
 
-- Multiple TTS engine support: Kokoro (primary), Coqui/XTTS, Orpheus, Piper, ElevenLabs, Edge TTS.
-- Streams audio output as it is generated — does not wait for full text before starting synthesis.
-- Built-in sentence boundary detection (used as a baseline; custom detection can override).
-- Playback interruption support for PREPARE signal handling.
-- Engine fallback: automatically switches to alternative TTS engines if the primary encounters errors.
+The current [speaker](../talker/voice/speaker.py) configures Kokoro, queues
+complete sentences, plays on the host device and stops playback on interruption.
+It does not configure multiple engines, automatic provider fallback, or browser
+audio forwarding. Only naturally completed, error-free playback batches are acknowledged.
+Interrupted batches remain unspoken; exact played-word accounting is deferred.
 
-The Talker wraps RealtimeTTS, feeding it complete sentences from the LLM token stream. RealtimeTTS handles TTS inference and audio streaming. Custom code handles the LLM → sentence boundary detection → RealtimeTTS feed pipeline and PREPARE signal token accounting.
-
-- Language: Python. Shares process with Listener for GPU context sharing.
-- LLM: HTTP client to local llama.cpp server (OpenAI-compatible completions API, localhost, ~0.1ms overhead).
-- TTS: RealtimeTTS with Kokoro engine (in-process GPU inference).
-- Exposes the Talker gRPC server; Gateway connects as its client.
-
-Cloud fallback (TTS): ElevenLabs Flash.
+The LLM client uses an HTTP completion endpoint and the Talker exposes its gRPC
+service to Gateway. Language-model and voice settings live in
+[Talker config](../talker/config.py). Cloud TTS adapters remain planned.
 
 ### 3.12 Component Selection (LLM + TTS)
 
-| Component | Selection                 | VRAM    | Key Metric      | Rationale                                             |
-| --------- | ------------------------- | ------- | --------------- | ----------------------------------------------------- |
-| **LLM**   | llama.cpp + Qwen3-8B (Q4) | ~5-6 GB | ~400-600 tok/s  | Best single-user latency, KV cache reuse, GGUF format |
-| **TTS**   | Kokoro-82M                | ~0.5 GB | ~210× real-time | Apache 2.0, sub-0.3s all lengths, HF TTS Arena winner |
+The default LLM is Qwen3-8B via a local completion server; the configured TTS
+engine is Kokoro. Model memory use, token rate and first-audio latency depend on
+the host and configuration. They require measurement; upstream model benchmarks
+are not Kaguya performance guarantees.
 
 ### 3.13 No Pipeline Framework Rationale
 
 The Listener and Talker use **component libraries** (RealtimeSTT, RealtimeTTS) rather than a pipeline orchestration framework (Pipecat, LiveKit Agents, etc.). Rationale: Kaguya's architecture splits the voice pipeline across Listener and Talker with the Gateway as an intermediary — a non-standard topology that pipeline frameworks assume they control end-to-end. Using a framework would require fighting its pipeline model. Component libraries impose no topology; they provide building blocks that fit into Kaguya's conductor architecture.
 
-### 3.14 Custom Code Breakdown
+### 3.14 Implementation Boundaries
 
-| Capability                                 | Implementation                                                     | Effort              |
-| ------------------------------------------ | ------------------------------------------------------------------ | ------------------- |
-| VAD + STT pipeline                         | RealtimeSTT (wraps faster-whisper + Silero VAD)                    | ~200-300 lines      |
-| Turn detection                             | Custom rule-based (silence + syntax), upgradeable to learned model | ~50-100 lines       |
-| LLM → sentence detection → TTS streaming   | Custom async pipeline feeding RealtimeTTS                          | ~200-300 lines      |
-| Soul container (post-processing)           | Tag normalization, validation, interception, vocab enforcement     | ~50-100 lines       |
-| Tool call interception + LLM re-injection  | Non-blocking: extract tags, dispatch, new inference on result      | ~100-200 lines      |
-| PREPARE signal handling + token accounting | Cancel TTS/LLM, track spoken vs. unspoken, report to Gateway       | ~100-150 lines      |
-| **Total**                                  |                                                                    | **~700-1150 lines** |
-
-Reference implementation: KoljaB/RealtimeVoiceChat demonstrates the full Listener + LLM + TTS pipeline with interruption handling in ~400 lines using these same libraries.
+| Responsibility | Source |
+| --- | --- |
+| VAD/STT callbacks and raw audio ingress | [Listener](../talker/voice/listener.py) |
+| Silence/syntax turn detection | [Turn detector](../talker/voice/turn_detector.py) |
+| Generation, cancellation and scoped RPCs | [Talker server](../talker/server.py) |
+| Prompt formatting and token stream | [Inference modules](../talker/inference/) |
+| Sentence/tag normalization | [Soul container](../talker/inference/soul_container.py) |
+| Local TTS and interruption estimate | [Speaker](../talker/voice/speaker.py) |
 
 ---
 
 ## 4. The Reasoner Agent
+
+**Status:** Planned service. Gateway client and protobuf contracts exist, but
+there is no Reasoner runtime or backend adapter. The responsibilities below are
+target behavior for R6.
 
 ### 4.1 Role and Mandate
 
@@ -521,13 +527,13 @@ before persona, speaker, Listener state, or control queues are mutated.
 
 | RPC boundary | Association |
 | --- | --- |
-| Listener `Stream` | First `ListenerInit.session`; subsequent events inherit that scope |
+| Listener `Stream` | First `ListenerInput.init.session`; later inputs are controls and streamed events inherit the fixed scope |
 | Talker `Converse` | First `GenerationStart.session` and `generation_id`; only scoped inline barge-in may follow |
 | `PrefillCache` | `PrefillRequest.session` plus `PromptContext` |
 | `UpdatePersona` | `UpdatePersonaRequest.session` plus cached `PersonaConfig` |
 | Reasoner `Delegate` | Initial `TaskRequest.session`/`task_id`; context updates retain both |
 | Reasoner `Interrupt` / `Telemetry` | Scoped request/subscription; service implementation remains deferred |
-| Gateway `SendControl` | `ControlRequest.session` plus `ControlSignal`; validation precedes P0 dispatch |
+| Gateway `SendControl` | `ControlRequest.session` plus `ControlSignal`; scope validation precedes handling, STOP/SHUTDOWN enter P0, approval returns `UNIMPLEMENTED` |
 
 Converse validates the first message, prompt, and trigger before response headers
 and generation side effects. Each RPC serves one generation; another Start on
@@ -547,7 +553,10 @@ authentication/tracing and multiplexed worker routing remain deferred.
 
 ---
 
-## 6. VRAM Budget (RTX 5070 Ti — 16 GB)
+## 6. Planning VRAM Estimate (16 GB host)
+
+These approximate allocations are sizing assumptions, not recorded measurements
+or a supported hardware guarantee.
 
 | Component                 | VRAM         |
 | ------------------------- | ------------ |
@@ -560,20 +569,14 @@ authentication/tracing and multiplexed worker routing remain deferred.
 
 ---
 
-## 7. Latency Budget
+## 7. Latency Validation
 
-| Stage                                  | Latency        | Notes                                          |
-| -------------------------------------- | -------------- | ---------------------------------------------- |
-| Endpoint VAD onset                     | ~30-50ms       | Silero CPU (optional, at endpoint)             |
-| Network (local)                        | ~1-5ms         | Opus over OpenPod                              |
-| Listener VAD onset                     | ~30-50ms       | Silero in Listener                             |
-| STT partial                            | ~200-300ms     | faster-whisper streaming                       |
-| Prefix prefill (P1)                    | pre-warmed     | System + memory + history cached between turns |
-| Partial prefill (P2)                   | overlapped     | Extends cache during user speech               |
-| LLM first token                        | ~50-100ms      | llama.cpp, warm prefix cache (P1)              |
-| LLM first sentence                     | ~200-500ms     | ~50 tok/s × 10-15 tokens                       |
-| TTS first audio                        | ~50-150ms      | Kokoro                                         |
-| **Total (user stops → Kaguya speaks)** | **~400-700ms** | With prefix prefill (P1)                       |
+End-to-end latency remains an acceptance measurement. Record VAD/STT timing,
+Gateway dispatch, LLM first sentence, synthesis and actual playback separately.
+Browser playback and a first-audio metric require a future Talker audio transport. Partial
+prefill, OpenPod transport and speculative decoding are deferred; they cannot be
+included in a measured current-path latency budget. See R8 in the
+[implementation plan](implementation-plan-v0.1.0.md).
 
 ---
 
@@ -611,15 +614,15 @@ Audio can be disabled. In text-only mode: Listener is inactive, Talker returns t
 
 ## 10. Phased Delivery
 
-### Phase 1 Deliverables (Agent scope)
+### Phase 1 Scope (implementation and acceptance tracked in R0-R8)
 
 - Listener: RealtimeSTT (faster-whisper + Silero VAD) with custom rule-based turn detection.
 - Talker: Qwen3-8B via llama.cpp + RealtimeTTS with Kokoro, sentence-level streaming.
 - Soul container post-processing (tag normalization, validation, interception).
 - Tool call flow: LLM emits [TOOL:...] → soul container intercepts → gRPC to Gateway → result → new inference round.
-- PREPARE signal handling with token accounting.
+- Inline barge-in handling with completed-batch accounting; playback validation remains open.
 - Always-on prefix KV cache prefill (system + memory + history pre-warmed between turns).
-- Reasoner Adapter for OpenClaw with output interception.
+- Planned Reasoner adapter; backend choice and execution binding remain R6.
 - Persona + memory enforcement via system prompt (`SOUL.md` + `IDENTITY.md` + RAG-synthesized `memory_md` delivered by Gateway via `UpdatePersona`).
 - Text-only fallback mode.
 - Basic Deliberative Narration (acknowledge + wait + summarize).
@@ -628,10 +631,10 @@ Audio can be disabled. In text-only mode: Listener is inactive, Talker returns t
 
 ### Phase 2 Deliverables (Agent scope)
 
-- **OpenPod audio integration** — Listener receives Opus frames via OpenPod (forwarded by Gateway); Talker sends audio to Gateway for OpenPod Channel D mux. No Listener/Talker code change required if Gateway handles the transport switch transparently.
+- **OpenPod audio integration** — Listener receives Opus frames via OpenPod (forwarded by Gateway); Talker sends audio to Gateway for OpenPod Channel D mux. The raw audio contract and missing TTS egress must be specified and implemented before claiming endpoint interchangeability.
 - Partial transcript prefill (word-level KV cache extension on partials).
 - Speculative decoding (clause-level draft generation before final transcript).
-- Two-stage PREPARE signal (soft fade on `vad_speech_start`, hard stop on first `partial_transcript`).
+- Two-stage barge-in (soft fade on `vad_speech_start`, hard stop on first `partial_transcript`).
 - Tool Search Tool for large registries (MCP server scaling).
 - Programmatic Tool Calling (multi-tool scripts).
 - QLoRA-tuned LLM with consistent action tags.

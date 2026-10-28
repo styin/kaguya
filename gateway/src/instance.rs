@@ -169,9 +169,6 @@ pub fn validate_initialization_sources(config: &GatewayConfig) -> Result<()> {
         &config.files.identity_path,
         "initial persona IDENTITY.md source",
     )?;
-    if config.rag.db_path.try_exists()? {
-        readable_file(&config.rag.db_path, "initial RAG source")?;
-    }
     Ok(())
 }
 
@@ -229,12 +226,14 @@ fn create_instance(
     identity: InstanceIdentity,
     soul: &Path,
     persona: &Path,
-    db: &Path,
+    db: Option<&Path>,
 ) -> Result<(InstanceIdentity, PathBuf)> {
     readable_file(soul, "persona SOUL.md source")?;
     readable_file(persona, "persona IDENTITY.md source")?;
-    if db.try_exists()? {
-        readable_file(db, "RAG snapshot source")?;
+    if let Some(db) = db {
+        if db.try_exists()? {
+            readable_file(db, "RAG snapshot source")?;
+        }
     }
     let directory = selection
         .portable_root
@@ -251,7 +250,9 @@ fn create_instance(
         .context("new instance directory already exists or cannot be created")?;
     fs::copy(soul, &paths.soul)?;
     fs::copy(persona, &paths.persona_identity)?;
-    copy_db(db, &paths.rag_db)?;
+    if let Some(db) = db {
+        copy_db(db, &paths.rag_db)?;
+    }
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -280,7 +281,7 @@ pub fn init_instance(
         InstanceIdentity::new(),
         &config.files.soul_path,
         &config.files.identity_path,
-        &config.rag.db_path,
+        None,
     )
 }
 
@@ -291,7 +292,7 @@ pub fn rekey_instance(selection: &DeploymentSelection) -> Result<(InstanceIdenti
         InstanceIdentity::new(),
         &source.paths.soul,
         &source.paths.persona_identity,
-        &source.paths.rag_db,
+        Some(&source.paths.rag_db),
     )
 }
 
@@ -373,13 +374,6 @@ mod tests {
         let mut config = GatewayConfig::default();
         config.files.soul_path = root.join("soul.md");
         config.files.identity_path = root.join("persona.md");
-        config.rag.db_path = root.join("source.db");
-        let db = rusqlite::Connection::open(&config.rag.db_path).unwrap();
-        db.execute_batch(
-            "CREATE TABLE retained (value TEXT); INSERT INTO retained VALUES ('preserved');",
-        )
-        .unwrap();
-        drop(db);
         let selection = deployment(&root, None);
         assert!(validate_selection(&selection, true).unwrap().is_none());
         assert!(load_required(&selection).is_err());
@@ -387,6 +381,16 @@ mod tests {
         let (identity, manifest) = init_instance(&selection, &config).unwrap();
         let (loaded, paths) = inspect(&manifest).unwrap();
         assert_eq!(loaded, identity);
+        assert!(
+            !paths.rag_db.exists(),
+            "initialization starts without old data"
+        );
+        let db = rusqlite::Connection::open(&paths.rag_db).unwrap();
+        db.execute_batch(
+            "CREATE TABLE retained (value TEXT); INSERT INTO retained VALUES ('preserved');",
+        )
+        .unwrap();
+        drop(db);
         assert_eq!(paths.root, manifest.parent().unwrap());
         assert!(!paths.root.join("owner.toml").exists());
         assert!(!paths.root.join("instances").exists());

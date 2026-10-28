@@ -64,8 +64,8 @@ pub fn router(app: SupervisorApp) -> Router {
         .with_state(app)
 }
 
-// HTTP keeps its existing flat camelCase contract. Internal owners and gRPC
-// control use the generated protobuf object directly.
+// HTTP uses flat camelCase IDs. Internal owners and gRPC control use the
+// generated protobuf object directly.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BindSessionRequest {
@@ -368,6 +368,7 @@ mod tests {
             },
             base_dir: ".".into(),
         })
+        .unwrap()
     }
 
     #[tokio::test]
@@ -419,7 +420,7 @@ mod tests {
         assert_eq!(
             bound.json::<serde_json::Value>().await.unwrap(),
             binding,
-            "HTTP binding response stays flat camelCase despite generated internal IDs"
+            "HTTP binding response uses flat camelCase IDs"
         );
         let other_instance = uuid::Uuid::new_v4().to_string();
         let rejected_bind = client
@@ -509,7 +510,7 @@ mod tests {
     async fn logs_snapshot_exposes_normalized_entries() {
         let app = test_app();
         app.logs().push(
-            "talker_standalone",
+            "voice_stack",
             "stderr",
             "2026-08-15 10:00:00 [voice.listener] WARNING: microphone unavailable",
         );

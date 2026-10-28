@@ -27,7 +27,7 @@ from inference.soul_container import (
 from inference.soul_container import (
     process as soul_process,
 )
-from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
+from proto import kaguya_pb2, kaguya_pb2_grpc
 
 if TYPE_CHECKING:
     # `Speaker` transitively imports RealtimeTTS, which the CI test environment
@@ -54,7 +54,7 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         self._binding = binding
 
     # ──────────────────────────────────────────
-    # Converse — bidi streaming, replaces ProcessPrompt + Prepare
+    # Converse — one generation with inline interruption
     # ──────────────────────────────────────────
 
     async def Converse(
@@ -178,6 +178,7 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                         was_interrupted = True
                         break
 
+            was_interrupted = was_interrupted or cancel_event.is_set()
             if not was_interrupted:
                 remainder = detector.flush()
                 if remainder and sentence_count < self._config.max_response_sentences:
@@ -240,17 +241,33 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         return kaguya_pb2.PersonaAck()
 
     async def close(self) -> None:
+        self._speaker.stop()
         await self._llm.close()
 
 
-async def _validate_prompt_context(prompt, context) -> None:
+async def _validate_prompt_context(
+    prompt: kaguya_pb2.PromptContext, context: grpc.aio.ServicerContext
+) -> None:
+    valid_roles = {
+        kaguya_pb2.ROLE_SYSTEM,
+        kaguya_pb2.ROLE_USER,
+        kaguya_pb2.ROLE_ASSISTANT,
+        kaguya_pb2.ROLE_TOOL,
+    }
+    if any(message.role not in valid_roles for message in prompt.history):
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "history requires a supported message role",
+        )
     if any(not task.task_id.strip() for task in prompt.active_tasks):
         await context.abort(
             grpc.StatusCode.INVALID_ARGUMENT, "active task requires task_id"
         )
 
 
-async def _validate_generation_start(start, context) -> None:
+async def _validate_generation_start(
+    start: kaguya_pb2.GenerationStart, context: grpc.aio.ServicerContext
+) -> None:
     if not start.generation_id.strip():
         await context.abort(
             grpc.StatusCode.INVALID_ARGUMENT, "GenerationStart requires generation_id"
@@ -276,6 +293,10 @@ async def _validate_generation_start(start, context) -> None:
     if which == "reasoner_progress" and not start.reasoner_progress.task_id.strip():
         await context.abort(
             grpc.StatusCode.INVALID_ARGUMENT, "Reasoner progress requires task_id"
+        )
+    if which == "reasoner_failure" and not start.reasoner_failure.task_id.strip():
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "Reasoner failure requires task_id"
         )
 
 

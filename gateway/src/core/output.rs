@@ -1,92 +1,77 @@
 //! Output Management
 //!
-//! Controls audio and metadata forwarding of the Talker to the Endpoint.
-//! Sends audio data and metadata events (like sentences and emotions) via WebSocket for rendering.
+//! Projects Talker semantic events into endpoint metadata.
+//! Talker owns local audio playback; Gateway does not receive TTS bytes.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
-use crate::types::MetadataEvent;
+use crate::core::types::MetadataEvent;
 
 pub struct OutputManager {
-    audio_muted: AtomicBool,
-    audio_tx: mpsc::Sender<bytes::Bytes>,
-    metadata_tx: mpsc::Sender<MetadataEvent>,
+    metadata_tx: broadcast::Sender<MetadataEvent>,
 }
 
 impl OutputManager {
-    pub fn new(
-        audio_tx: mpsc::Sender<bytes::Bytes>,
-        metadata_tx: mpsc::Sender<MetadataEvent>,
-    ) -> Self {
-        Self {
-            audio_muted: AtomicBool::new(false),
-            audio_tx,
-            metadata_tx,
+    pub fn new(metadata_tx: broadcast::Sender<MetadataEvent>) -> Self {
+        Self { metadata_tx }
+    }
+
+    pub fn send_sentence(&self, generation_id: &str, text: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "sentence".into(),
+            data: serde_json::json!({ "generation_id": generation_id, "text": text }),
+        });
+    }
+
+    pub fn send_emotion(&self, generation_id: &str, emotion: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "emotion".into(),
+            data: serde_json::json!({ "generation_id": generation_id, "emotion": emotion }),
+        });
+    }
+
+    pub fn send_response_started(&self, generation_id: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "response_started".into(),
+            data: serde_json::json!({ "generation_id": generation_id }),
+        });
+    }
+
+    pub fn send_response_complete(&self, generation_id: &str, interrupted: bool) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "response_complete".into(),
+            data: serde_json::json!({ "generation_id": generation_id, "interrupted": interrupted }),
+        });
+    }
+
+    pub fn send_user_input(&self, text: &str) {
+        let _ = self.metadata_tx.send(MetadataEvent {
+            event_type: "user_input".into(),
+            data: serde_json::json!({ "text": text }),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_without_or_with_a_slow_console_never_backpressures_output() {
+        let (tx, _) = broadcast::channel(2);
+        let output = OutputManager::new(tx.clone());
+        for _ in 0..1024 {
+            output.send_sentence("generation-1", "no console connected");
         }
-    }
-
-    pub fn mute_audio(&self) {
-        self.audio_muted.store(true, Ordering::SeqCst);
-    }
-
-    pub fn unmute_audio(&self) {
-        self.audio_muted.store(false, Ordering::SeqCst);
-    }
-
-    pub async fn send_audio(&self, data: bytes::Bytes) {
-        if !self.audio_muted.load(Ordering::SeqCst) {
-            let _ = self.audio_tx.send(data).await;
+        let mut rx = tx.subscribe();
+        for _ in 0..4 {
+            output.send_sentence("generation-2", "slow console");
         }
-    }
-
-    pub async fn send_sentence(&self, generation_id: &str, text: &str) {
-        let _ = self
-            .metadata_tx
-            .send(MetadataEvent {
-                event_type: "sentence".into(),
-                data: serde_json::json!({ "generation_id": generation_id, "text": text }),
-            })
-            .await;
-    }
-
-    pub async fn send_emotion(&self, generation_id: &str, emotion: &str) {
-        let _ = self
-            .metadata_tx
-            .send(MetadataEvent {
-                event_type: "emotion".into(),
-                data: serde_json::json!({ "generation_id": generation_id, "emotion": emotion }),
-            })
-            .await;
-    }
-
-    pub async fn send_response_started(&self, generation_id: &str) {
-        let _ = self
-            .metadata_tx
-            .send(MetadataEvent {
-                event_type: "response_started".into(),
-                data: serde_json::json!({ "generation_id": generation_id }),
-            })
-            .await;
-    }
-
-    pub async fn send_response_complete(&self, generation_id: &str, interrupted: bool) {
-        let _ = self
-            .metadata_tx
-            .send(MetadataEvent {
-                event_type: "response_complete".into(),
-                data: serde_json::json!({ "generation_id": generation_id, "interrupted": interrupted }),
-            })
-            .await;
-    }
-
-    pub async fn send_user_input(&self, text: &str) {
-        let _ = self
-            .metadata_tx
-            .send(MetadataEvent {
-                event_type: "user_input".into(),
-                data: serde_json::json!({ "text": text }),
-            })
-            .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(2))
+        ));
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.data["generation_id"], "generation-2");
     }
 }

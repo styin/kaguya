@@ -6,12 +6,12 @@
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::input_stream::InputReceivers;
+use crate::core::input_stream::InputReceivers;
+use crate::core::narration::NarrationFilter;
+use crate::core::types::{ControlSignal, InputEvent};
 use crate::lifecycle::{LifecycleSupervisor, ShutdownReason};
-use crate::narration::NarrationFilter;
 use crate::proto;
 use crate::telemetry::TelemetryClient;
-use crate::types::{ControlSignal, InputEvent};
 
 use super::{handlers, PipelineComponents, SessionState};
 
@@ -28,7 +28,6 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let talker = pipeline.talker;
     let history = pipeline.history;
-    let output = pipeline.output;
     let tools = pipeline.tools;
     let reasoner = pipeline.reasoner;
     let rag = pipeline.rag;
@@ -53,7 +52,6 @@ pub async fn run(
                         session.cancel_active_gen();
                         session.cancel_active_silence();
                         reasoner.cancel_all().await;
-                        output.mute_audio();
                         talker.barge_in().await;
                     }
                     ControlSignal::Shutdown => {
@@ -63,9 +61,6 @@ pub async fn run(
                         reasoner.cancel_all().await;
                         lifecycle.shutdown(ShutdownReason::ControlShutdown).await;
                         break;
-                    }
-                    ControlSignal::Approval { context } => {
-                        info!(ctx = %context, "P0: APPROVAL (Phase 2)");
                     }
                 }
             }
@@ -252,13 +247,19 @@ pub async fn run(
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerError { instance_id, session_id, task_id, message, .. } => {
+                    InputEvent::ReasonerError { instance_id, session_id, task_id, message, code } => {
                         if instance_id != expected_instance_id || session_id != expected_session_id {
                             warn!(%instance_id, %session_id, %task_id, "dropping Reasoner error with mismatched originating instance/session correlation");
                             continue;
                         }
                         warn!(task_id = %task_id, err = %message, "P3: reasoner error");
-                        continue;
+                        let recent = history.recent().await;
+                        let tool_defs = tools.definitions();
+                        let tasks = reasoner.active_tasks().await;
+                        handlers::handle_reasoner_failed(
+                            &mut session, proto::ReasonerFailure { task_id, message, code },
+                            talker.is_ready(), recent, tool_defs, &tasks,
+                        )
                     }
                     _ => continue,
                 };

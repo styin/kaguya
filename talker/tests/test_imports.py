@@ -87,7 +87,7 @@ def test_turn_detector_unconditional_emit_at_800ms():
     # Simulate 900ms silence — above unconditional threshold
     td._vad_stop_ts = time.monotonic() - 0.9
 
-    result = td.on_silence_tick()
+    result = td.on_silence_tick(td.utterance_epoch)
     assert (
         result is None
     )  # buffer is empty — on_silence_tick guards with `not self._buffer`
@@ -99,7 +99,7 @@ def test_turn_detector_unconditional_emit_at_800ms():
     td2.on_vad_stop()
     td2._vad_stop_ts = time.monotonic() - 0.9
 
-    result2 = td2.on_silence_tick()
+    result2 = td2.on_silence_tick(td2.utterance_epoch)
     assert result2 == "I want to go and"
 
 
@@ -111,10 +111,12 @@ def test_opus_decoder_instantiates():
 
 
 def test_proto_stubs_importable():
-    from proto import kaguya_pb2  # type: ignore[import]
+    from proto import kaguya_pb2
 
     # Listener: bidi Stream(ListenerInput) → ListenerOutput
     assert kaguya_pb2.ListenerInput() is not None
+    assert kaguya_pb2.ListenerInit() is not None
+    assert kaguya_pb2.ListenerControl() is not None
     assert kaguya_pb2.ListenerOutput() is not None
 
     # Talker: bidi Converse — TalkerInput.start | barge_in, TalkerOutput.barge_in_ack
@@ -133,48 +135,25 @@ def test_proto_stubs_importable():
     assert kaguya_pb2.InterruptRequest() is not None
 
 
-# ── P0-4: AudioChunk + ListenerInput.audio removed from proto ──
-#
-# Audio flows over a separate raw TCP socket; the proto previously advertised
-# in-band audio (`ListenerInput.audio` / `AudioChunk`) which `ListenerService`
-# silently ignored. Schema must match implementation: the message and the
-# variant are both removed. This is a deliberate breaking proto change;
-# `buf breaking` will flag MESSAGE_NO_DELETE and FIELD_NO_DELETE on the
-# baseline-vs-this comparison — accepted for this PR.
+def test_listener_stream_has_scoped_init_and_control_extension():
+    """Audio uses the raw socket; bidi input carries scope and typed controls."""
+    from proto import kaguya_pb2
 
-
-def test_proto_does_not_export_audiochunk():
-    """AudioChunk message must be removed from the proto schema —
-    audio flows over the raw TCP socket, never gRPC."""
-    from proto import kaguya_pb2  # type: ignore[import]
-
-    assert not hasattr(kaguya_pb2, "AudioChunk"), (
-        "AudioChunk should not exist in the schema; "
-        "audio flows over the raw TCP socket, not gRPC"
-    )
-
-
-def test_listener_input_payload_has_no_audio_field():
-    """ListenerInput's payload oneof must only carry control signals;
-    the `audio` variant must be removed so clients can't send audio over
-    gRPC by mistake."""
-    from proto import kaguya_pb2  # type: ignore[import]
-
-    msg = kaguya_pb2.ListenerInput()
-    payload_field = msg.DESCRIPTOR.oneofs_by_name.get("payload")
-    assert payload_field is not None, "ListenerInput must have a 'payload' oneof"
-    field_names = {f.name for f in payload_field.fields}
-    assert "audio" not in field_names, (
-        f"ListenerInput.payload must not have an 'audio' variant; got {field_names}"
-    )
-    # Sanity: control should still be there.
-    assert "control" in field_names, "ListenerInput.payload.control must remain"
+    assert set(kaguya_pb2.ListenerInit.DESCRIPTOR.fields_by_name) == {"session"}
+    assert set(kaguya_pb2.ListenerInput.DESCRIPTOR.fields_by_name) == {
+        "init",
+        "control",
+    }
+    method = kaguya_pb2.DESCRIPTOR.services_by_name["ListenerService"].methods_by_name[
+        "Stream"
+    ]
+    assert method.client_streaming and method.server_streaming
 
 
 def test_proto_stubs_services_exist():
-    from proto import kaguya_pb2_grpc  # type: ignore[import]
+    from proto import kaguya_pb2_grpc
 
-    # Listener flipped: Gateway is now the client (Stub), Listener is the servicer.
+    # Gateway is the Listener client; the voice process hosts the service.
     assert hasattr(kaguya_pb2_grpc, "ListenerServiceServicer")
     assert hasattr(kaguya_pb2_grpc, "ListenerServiceStub")
     assert hasattr(kaguya_pb2_grpc, "TalkerServiceServicer")

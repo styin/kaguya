@@ -153,7 +153,16 @@ async def test_payload_scope_is_required_before_persona_prefill_or_generation_mu
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid",
-    ["generation-id", "trigger", "prompt", "tool-id", "task-id", "progress-id"],
+    [
+        "generation-id",
+        "trigger",
+        "prompt",
+        "tool-id",
+        "task-id",
+        "progress-id",
+        "failure-id",
+        "role",
+    ],
 )
 async def test_invalid_generation_rejected_before_speaker_reset(
     binding, session_ref, invalid
@@ -180,10 +189,16 @@ async def test_invalid_generation_rejected_before_speaker_reset(
         start.reasoner_result.CopyFrom(
             kaguya_pb2.ReasonerResult(summary="Result without reference")
         )
-    else:
+    elif invalid == "progress-id":
         start.reasoner_progress.CopyFrom(
             kaguya_pb2.ReasonerProgress(description="Progress without reference")
         )
+    elif invalid == "failure-id":
+        start.reasoner_failure.CopyFrom(
+            kaguya_pb2.ReasonerFailure(message="Failure without reference", code=14)
+        )
+    else:
+        start.prompt_context.history.add(content="Missing role")
     server = grpc.aio.server()
     kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(talker, server)
     port = server.add_insecure_port("127.0.0.1:0")

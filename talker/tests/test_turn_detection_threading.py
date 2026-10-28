@@ -17,7 +17,7 @@ def _make_detector(**overrides) -> TurnDetector:
 
 
 # ──────────────────────────────────────────
-# Double-emit race: _emit_lock prevents two threads from emitting
+# Concurrent partial updates and silence ticks emit once
 # ──────────────────────────────────────────
 
 
@@ -37,7 +37,9 @@ def test_concurrent_emit_only_produces_one_result():
         barrier.wait()  # both threads start at the same instant
         results[index] = method()
 
-    t1 = threading.Thread(target=race, args=(0, td.on_silence_tick))
+    t1 = threading.Thread(
+        target=race, args=(0, lambda: td.on_silence_tick(td.utterance_epoch))
+    )
     t2 = threading.Thread(target=race, args=(1, lambda: td.on_partial("Hello there.")))
     t1.start()
     t2.start()
@@ -68,7 +70,13 @@ def test_concurrent_emit_stress():
             barrier.wait()
             results[index] = method()
 
-        t1 = threading.Thread(target=race, args=(0, td.on_silence_tick))
+        t1 = threading.Thread(
+            target=race,
+            args=(
+                0,
+                lambda detector=td: detector.on_silence_tick(detector.utterance_epoch),
+            ),
+        )
         t2 = threading.Thread(
             target=race,
             args=(1, lambda td=td: td.on_partial("Done.")),
@@ -97,8 +105,7 @@ def test_utterance_epoch_increments_on_speech_start():
 
 
 def test_stale_tick_loop_exits_on_utterance_epoch_mismatch():
-    """Simulate what the listener's _silence_tick_loop does:
-    check utterance_epoch before calling on_silence_tick."""
+    """An old tick cannot emit a new utterance, even if its silence is sufficient."""
     td = _make_detector()
 
     # Utterance 1
@@ -110,18 +117,13 @@ def test_stale_tick_loop_exits_on_utterance_epoch_mismatch():
     # Utterance 2 starts before tick fires
     td.on_speech_start()  # utterance_epoch → 2
 
-    # The tick loop from utterance 1 checks utterance_epoch
-    assert td.utterance_epoch != utterance_epoch_at_vad_stop
-    # In the real listener, this causes the tick loop to return without calling
-    # on_silence_tick. Let's verify on_silence_tick would also be safe:
+    # The old loop can race with speech start after its external epoch check.
+    # The detector must validate the epoch inside the same lock as emission.
     td._vad_stop_ts = time.monotonic() - 1.0
     td._buffer = "New text."
-    td.on_silence_tick()
-    # This WOULD emit for the new utterance — but the tick loop never gets here
-    # because it exits on utterance_epoch mismatch first. Still, verify the utterance_epoch
-    # check is the correct guard:
-    assert utterance_epoch_at_vad_stop == 1
-    assert td.utterance_epoch == 2
+    assert td.on_silence_tick(utterance_epoch_at_vad_stop) is None
+    assert not td.has_emitted
+    assert td.on_silence_tick(td.utterance_epoch) == "New text."
 
 
 def test_rapid_vad_cycling_no_stale_state():
@@ -151,7 +153,7 @@ def test_rapid_vad_cycling_no_stale_state():
     assert result == "Second utterance."
 
     # Should not emit again
-    assert td.on_silence_tick() is None
+    assert td.on_silence_tick(td.utterance_epoch) is None
 
 
 # ──────────────────────────────────────────
@@ -167,13 +169,13 @@ def test_on_partial_after_emit_is_noop():
     td._vad_stop_ts = time.monotonic() - 1.0
 
     # First call emits
-    result1 = td.on_silence_tick()
+    result1 = td.on_silence_tick(td.utterance_epoch)
     assert result1 == "Done."
     assert td.has_emitted is True
 
     # Subsequent calls are no-ops
     assert td.on_partial("Updated text.") is None
-    assert td.on_silence_tick() is None
+    assert td.on_silence_tick(td.utterance_epoch) is None
 
     # Buffer should NOT have been updated (check is before assignment)
     assert td._buffer == "Done."
@@ -190,26 +192,4 @@ def test_on_silence_tick_after_emit_is_noop():
     assert result == "Complete sentence."
 
     # Tick should be no-op
-    assert td.on_silence_tick() is None
-
-
-# ──────────────────────────────────────────
-# Lock correctness: _emit_lock doesn't deadlock on re-entry
-# ──────────────────────────────────────────
-
-
-def test_sequential_emit_calls_do_not_deadlock():
-    """Calling _emit multiple times from the same thread should not deadlock."""
-    td = _make_detector()
-    td.on_speech_start()
-    td._buffer = "Test."
-    td.on_vad_stop()
-    td._vad_stop_ts = time.monotonic() - 1.0
-
-    # First call succeeds
-    result1 = td._emit()
-    assert result1 == "Test."
-
-    # Second call returns None (already emitted), does not deadlock
-    result2 = td._emit()
-    assert result2 is None
+    assert td.on_silence_tick(td.utterance_epoch) is None

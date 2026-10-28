@@ -1,13 +1,11 @@
 //! Hybrid RAG Engine — BM25 (FTS5) + incremental vector + RRF.
-//! LSP integration is stale/deferred — see lsp.rs.
 
 pub mod embedder;
-pub mod lsp;
 pub mod ranker;
 pub mod retriever;
 pub mod store;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
@@ -28,8 +26,12 @@ pub struct RagEngine {
 }
 
 impl RagEngine {
-    pub fn new(config: &RagConfig, _workspace_root: PathBuf) -> anyhow::Result<Self> {
-        let store = Arc::new(RagStore::open(&config.db_path)?);
+    pub fn new(config: &RagConfig, db_path: &Path) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.rrf_k.is_finite() && config.rrf_k > 0.0,
+            "rag.rrf_k must be finite and positive"
+        );
+        let store = Arc::new(RagStore::open(db_path)?);
         let embedder = config
             .embedding_url
             .as_ref()
@@ -38,13 +40,15 @@ impl RagEngine {
             Arc::clone(&store),
             embedder.clone(),
             config.top_k,
+            config.rrf_k,
             config.max_chars_per_result,
         );
 
         info!(
-            "RAG engine initialized (embedder={}, top_k={}, max_storage_chars={:?})",
+            "RAG engine initialized (embedder={}, top_k={}, rrf_k={}, max_storage_chars={:?})",
             embedder.is_some(),
             config.top_k,
+            config.rrf_k,
             config.max_storage_chars,
         );
         Ok(Self {
@@ -60,7 +64,7 @@ impl RagEngine {
         self.retriever.retrieve(query).await
     }
 
-    /// Post-turn memory evaluation. Phase-1 placeholder: keyword triggers
+    /// Post-turn memory evaluation. Keyword triggers
     /// produce typed memory entries. Stores full user/assistant content
     /// (only the defensive `max_storage_chars` cap applies); any output-side
     /// budgeting happens at retrieval / export time, not here. To be

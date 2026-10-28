@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { AssistantTurn, AudioEvent, Turn } from "../../types";
-import { firstAudioLatencyMs, turnDurationMs } from "../../store";
+import type { AssistantTurn, Turn } from "../../types";
+import { turnDurationMs } from "../../store";
 
 export function turnKey(t: Turn): string {
   return t.kind === "assistant" ? `assistant:${t.generation_id}` : `user:${t.ts}`;
@@ -14,14 +14,10 @@ export function TurnRow({
   turn,
   selectedKey,
   onSelect,
-  audioEvents,
-  audioInBytes,
 }: {
   turn: Turn;
   selectedKey: string | null;
   onSelect: (key: string | null) => void;
-  audioEvents: AudioEvent[];
-  audioInBytes: number;
 }) {
   const k = turnKey(turn);
   const selected = selectedKey === k;
@@ -29,7 +25,7 @@ export function TurnRow({
   const isUser = turn.kind === "user";
   const streaming = turn.kind === "assistant" && turn.complete_at === null;
   const interrupted = turn.kind === "assistant" && turn.interrupted;
-  const ts = isUser ? turn.ts : (turn as AssistantTurn).started_at;
+  const ts = isUser ? turn.ts : turn.started_at;
 
   const cls =
     "turn-row" +
@@ -57,7 +53,7 @@ export function TurnRow({
         <div className="turn-who">
           <span className="who-name">{isUser ? "User" : "Kaguya"}</span>
           {!isUser && (
-            <span className="turn-id mono">{(turn as AssistantTurn).generation_id.slice(0, 8)}</span>
+            <span className="turn-id mono">{turn.generation_id.slice(0, 8)}</span>
           )}
           <span className="turn-tags">
             {streaming && <span className="tag live">live</span>}
@@ -70,43 +66,27 @@ export function TurnRow({
         </div>
         {!isUser && (
           <AssistantMeta
-            turn={turn as AssistantTurn}
-            audioInBytes={audioInBytes}
-            audioEvents={audioEvents}
+            turn={turn}
           />
         )}
         {isUser && (
-          <div className="turn-meta-mini"><span>{turn.text.length} chars · {(turn as Extract<Turn, { kind: "user" }>).source}</span></div>
+          <div className="turn-meta-mini"><span>{turn.text.length} chars · {turn.source}</span></div>
         )}
       </div>
-      {/*
-        Design has an audio-mini waveform in this slot. Skipped: we keep
-        only byte counts in the audio event ring (`audio_in` events have `bytes`
-        but no PCM payload), so a real waveform would require either
-        keeping audio in memory or new server-side metadata. The audio
-        KB in the meta-mini line above already gives a magnitude.
-      */}
     </div>
   );
 }
 
 function AssistantMeta({
   turn,
-  audioInBytes,
-  audioEvents,
 }: {
   turn: AssistantTurn;
-  audioInBytes: number;
-  audioEvents: AudioEvent[];
 }) {
-  const ttfs = firstAudioLatencyMs(audioEvents, turn);
   const dur = turnDurationMs(turn);
   return (
     <div className="turn-meta-mini">
-      <span>TTFS <b>{ttfs === null ? "—" : `${ttfs}ms`}</b></span>
       <span>dur <b>{dur === null ? "—" : `${(dur / 1000).toFixed(2)}s`}</b></span>
       <span>sent <b>{turn.sentences.length}{turn.complete_at === null ? "…" : ""}</b></span>
-      <span>audio <b>{(audioInBytes / 1024).toFixed(1)} KB</b></span>
       {turn.emotion && <span>emo <b>{turn.emotion}</b></span>}
     </div>
   );

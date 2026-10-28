@@ -16,16 +16,17 @@ max_recent_turns = 50
 soft_prompt_secs   = 3
 follow_up_secs     = 8
 context_shift_secs = 30
-# Disabled until B10 reworks the silence prompt to let the LLM stay silent.
+# Proactive silence responses are disabled in the default deployment.
 # The timers still tick (tier semantics preserved) only the proactive
 # LLM dispatch is suppressed.
 enabled            = false
 
 [rag]
-# Initialization source. Runtime RAG lives with the instance-owned data.
-db_path = "data/kaguya.db"
+# RAG data always lives in the selected instance directory.
 # embedding_url = "http://127.0.0.1:8081"
 top_k = 10
+# Reciprocal-rank fusion tuning; this default is not validated for Kaguya.
+rrf_k = 60.0
 # Defensive cap on stored memory content (chars); content beyond this
 # limit is discarded from the stored memory. Fidelity trade-offs: REF-010.
 max_storage_chars = 4096

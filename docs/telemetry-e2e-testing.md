@@ -16,7 +16,8 @@ Gateway / Supervisor sandbox raw events
         -> GET /api/metrics/snapshot
 ```
 
-The proto `Telemetry` RPC is still a stub for later background context events.
+The proto `Telemetry` RPC describes a planned background-context subscription;
+there is no implementing Reasoner service.
 Do not use it as the Phase 1 telemetry acceptance test.
 
 ## What to verify
@@ -209,7 +210,7 @@ process.resource.sample
 ## Console generation correlation
 
 At WebSocket open, `session_init.data` supplies the scalar `instance_id` and
-`session_id` with no compatibility alias. `response_started` and
+`session_id`. `response_started` and
 `response_complete` identify `generation_id`. Sentence and emotion events also
 carry `data.generation_id`, projected from the outer `TalkerOutput.generation_id`
 after Gateway validates it against the originating Converse stream. Inner

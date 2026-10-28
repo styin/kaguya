@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 import grpc
 
+from proto import kaguya_pb2
+
 AUDIO_MAGIC = b"KAGUYA1"
 
 
@@ -46,7 +48,9 @@ class InstanceSessionBinding:
     def __post_init__(self) -> None:
         validate_identifiers(self.instance_id, self.session_id)
 
-    async def require(self, session, context: grpc.aio.ServicerContext) -> None:
+    async def require(
+        self, session: kaguya_pb2.SessionRef, context: grpc.aio.ServicerContext
+    ) -> None:
         """Validate a protobuf assertion without changing the expected pair."""
         try:
             if not session.HasField("instance_id") or not session.HasField(
@@ -56,7 +60,7 @@ class InstanceSessionBinding:
             requested = validate_identifiers(
                 session.instance_id.value, session.session_id.value
             )
-        except (ValueError, AttributeError, TypeError):
+        except ValueError:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "missing or invalid SessionRef",

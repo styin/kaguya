@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     // Bind the control plane before launching Gateway. Gateway initializes its
     // SandboxClient during boot and must never race the Supervisor listener.
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let app = SupervisorApp::new(resolved);
+    let app = SupervisorApp::new(resolved)?;
     app.bind_instance_session(binding).await?;
     app.prewarm_sandbox().await;
     app.start_monitor();

@@ -7,7 +7,6 @@ import "./inspector.css";
 
 export function Inspector() {
   const events = useStore((s) => s.events);
-  const audioEvents = useStore((s) => s.audioEvents);
   const selTurn = useStore((s) => s.selTurn);
 
   const turns = useMemo(() => selectTurns(events), [events]);
@@ -26,6 +25,6 @@ export function Inspector() {
   );
 
   return selected
-    ? <TurnDetail turn={selected} audioEvents={audioEvents} />
+    ? <TurnDetail turn={selected} />
     : <LiveMonitor streaming={streaming} latest={latest} />;
 }

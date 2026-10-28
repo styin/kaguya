@@ -4,11 +4,11 @@
 //! `GenerationStart`. Speculative prefill reads fresh post-response history
 //! asynchronously, but carries no synthetic generation or triggering input.
 
-use crate::history::History;
+use crate::core::history::History;
+use crate::core::types::ActiveTask;
 use crate::proto;
 use crate::proto::SessionRef;
 use crate::tools::ToolRegistry;
-use crate::types::ActiveTask;
 
 /// Read the prompt snapshot after post-response history/persona updates.
 /// Pre-fetching it before those executor actions would omit the response
@@ -130,6 +130,24 @@ pub fn with_reasoner_result_from_data(
     )
 }
 
+/// Failed delegation carries a typed cause rather than a completion summary.
+pub fn with_reasoner_failure_from_data(
+    session: &SessionRef,
+    generation_id: &str,
+    failure: proto::ReasonerFailure,
+    history: Vec<proto::ChatMessage>,
+    memory_md: &str,
+    tools: Vec<proto::ToolDefinition>,
+    active_tasks: &[ActiveTask],
+) -> proto::GenerationStart {
+    generation(
+        session,
+        generation_id,
+        prompt_from_data(history, memory_md, vec![], tools, active_tasks),
+        proto::generation_start::Trigger::ReasonerFailure(failure),
+    )
+}
+
 /// Silence is typed input rather than a synthetic user utterance.
 pub fn for_silence_from_data(
     session: &SessionRef,
@@ -150,7 +168,7 @@ pub fn for_silence_from_data(
 }
 
 /// Retain the originating task when narrating an intermediate step.
-/// As before, narration does not expose tools or active-task prompts.
+/// Narration does not expose tools or active-task prompts.
 pub fn for_narration_from_data(
     session: &SessionRef,
     generation_id: &str,

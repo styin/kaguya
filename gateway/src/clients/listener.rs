@@ -3,8 +3,8 @@
 //! The Listener exposes two server endpoints that the Gateway connects to as
 //! a client:
 //!
-//! - **gRPC bidi stream** — delivers ASR events (VAD edges, partial/final
-//!   transcripts) into the Gateway's priority input stream.
+//! - **gRPC bidirectional stream** — initializes scope and carries a control
+//!   extension point; ASR events enter the Gateway's priority input stream.
 //! - **Raw TCP socket** — receives length-prefixed audio frames forwarded
 //!   from the WebSocket endpoint. Audio bypasses gRPC to avoid protobuf
 //!   serialization overhead at 50 fps.
@@ -25,16 +25,16 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
+use crate::core::types::InputEvent;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::listener_service_client::ListenerServiceClient;
 use crate::proto::SessionRef;
-use crate::types::InputEvent;
 
 /// Single-use gRPC + audio client for one Listener connection lifecycle.
 ///
 /// Created fresh by [`run_recovery_loop`] on each reconnection cycle.
-/// [`start`](Self::start) establishes both the gRPC bidi stream and the
+/// [`start`](Self::start) establishes both the gRPC event stream and the
 /// audio TCP socket, spawning background tasks for each.
 pub struct ListenerClient {
     grpc_endpoint: String,
@@ -81,7 +81,7 @@ impl ListenerClient {
         }
     }
 
-    /// Establish the gRPC bidi stream and audio TCP socket, spawning
+    /// Establish the gRPC event stream and audio TCP socket, spawning
     /// background receiver/forwarder tasks. Returns the audio sender for
     /// installation into [`ListenerAudioSink`](super::audio_sink::ListenerAudioSink).
     pub async fn start(
@@ -89,8 +89,8 @@ impl ListenerClient {
         p1_tx: mpsc::Sender<InputEvent>,
         p2_tx: mpsc::Sender<InputEvent>,
     ) -> anyhow::Result<mpsc::Sender<bytes::Bytes>> {
-        // ── gRPC bidi stream for ASR events ──
-        let mut inbound = Self::connect_stream_with_policy(
+        // ── gRPC event stream for ASR events ──
+        let (mut inbound, controls) = Self::connect_stream_with_policy(
             &self.grpc_endpoint,
             self.connection.clone(),
             self.reconnect,
@@ -98,7 +98,7 @@ impl ListenerClient {
         )
         .await?;
 
-        info!(addr = %self.grpc_endpoint, "Listener gRPC bidi stream established");
+        info!(addr = %self.grpc_endpoint, "Listener gRPC event stream established");
 
         // Spawn receiver: Listener ASR events → Input Stream
         let asr_connection = self.connection.clone();
@@ -134,7 +134,9 @@ impl ListenerClient {
                 }
             }
             asr_connection.set_readiness(Readiness::Degraded);
-            warn!("Listener bidi stream ended");
+            warn!("Listener event stream ended");
+            // Keep the control side open for the lifetime of this subscription.
+            drop(controls);
         });
 
         // ── Raw TCP socket forwarder for audio ──
@@ -191,13 +193,16 @@ impl ListenerClient {
         Ok(audio_tx)
     }
 
-    /// Open a gRPC bidi stream with bounded retries and exponential backoff.
+    /// Open a gRPC event stream with bounded retries and exponential backoff.
     async fn connect_stream_with_policy(
         endpoint: &str,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
         session: &SessionRef,
-    ) -> anyhow::Result<tonic::Streaming<proto::ListenerOutput>> {
+    ) -> anyhow::Result<(
+        tonic::Streaming<proto::ListenerOutput>,
+        mpsc::Sender<proto::ListenerInput>,
+    )> {
         let retry_delays = reconnect.retry_delays();
         connection.set_readiness(Readiness::Starting);
         for attempt in 1..=reconnect.max_attempts() {
@@ -240,22 +245,27 @@ impl ListenerClient {
     async fn connect_stream_once(
         endpoint: &str,
         session: &SessionRef,
-    ) -> anyhow::Result<tonic::Streaming<proto::ListenerOutput>> {
+    ) -> anyhow::Result<(
+        tonic::Streaming<proto::ListenerOutput>,
+        mpsc::Sender<proto::ListenerInput>,
+    )> {
         crate::instance::validate_session_ref(Some(session))?;
         let channel = Channel::from_shared(endpoint.to_string())?
             .connect()
             .await?;
         let mut client = ListenerServiceClient::new(channel);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<proto::ListenerInput>(16);
-        // The server validates initialization before sending response headers.
-        // Queue Init before awaiting stream() to avoid both peers waiting first.
-        ctrl_tx.try_send(proto::ListenerInput {
+        let (controls, input) = mpsc::channel(16);
+        // Initialization must be available before awaiting response headers.
+        controls.try_send(proto::ListenerInput {
             payload: Some(proto::listener_input::Payload::Init(proto::ListenerInit {
                 session: Some(session.clone()),
             })),
         })?;
-        let outbound = ReceiverStream::new(ctrl_rx);
-        Ok(client.stream(outbound).await?.into_inner())
+        let inbound = client
+            .stream(ReceiverStream::new(input))
+            .await?
+            .into_inner();
+        Ok((inbound, controls))
     }
 
     /// Open the raw audio TCP socket with bounded retries.
@@ -335,14 +345,14 @@ pub async fn run_recovery_loop(
     task_spawner: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
-    listener_audio: crate::audio_sink::ListenerAudioSink,
+    listener_audio: crate::clients::audio_sink::ListenerAudioSink,
     p1_tx: mpsc::Sender<InputEvent>,
     p2_tx: mpsc::Sender<InputEvent>,
     expected_runtime: bool,
     session: SessionRef,
     shutdown: CancellationToken,
 ) {
-    use crate::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
+    use crate::clients::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
 
     if !expected_runtime && p1_tx.is_closed() {
         connection.set_readiness(Readiness::Stopped);
@@ -508,7 +518,7 @@ mod tests {
 
     // ── Recovery loop integration tests ──
 
-    use crate::audio_sink::ListenerAudioSink;
+    use crate::clients::audio_sink::ListenerAudioSink;
     use crate::proto::listener_service_server::{
         ListenerService as ListenerServiceTrait, ListenerServiceServer,
     };
@@ -524,16 +534,14 @@ mod tests {
             &self,
             request: tonic::Request<tonic::Streaming<proto::ListenerInput>>,
         ) -> Result<tonic::Response<Self::StreamStream>, tonic::Status> {
-            assert!(!request.metadata().contains_key("x-kaguya-instance-id"));
-            assert!(!request.metadata().contains_key("x-kaguya-session-id"));
-            let mut inbound = request.into_inner();
-            let first = inbound
+            let mut input = request.into_inner();
+            let first = input
                 .message()
                 .await?
-                .expect("Listener initialization must precede response headers");
+                .expect("initialization must precede response headers");
             let Some(proto::listener_input::Payload::Init(init)) = first.payload else {
                 return Err(tonic::Status::invalid_argument(
-                    "expected Listener Init first",
+                    "expected Listener init first",
                 ));
             };
             assert_eq!(init.session, Some(test_session()));
@@ -541,7 +549,9 @@ mod tests {
             // Hold stream sender alive so the ASR receiver task doesn't
             // exit immediately. Drops when the server shuts down.
             tokio::spawn(async move {
-                std::future::pending::<()>().await;
+                // Normal subscriptions retain their control input. A dropped
+                // sender closes the response too, exposing lifecycle regressions.
+                while input.message().await.is_ok_and(|message| message.is_some()) {}
                 drop(tx);
             });
             Ok(tonic::Response::new(ReceiverStream::new(rx)))

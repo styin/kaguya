@@ -11,6 +11,7 @@ the committed stubs directly without regeneration.
 
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 
@@ -19,6 +20,17 @@ def main():
     talker_dir = repo_root / "talker"
     proto_dir = talker_dir / "proto"
     proto_src = repo_root / "proto" / "kaguya" / "v1" / "kaguya.proto"
+    scripts_dir = Path(sysconfig.get_path("scripts"))
+    executable_suffix = ".exe" if sys.platform == "win32" else ""
+    plugins = []
+    for name in ("mypy", "mypy_grpc"):
+        plugin = scripts_dir / f"protoc-gen-{name}{executable_suffix}"
+        if not plugin.is_file():
+            raise SystemExit(
+                f"Missing {plugin}; install the Talker dev dependencies "
+                f"for {sys.executable} before generating protobuf stubs."
+            )
+        plugins.append(f"--plugin=protoc-gen-{name}={plugin}")
 
     # Ensure output directory exists
     proto_dir.mkdir(exist_ok=True)
@@ -32,6 +44,7 @@ def main():
             sys.executable,
             "-m",
             "grpc_tools.protoc",
+            *plugins,
             f"-I{proto_src.parent}",
             f"--python_out={proto_dir}",
             f"--grpc_python_out={proto_dir}",
@@ -43,13 +56,13 @@ def main():
         cwd=talker_dir,
     )
 
-    # Patch grpc file to use relative import
-    grpc_file = proto_dir / "kaguya_pb2_grpc.py"
-    if grpc_file.exists():
+    # Runtime and type stubs use the same package-relative message import.
+    for extension in ("py", "pyi"):
+        grpc_file = proto_dir / f"kaguya_pb2_grpc.{extension}"
         content = grpc_file.read_text(encoding="utf-8")
         patched = content.replace(
-            "import kaguya_pb2 as kaguya__pb2",
-            "from . import kaguya_pb2 as kaguya__pb2",
+            "import kaguya_pb2 as ",
+            "from . import kaguya_pb2 as ",
         )
         grpc_file.write_text(patched, encoding="utf-8")
         print(f"    Patched: {grpc_file.relative_to(repo_root)}")

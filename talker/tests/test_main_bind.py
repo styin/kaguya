@@ -18,7 +18,7 @@ import pytest
 
 def test_bind_or_raise_returns_port_on_success():
     """Successful bind: returns the port that gRPC actually bound."""
-    from main import _bind_or_raise  # type: ignore[import]
+    from main import _bind_or_raise
 
     server = MagicMock()
     server.add_insecure_port = MagicMock(return_value=50053)
@@ -31,7 +31,7 @@ def test_bind_or_raise_returns_port_on_success():
 def test_bind_or_raise_raises_on_zero_return():
     """Bind failure (port=0): raise RuntimeError with the address in the
     message so logs immediately point at the misconfiguration."""
-    from main import _bind_or_raise  # type: ignore[import]
+    from main import _bind_or_raise
 
     server = MagicMock()
     server.add_insecure_port = MagicMock(return_value=0)
@@ -43,7 +43,7 @@ def test_bind_or_raise_raises_on_zero_return():
 def test_bind_or_raise_error_includes_service_name():
     """The error message must name which service failed (Talker vs.
     Listener) so the operator can find it in code without grepping ports."""
-    from main import _bind_or_raise  # type: ignore[import]
+    from main import _bind_or_raise
 
     server = MagicMock()
     server.add_insecure_port = MagicMock(return_value=0)

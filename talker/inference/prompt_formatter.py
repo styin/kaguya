@@ -1,13 +1,10 @@
 """Render shared prompt snapshots and typed generation triggers with cached persona."""
 
 import json
-import logging
 from datetime import UTC, datetime
 
 from inference.soul_container import VALID_EMOTIONS
-from proto import kaguya_pb2  # type: ignore[import]
-
-logger = logging.getLogger(__name__)
+from proto import kaguya_pb2
 
 _IM_START = "<|im_start|>"
 _IM_END = "<|im_end|>"
@@ -101,23 +98,21 @@ def _assemble_prompt(
     if ctx.memory_contents:
         system_sections.append(f"Memory:\n{ctx.memory_contents.strip()}")
 
-    # 6.5 RAG Retrieval Results — MUST be before parts.append (FIX)
+    # 7. Retrieval results
     if ctx.retrieval_results:
         retrieval_text = "Relevant context retrieved from memory:\n" + "\n".join(
             f"  [{r.source}] {r.content}" for r in ctx.retrieval_results
         )
         system_sections.append(retrieval_text)
 
-    # NOW join everything into the system message
     parts.append(_msg("system", "\n\n".join(system_sections)))
 
-    # 7. Conversation history
+    # 8. Conversation history
     for turn in ctx.history:
         role = _role_to_str(turn.role)
         parts.append(_msg(role, turn.content, name=turn.name or None))
 
-    # The trigger's typed reference and content stay together. Preserve the
-    # established LLM prompt text while exposing the event's real kind on wire.
+    # Render the typed trigger after the shared history snapshot.
     if start is not None:
         which = start.WhichOneof("trigger")
         if which == "tool_result":
@@ -129,6 +124,15 @@ def _assemble_prompt(
             result = start.reasoner_result
             parts.append(
                 _msg("tool", f"[REASONER_RESULT:{result.task_id}] {result.summary}")
+            )
+        elif which == "reasoner_failure":
+            failure = start.reasoner_failure
+            parts.append(
+                _msg(
+                    "tool",
+                    f"[REASONER_FAILURE:{failure.task_id} code={failure.code}] "
+                    f"{failure.message}",
+                )
             )
         elif which == "user_input":
             parts.append(_msg("user", start.user_input.text))
@@ -144,7 +148,7 @@ def _assemble_prompt(
                 _msg("user", f"[SYSTEM: {seconds}s silence since last exchange]")
             )
 
-    # 11. Prime assistant generation
+    # 9. Prime assistant generation
     parts.append(f"{_IM_START}assistant\n")
 
     return "".join(parts)
@@ -164,8 +168,7 @@ _ROLE_MAP = {
 
 
 def _role_to_str(role: kaguya_pb2.Role.ValueType) -> str:
-    result = _ROLE_MAP.get(role)
-    if result is None:
-        logger.warning("Unknown proto Role enum value %d, defaulting to 'user'", role)
-        return "user"
-    return result
+    try:
+        return _ROLE_MAP[role]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported history role: {role}") from exc

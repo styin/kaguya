@@ -9,17 +9,16 @@ use kaguya_supervisor::sandbox::{SandboxManager, SandboxProvider};
 #[tokio::test]
 async fn native_backend_executes_python_and_persists_files() {
     let cfg = SandboxConfig::default(); // enabled=true, backend=native
-    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir())
-        .expect("native manager should init");
+    let mgr = SandboxManager::from_config(&cfg).expect("native manager should init");
 
     // The tool is advertised when enabled.
     assert!(mgr.is_enabled());
 
-    let session = "test-conv-native";
+    let allocation = "test-allocation-native";
 
     // 1) Run a computation and read stdout back.
     let out = mgr
-        .exec_from_json(session, r#"{"language":"python","code":"print(6*7)"}"#)
+        .exec_from_json(allocation, r#"{"language":"python","code":"print(6*7)"}"#)
         .await;
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["exit_code"], 0, "python exec should succeed: {out}");
@@ -30,10 +29,10 @@ async fn native_backend_executes_python_and_persists_files() {
     assert!(v["error"].is_null(), "no backend error expected: {out}");
 
     // 2) Per-allocation affinity: a file written in one call is visible in the
-    //    next call for the same session (shared scratch dir).
+    //    next call for the same allocation (shared scratch dir).
     let write = mgr
         .exec_from_json(
-            session,
+            allocation,
             r#"{"language":"python","code":"open('note.txt','w').write('hi')"}"#,
         )
         .await;
@@ -43,17 +42,17 @@ async fn native_backend_executes_python_and_persists_files() {
     );
     let read = mgr
         .exec_from_json(
-            session,
+            allocation,
             r#"{"language":"python","code":"print(open('note.txt').read())"}"#,
         )
         .await;
     let rv: serde_json::Value = serde_json::from_str(&read).unwrap();
     assert!(
         rv["stdout"].as_str().unwrap().contains("hi"),
-        "file should persist across calls in a session, got: {read}"
+        "file should persist across calls in a allocation, got: {read}"
     );
 
-    mgr.cleanup(session).await;
+    mgr.cleanup(allocation).await;
 }
 
 #[tokio::test]
@@ -72,15 +71,15 @@ async fn disabled_manager_refuses_exec() {
 }
 
 #[tokio::test]
-async fn concurrent_execs_in_one_session_do_not_clobber() {
+async fn concurrent_execs_in_one_allocation_do_not_clobber() {
     // Regression for the shared-runner-script race: two overlapping calls in the
-    // same session must both run their own code (unique per-exec script names).
+    // same allocation must both run their own code (unique per-exec script names).
     let cfg = SandboxConfig::default();
-    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
-    let session = "test-conv-concurrent";
+    let mgr = SandboxManager::from_config(&cfg).unwrap();
+    let allocation = "test-allocation-concurrent";
 
-    let a = mgr.exec_from_json(session, r#"{"language":"python","code":"print('AAA')"}"#);
-    let b = mgr.exec_from_json(session, r#"{"language":"python","code":"print('BBB')"}"#);
+    let a = mgr.exec_from_json(allocation, r#"{"language":"python","code":"print('AAA')"}"#);
+    let b = mgr.exec_from_json(allocation, r#"{"language":"python","code":"print('BBB')"}"#);
     let (ra, rb) = tokio::join!(a, b);
     let va: serde_json::Value = serde_json::from_str(&ra).unwrap();
     let vb: serde_json::Value = serde_json::from_str(&rb).unwrap();
@@ -89,23 +88,23 @@ async fn concurrent_execs_in_one_session_do_not_clobber() {
     assert!(va["stdout"].as_str().unwrap().contains("AAA"), "{ra}");
     assert!(vb["stdout"].as_str().unwrap().contains("BBB"), "{rb}");
 
-    mgr.cleanup(session).await;
+    mgr.cleanup(allocation).await;
 }
 
 #[tokio::test]
 async fn stdin_is_fed_to_the_program() {
     let cfg = SandboxConfig::default();
-    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
+    let mgr = SandboxManager::from_config(&cfg).unwrap();
     let out = mgr
         .exec_from_json(
-            "test-conv-stdin",
+            "test-allocation-stdin",
             r#"{"language":"python","code":"import sys; print(sys.stdin.read().strip().upper())","stdin":"hello"}"#,
         )
         .await;
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["exit_code"], 0, "{out}");
     assert!(v["stdout"].as_str().unwrap().contains("HELLO"), "{out}");
-    mgr.cleanup("test-conv-stdin").await;
+    mgr.cleanup("test-allocation-stdin").await;
 }
 
 #[cfg(unix)]
@@ -113,14 +112,14 @@ async fn stdin_is_fed_to_the_program() {
 async fn native_timeout_kills_spawned_descendant_and_returns_promptly() {
     let mut cfg = SandboxConfig::default();
     cfg.default_timeout_secs = 1;
-    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
-    let session = "test-conv-timeout-tree";
-    let session_dir = std::env::temp_dir().join("kaguya-sandbox").join(session);
+    let mgr = SandboxManager::from_config(&cfg).unwrap();
+    let allocation = "test-allocation-timeout-tree";
+    let allocation_dir = std::env::temp_dir().join("kaguya-sandbox").join(allocation);
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         mgr.exec_from_json(
-            session,
+            allocation,
             r#"{"language":"bash","code":"sleep 30 & echo $! > child.pid; wait"}"#,
         ),
     )
@@ -129,7 +128,7 @@ async fn native_timeout_kills_spawned_descendant_and_returns_promptly() {
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(value["timed_out"], true, "{output}");
 
-    let child_pid = tokio::fs::read_to_string(session_dir.join("child.pid"))
+    let child_pid = tokio::fs::read_to_string(allocation_dir.join("child.pid"))
         .await
         .expect("test script should record descendant pid")
         .trim()
@@ -146,21 +145,21 @@ async fn native_timeout_kills_spawned_descendant_and_returns_promptly() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    mgr.cleanup(session).await;
+    mgr.cleanup(allocation).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn native_reader_cleanup_is_bounded_when_descendant_keeps_pipe_open() {
     let cfg = SandboxConfig::default();
-    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
-    let session = "test-conv-reader-pipe";
-    let session_dir = std::env::temp_dir().join("kaguya-sandbox").join(session);
+    let mgr = SandboxManager::from_config(&cfg).unwrap();
+    let allocation = "test-allocation-reader-pipe";
+    let allocation_dir = std::env::temp_dir().join("kaguya-sandbox").join(allocation);
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         mgr.exec_from_json(
-            session,
+            allocation,
             r#"{"language":"bash","code":"python3 - <<'PY'\nimport os\nimport signal\nimport sys\nimport time\n\npid = os.fork()\nif pid == 0:\n    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n    sys.stdout.flush()\n    time.sleep(30)\nelse:\n    with open('child.pid', 'w') as f:\n        f.write(str(pid))\n    sys.exit(0)\nPY"}"#,
         ),
     )
@@ -173,18 +172,18 @@ async fn native_reader_cleanup_is_bounded_when_descendant_keeps_pipe_open() {
         "aborted reader cleanup should mark output truncated: {output}"
     );
 
-    if let Ok(child_pid) = tokio::fs::read_to_string(session_dir.join("child.pid")).await {
+    if let Ok(child_pid) = tokio::fs::read_to_string(allocation_dir.join("child.pid")).await {
         let _ = std::process::Command::new("kill")
             .args(["-KILL", child_pid.trim()])
             .status();
     }
-    mgr.cleanup(session).await;
+    mgr.cleanup(allocation).await;
 }
 
 #[tokio::test]
 async fn rejects_unknown_language() {
     let cfg = SandboxConfig::default();
-    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap();
+    let mgr = SandboxManager::from_config(&cfg).unwrap();
     let out = mgr
         .exec_from_json("s", r#"{"language":"ruby","code":"puts 1"}"#)
         .await;
@@ -195,11 +194,53 @@ async fn rejects_unknown_language() {
         .contains("unsupported language"));
 }
 
+#[test]
+fn rejects_invalid_language_allowlist() {
+    for languages in [
+        vec!["pythno".into()],
+        vec!["python".into(), "pythno".into()],
+    ] {
+        let cfg = SandboxConfig {
+            allowed_languages: languages,
+            ..SandboxConfig::default()
+        };
+        assert!(SandboxManager::from_config(&cfg).is_err());
+    }
+}
+
+#[test]
+fn disabled_configuration_does_not_initialize_selected_backend() {
+    let cfg = SandboxConfig {
+        enabled: false,
+        backend: kaguya_supervisor::config::SandboxBackendKind::Docker,
+        image: "unused-disabled-backend".into(),
+        ..SandboxConfig::default()
+    };
+    let manager = SandboxManager::from_config(&cfg).unwrap();
+    assert!(!manager.is_enabled());
+}
+
+#[tokio::test]
+async fn malformed_arguments_do_not_execute() {
+    let manager = SandboxManager::from_config(&SandboxConfig::default()).unwrap();
+    for args in [
+        r#"{"code":"print('must not run')"}"#,
+        r#"{"language":false,"code":"print('must not run')"}"#,
+        r#"{"language":"python","code":"print('must not run')","stdin":42}"#,
+        r#"{"language":"python","code":"print('must not run')","stale_argument":true}"#,
+        r#"{"language":"py","code":"print('must not run')"}"#,
+    ] {
+        let output = manager.exec_from_json("invalid-arguments", args).await;
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(result["error"].is_string(), "{output}");
+        assert_eq!(result["stdout"], "");
+    }
+}
+
 #[tokio::test]
 async fn opaque_handle_controls_execution_and_release() {
     let cfg = SandboxConfig::default();
-    let provider =
-        SandboxProvider::new(SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap());
+    let provider = SandboxProvider::new(SandboxManager::from_config(&cfg).unwrap());
     let owner = proto::SessionRef {
         instance_id: Some(proto::InstanceId {
             value: uuid::Uuid::new_v4().to_string(),

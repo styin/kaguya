@@ -22,7 +22,7 @@
   color: var(--ink-4);
 }
 
-/* ─── Audio card (mic + tts) ─── */
+/* ─── Microphone card ─── */
 .audio-card {
   background: var(--panel-2);
   border: 1px solid var(--hairline);
@@ -47,7 +47,6 @@
   font-size: 14px;
 }
 .audio-arrow.mic-arrow { color: var(--mint); }
-.audio-arrow.tts-arrow { color: var(--blue-2); }
 
 .audio-strip-body {
   display: flex;
@@ -96,7 +95,6 @@
   transition: transform 80ms ease-out;
 }
 .audio-bars.mic .audio-bar { background: var(--mint); }
-.audio-bars.tts .audio-bar { background: var(--blue-2); }
 
 /* ─── Open-mic toggle ─── */
 .mic-toggle {

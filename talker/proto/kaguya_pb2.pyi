@@ -157,7 +157,9 @@ class ListenerInput(_message.Message):
     INIT_FIELD_NUMBER: _builtins.int
     CONTROL_FIELD_NUMBER: _builtins.int
     @_builtins.property
-    def init(self) -> Global___ListenerInit: ...
+    def init(self) -> Global___ListenerInit:
+        """required first, once per stream"""
+
     @_builtins.property
     def control(self) -> Global___ListenerControl: ...
     def __init__(
@@ -178,7 +180,7 @@ Global___ListenerInput: _TypeAlias = ListenerInput  # noqa: Y015
 
 @_typing.final
 class ListenerInit(_message.Message):
-    """First message on every Listener stream, before controls or session events."""
+    """Scope assertion for every Listener subscription."""
 
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -199,13 +201,15 @@ Global___ListenerInit: _TypeAlias = ListenerInit  # noqa: Y015
 
 @_typing.final
 class ListenerControl(_message.Message):
+    """Extension point for Listener lifecycle controls. Reset is declared but
+    currently returns UNIMPLEMENTED; future controls require defined semantics.
+    """
+
     DESCRIPTOR: _descriptor.Descriptor
 
     RESET_FIELD_NUMBER: _builtins.int
     @_builtins.property
-    def reset(self) -> Global___ListenerReset:
-        """clear VAD state on new session"""
-
+    def reset(self) -> Global___ListenerReset: ...
     def __init__(
         self,
         *,
@@ -341,7 +345,7 @@ class TalkerInput(_message.Message):
 
     @_builtins.property
     def barge_in(self) -> Global___BargeInSignal:
-        """interrupt mid-stream (was separate Prepare RPC)"""
+        """interrupt mid-stream"""
 
     def __init__(
         self,
@@ -444,6 +448,7 @@ class GenerationStart(_message.Message):
     REASONER_RESULT_FIELD_NUMBER: _builtins.int
     REASONER_PROGRESS_FIELD_NUMBER: _builtins.int
     SILENCE_FIELD_NUMBER: _builtins.int
+    REASONER_FAILURE_FIELD_NUMBER: _builtins.int
     generation_id: _builtins.str
     timestamp_ms: _builtins.int
     @_builtins.property
@@ -460,6 +465,8 @@ class GenerationStart(_message.Message):
     def reasoner_progress(self) -> Global___ReasonerProgress: ...
     @_builtins.property
     def silence(self) -> Global___SilenceTrigger: ...
+    @_builtins.property
+    def reasoner_failure(self) -> Global___ReasonerFailure: ...
     def __init__(
         self,
         *,
@@ -472,12 +479,13 @@ class GenerationStart(_message.Message):
         reasoner_result: Global___ReasonerResult | None = ...,
         reasoner_progress: Global___ReasonerProgress | None = ...,
         silence: Global___SilenceTrigger | None = ...,
+        reasoner_failure: Global___ReasonerFailure | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["prompt_context", b"prompt_context", "reasoner_progress", b"reasoner_progress", "reasoner_result", b"reasoner_result", "session", b"session", "silence", b"silence", "tool_result", b"tool_result", "trigger", b"trigger", "user_input", b"user_input"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["prompt_context", b"prompt_context", "reasoner_failure", b"reasoner_failure", "reasoner_progress", b"reasoner_progress", "reasoner_result", b"reasoner_result", "session", b"session", "silence", b"silence", "tool_result", b"tool_result", "trigger", b"trigger", "user_input", b"user_input"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["generation_id", b"generation_id", "prompt_context", b"prompt_context", "reasoner_progress", b"reasoner_progress", "reasoner_result", b"reasoner_result", "session", b"session", "silence", b"silence", "timestamp_ms", b"timestamp_ms", "tool_result", b"tool_result", "trigger", b"trigger", "user_input", b"user_input"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["generation_id", b"generation_id", "prompt_context", b"prompt_context", "reasoner_failure", b"reasoner_failure", "reasoner_progress", b"reasoner_progress", "reasoner_result", b"reasoner_result", "session", b"session", "silence", b"silence", "timestamp_ms", b"timestamp_ms", "tool_result", b"tool_result", "trigger", b"trigger", "user_input", b"user_input"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_trigger: _TypeAlias = _typing.Literal["user_input", "tool_result", "reasoner_result", "reasoner_progress", "silence"]  # noqa: Y015
+    _WhichOneofReturnType_trigger: _TypeAlias = _typing.Literal["user_input", "tool_result", "reasoner_result", "reasoner_progress", "silence", "reasoner_failure"]  # noqa: Y015
     _WhichOneofArgType_trigger: _TypeAlias = _typing.Literal["trigger", b"trigger"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_trigger) -> _WhichOneofReturnType_trigger | None: ...
 
@@ -557,6 +565,28 @@ class ReasonerProgress(_message.Message):
 Global___ReasonerProgress: _TypeAlias = ReasonerProgress  # noqa: Y015
 
 @_typing.final
+class ReasonerFailure(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TASK_ID_FIELD_NUMBER: _builtins.int
+    MESSAGE_FIELD_NUMBER: _builtins.int
+    CODE_FIELD_NUMBER: _builtins.int
+    task_id: _builtins.str
+    message: _builtins.str
+    code: _builtins.int
+    def __init__(
+        self,
+        *,
+        task_id: _builtins.str = ...,
+        message: _builtins.str = ...,
+        code: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["code", b"code", "message", b"message", "task_id", b"task_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReasonerFailure: _TypeAlias = ReasonerFailure  # noqa: Y015
+
+@_typing.final
 class SilenceTrigger(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -574,7 +604,7 @@ Global___SilenceTrigger: _TypeAlias = SilenceTrigger  # noqa: Y015
 
 @_typing.final
 class RetrievalResult(_message.Message):
-    """NEW: RAG 检索结果，注入到 context 中"""
+    """Retrieved memories included in the prompt snapshot."""
 
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -585,7 +615,7 @@ class RetrievalResult(_message.Message):
     id: _builtins.str
     content: _builtins.str
     source: _builtins.str
-    """"bm25" | "vector" | "lsp" | "structured" """
+    """"bm25" | "vector" """
     score: _builtins.float
     def __init__(
         self,
@@ -629,9 +659,7 @@ class TalkerOutput(_message.Message):
     @_builtins.property
     def response_complete(self) -> Global___ResponseComplete: ...
     @_builtins.property
-    def barge_in_ack(self) -> Global___BargeInAck:
-        """NEW: inline response to barge-in"""
-
+    def barge_in_ack(self) -> Global___BargeInAck: ...
     def __init__(
         self,
         *,
@@ -871,7 +899,7 @@ class DelegateInput(_message.Message):
     def start_task(self) -> Global___TaskRequest: ...
     @_builtins.property
     def context_update(self) -> Global___TaskContext:
-        """NEW: send updated context mid-task"""
+        """send updated context mid-task"""
 
     def __init__(
         self,
@@ -1279,6 +1307,8 @@ Global___StopSignal: _TypeAlias = StopSignal  # noqa: Y015
 
 @_typing.final
 class ApprovalSignal(_message.Message):
+    """Declared for the approval contract; Gateway currently returns UNIMPLEMENTED."""
+
     DESCRIPTOR: _descriptor.Descriptor
 
     CONTEXT_FIELD_NUMBER: _builtins.int

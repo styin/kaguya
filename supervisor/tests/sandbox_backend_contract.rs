@@ -84,22 +84,41 @@ fn base_config(backend: SandboxBackendKind) -> SandboxConfig {
 }
 
 async fn run_contract(name: &str, cfg: SandboxConfig) {
-    let mgr = SandboxManager::from_config(&cfg, std::env::temp_dir())
+    let mgr = SandboxManager::from_config(&cfg)
         .unwrap_or_else(|error| panic!("{name} manager should initialize: {error}"));
 
     stdin_delivery(&mgr, name).await;
     output_truncation(&mgr, name).await;
     timeout_returns_promptly(&mgr, name).await;
-    session_filesystem_contract(&mgr, name).await;
+    blocked_stdin_respects_timeout(&mgr, name).await;
+    allocation_filesystem_contract(&mgr, name).await;
 
     mgr.shutdown().await;
 }
 
+async fn blocked_stdin_respects_timeout(mgr: &SandboxManager, name: &str) {
+    let allocation = format!("{name}-contract-blocked-stdin");
+    let args = serde_json::json!({
+        "language": "python",
+        "code": "import time; time.sleep(30)",
+        "stdin": "x".repeat(1024 * 1024),
+    });
+    let output = tokio::time::timeout(
+        Duration::from_secs(8),
+        mgr.exec_from_json(&allocation, &args.to_string()),
+    )
+    .await
+    .expect("blocked stdin must not bypass the execution timeout");
+    let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["timed_out"], true, "{output}");
+    mgr.cleanup(&allocation).await;
+}
+
 async fn stdin_delivery(mgr: &SandboxManager, name: &str) {
-    let session = format!("{name}-contract-stdin");
+    let allocation = format!("{name}-contract-stdin");
     let output = mgr
         .exec_from_json(
-            &session,
+            &allocation,
             r#"{"language":"python","code":"import sys; print(sys.stdin.read().strip().upper())","stdin":"hello backend"}"#,
         )
         .await;
@@ -109,14 +128,14 @@ async fn stdin_delivery(mgr: &SandboxManager, name: &str) {
         value["stdout"].as_str().unwrap().contains("HELLO BACKEND"),
         "{name} stdin was not delivered: {output}"
     );
-    mgr.cleanup(&session).await;
+    mgr.cleanup(&allocation).await;
 }
 
 async fn output_truncation(mgr: &SandboxManager, name: &str) {
-    let session = format!("{name}-contract-truncation");
+    let allocation = format!("{name}-contract-truncation");
     let output = mgr
         .exec_from_json(
-            &session,
+            &allocation,
             r#"{"language":"python","code":"print('x' * 4096)"}"#,
         )
         .await;
@@ -130,15 +149,15 @@ async fn output_truncation(mgr: &SandboxManager, name: &str) {
         value["stdout"].as_str().unwrap().len() <= 32,
         "{name} retained more than max_output_bytes: {output}"
     );
-    mgr.cleanup(&session).await;
+    mgr.cleanup(&allocation).await;
 }
 
 async fn timeout_returns_promptly(mgr: &SandboxManager, name: &str) {
-    let session = format!("{name}-contract-timeout");
+    let allocation = format!("{name}-contract-timeout");
     let output = tokio::time::timeout(
         Duration::from_secs(10),
         mgr.exec_from_json(
-            &session,
+            &allocation,
             r#"{"language":"python","code":"import time; time.sleep(30)"}"#,
         ),
     )
@@ -149,17 +168,17 @@ async fn timeout_returns_promptly(mgr: &SandboxManager, name: &str) {
         value["timed_out"], true,
         "{name} did not report timeout: {output}"
     );
-    mgr.cleanup(&session).await;
+    mgr.cleanup(&allocation).await;
 }
 
-async fn session_filesystem_contract(mgr: &SandboxManager, name: &str) {
-    let session_a = format!("{name}-contract-session-a");
-    let session_b = format!("{name}-contract-session-b");
+async fn allocation_filesystem_contract(mgr: &SandboxManager, name: &str) {
+    let allocation_a = format!("{name}-contract-allocation-a");
+    let allocation_b = format!("{name}-contract-allocation-b");
 
     let write = mgr
         .exec_from_json(
-            &session_a,
-            r#"{"language":"python","code":"open('note.txt','w').write('session-a')"}"#,
+            &allocation_a,
+            r#"{"language":"python","code":"open('note.txt','w').write('allocation-a')"}"#,
         )
         .await;
     let write_value: serde_json::Value = serde_json::from_str(&write).unwrap();
@@ -167,7 +186,7 @@ async fn session_filesystem_contract(mgr: &SandboxManager, name: &str) {
 
     let read_same = mgr
         .exec_from_json(
-            &session_a,
+            &allocation_a,
             r#"{"language":"python","code":"print(open('note.txt').read())"}"#,
         )
         .await;
@@ -176,13 +195,13 @@ async fn session_filesystem_contract(mgr: &SandboxManager, name: &str) {
         read_same_value["stdout"]
             .as_str()
             .unwrap()
-            .contains("session-a"),
-        "{name} did not persist files within a session: {read_same}"
+            .contains("allocation-a"),
+        "{name} did not persist files within a allocation: {read_same}"
     );
 
     let read_other = mgr
         .exec_from_json(
-            &session_b,
+            &allocation_b,
             r#"{"language":"python","code":"import pathlib; print(pathlib.Path('note.txt').exists())"}"#,
         )
         .await;
@@ -192,14 +211,14 @@ async fn session_filesystem_contract(mgr: &SandboxManager, name: &str) {
             .as_str()
             .unwrap()
             .contains("False"),
-        "{name} leaked files across sessions: {read_other}"
+        "{name} leaked files across allocations: {read_other}"
     );
 
-    mgr.cleanup(&session_a).await;
+    mgr.cleanup(&allocation_a).await;
 
     let read_after_cleanup = mgr
         .exec_from_json(
-            &session_a,
+            &allocation_a,
             r#"{"language":"python","code":"import pathlib; print(pathlib.Path('note.txt').exists())"}"#,
         )
         .await;
@@ -213,8 +232,8 @@ async fn session_filesystem_contract(mgr: &SandboxManager, name: &str) {
         "{name} cleanup/reacquisition reused dirty filesystem: {read_after_cleanup}"
     );
 
-    mgr.cleanup(&session_a).await;
-    mgr.cleanup(&session_b).await;
+    mgr.cleanup(&allocation_a).await;
+    mgr.cleanup(&allocation_b).await;
 }
 
 #[tokio::test]

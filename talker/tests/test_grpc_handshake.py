@@ -1,8 +1,8 @@
-"""Stream readiness follows validation of the prequeued first message.
+"""Stream readiness follows validation of the request scope.
 
-Clients enqueue init/start before waiting for response headers. The server must
-then flush those headers before waiting on ASR/inference, and invalid or duplicate
-initialization must terminate promptly rather than leaving a background task hung.
+Listener and Talker validate the first stream message.
+Headers must arrive before ASR/inference output. Invalid scope cannot take over a
+live Listener connection, and malformed Talker streams fail promptly.
 """
 
 import asyncio
@@ -26,10 +26,6 @@ async def _start_server(register):
     return server, port
 
 
-async def _listener_inputs(session):
-    yield kaguya_pb2.ListenerInput(init=kaguya_pb2.ListenerInit(session=session))
-
-
 def _generation(session):
     return kaguya_pb2.GenerationStart(
         session=session,
@@ -37,6 +33,12 @@ def _generation(session):
         prompt_context=kaguya_pb2.PromptContext(),
         user_input=kaguya_pb2.UserInput(text="Hello"),
     )
+
+
+async def _listener_inputs(session, *messages):
+    yield kaguya_pb2.ListenerInput(init=kaguya_pb2.ListenerInit(session=session))
+    for message in messages:
+        yield message
 
 
 async def _blocked_completion(*args):
@@ -105,9 +107,19 @@ async def test_valid_listener_replacement_receives_all_future_events(
     try:
         async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
             stub = kaguya_pb2_grpc.ListenerServiceStub(channel)
-            first = stub.Stream(_listener_inputs(session_ref))
+            first = stub.Stream()
+            await first.write(
+                kaguya_pb2.ListenerInput(
+                    init=kaguya_pb2.ListenerInit(session=session_ref)
+                )
+            )
             await asyncio.wait_for(first.initial_metadata(), 2)
-            replacement = stub.Stream(_listener_inputs(session_ref))
+            replacement = stub.Stream()
+            await replacement.write(
+                kaguya_pb2.ListenerInput(
+                    init=kaguya_pb2.ListenerInit(session=session_ref)
+                )
+            )
             await asyncio.wait_for(replacement.initial_metadata(), 2)
             assert await asyncio.wait_for(first.read(), 2) == grpc.aio.EOF
             for i in range(3):
@@ -165,10 +177,29 @@ async def test_invalid_listener_does_not_take_over_live_connection(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["empty", "control-first", "duplicate-init"])
-async def test_listener_rejects_missing_misordered_or_duplicate_init(
-    binding, session_ref, mode
-):
+async def test_listener_rejects_missing_scope(binding):
+    servicer = ListenerServiceImpl(asyncio.Queue(), binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = kaguya_pb2_grpc.ListenerServiceStub(channel).Stream(
+                _listener_inputs(None), timeout=2
+            )
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await call.read()
+            assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    finally:
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["empty", "empty-payload", "control-first"])
+async def test_listener_requires_init_before_accepting_subscription(binding, mode):
     servicer = ListenerServiceImpl(asyncio.Queue(), binding)
     server, port = await _start_server(
         lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
@@ -177,14 +208,12 @@ async def test_listener_rejects_missing_misordered_or_duplicate_init(
     )
 
     async def inputs():
-        if mode == "control-first":
+        if mode == "empty-payload":
+            yield kaguya_pb2.ListenerInput()
+        elif mode == "control-first":
             yield kaguya_pb2.ListenerInput(
                 control=kaguya_pb2.ListenerControl(reset=kaguya_pb2.ListenerReset())
             )
-        elif mode == "duplicate-init":
-            async for item in _listener_inputs(session_ref):
-                yield item
-                yield item
 
     try:
         async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
@@ -194,6 +223,136 @@ async def test_listener_rejects_missing_misordered_or_duplicate_init(
             with pytest.raises(grpc.aio.AioRpcError) as error:
                 await call.read()
             assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+            assert servicer._active_terminate is None
+    finally:
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", ["reset", "empty-control", "empty-payload", "repeat-init"]
+)
+async def test_listener_controls_fail_explicitly_without_waiting_for_asr(
+    binding, session_ref, mode
+):
+    servicer = ListenerServiceImpl(asyncio.Queue(), binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+    if mode == "reset":
+        message = kaguya_pb2.ListenerInput(
+            control=kaguya_pb2.ListenerControl(reset=kaguya_pb2.ListenerReset())
+        )
+    elif mode == "empty-control":
+        message = kaguya_pb2.ListenerInput(control=kaguya_pb2.ListenerControl())
+    elif mode == "repeat-init":
+        message = kaguya_pb2.ListenerInput(
+            init=kaguya_pb2.ListenerInit(session=session_ref)
+        )
+    else:
+        message = kaguya_pb2.ListenerInput()
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = kaguya_pb2_grpc.ListenerServiceStub(channel).Stream()
+            await call.write(
+                kaguya_pb2.ListenerInput(
+                    init=kaguya_pb2.ListenerInit(session=session_ref)
+                )
+            )
+            await asyncio.wait_for(call.initial_metadata(), 2)
+            await call.write(message)
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await asyncio.wait_for(call.read(), 2)
+            expected = (
+                grpc.StatusCode.UNIMPLEMENTED
+                if mode == "reset"
+                else grpc.StatusCode.INVALID_ARGUMENT
+            )
+            assert error.value.code() == expected
+    finally:
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+async def test_listener_request_half_close_keeps_event_subscription(
+    binding, session_ref
+):
+    queue = asyncio.Queue()
+    servicer = ListenerServiceImpl(queue, binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = kaguya_pb2_grpc.ListenerServiceStub(channel).Stream()
+            await call.write(
+                kaguya_pb2.ListenerInput(
+                    init=kaguya_pb2.ListenerInit(session=session_ref)
+                )
+            )
+            await asyncio.wait_for(call.initial_metadata(), 2)
+            await call.done_writing()
+            queue.put_nowait(
+                kaguya_pb2.ListenerOutput(
+                    partial_transcript=kaguya_pb2.PartialTranscript(
+                        text="after half close"
+                    )
+                )
+            )
+            assert (
+                await asyncio.wait_for(call.read(), 2)
+            ).partial_transcript.text == "after half close"
+            call.cancel()
+    finally:
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+async def test_listener_cancellation_with_pending_controls_releases_queue(
+    binding, session_ref
+):
+    queue = asyncio.Queue()
+    servicer = ListenerServiceImpl(queue, binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = kaguya_pb2_grpc.ListenerServiceStub(channel)
+            live = stub.Stream()
+            await live.write(
+                kaguya_pb2.ListenerInput(
+                    init=kaguya_pb2.ListenerInit(session=session_ref)
+                )
+            )
+            await asyncio.wait_for(live.initial_metadata(), 2)
+            active = servicer._active_terminate
+            pending = stub.Stream()
+            pending.cancel()
+            assert servicer._active_terminate is active
+            live.cancel()
+
+            async def wait_for_cleanup():
+                while servicer._active_terminate is not None:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_cleanup(), 2)
+            queue.put_nowait(
+                kaguya_pb2.ListenerOutput(
+                    partial_transcript=kaguya_pb2.PartialTranscript(text="retained")
+                )
+            )
+            replacement = stub.Stream(_listener_inputs(session_ref))
+            assert (
+                await asyncio.wait_for(replacement.read(), 2)
+            ).partial_transcript.text == "retained"
+            replacement.cancel()
     finally:
         await server.stop(grace=0.5)
 

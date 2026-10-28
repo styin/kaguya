@@ -38,6 +38,7 @@ const MONITOR_INTERVAL: Duration = Duration::from_millis(250);
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const RESTART_BASE_DELAY: Duration = Duration::from_millis(500);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(5);
+const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 static RESOURCE_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Top-level process orchestrator.
@@ -185,7 +186,12 @@ pub struct GatewayConnectionStatus {
 }
 
 impl SupervisorApp {
-    pub fn new(resolved: ResolvedRuntimeConfig) -> Self {
+    pub fn new(resolved: ResolvedRuntimeConfig) -> anyhow::Result<Self> {
+        let manager = SandboxManager::from_config(&resolved.config.sandbox)?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(STATUS_REQUEST_TIMEOUT)
+            .build()?;
         let logs = LogStore::new();
         let telemetry = TelemetryHub::new();
         let (log_tx, mut log_rx) = mpsc::unbounded_channel::<ManagedProcessLogLine>();
@@ -218,18 +224,9 @@ impl SupervisorApp {
                 )
             })
             .collect();
-        let sandbox = match SandboxManager::from_config(
-            &resolved.config.sandbox,
-            resolved.config.sandbox.workspace_root.clone(),
-        ) {
-            Ok(manager) => SandboxProvider::new(manager).with_telemetry(telemetry.clone()),
-            Err(error) => {
-                tracing::warn!(%error, "sandbox provider initialization failed; disabling provider");
-                SandboxProvider::disabled().with_telemetry(telemetry.clone())
-            }
-        };
+        let sandbox = SandboxProvider::new(manager).with_telemetry(telemetry.clone());
 
-        Self {
+        Ok(Self {
             inner: std::sync::Arc::new(Mutex::new(SupervisorInner {
                 config: resolved.config,
                 processes,
@@ -237,11 +234,11 @@ impl SupervisorApp {
             })),
             logs,
             log_tx,
-            http: reqwest::Client::new(),
+            http,
             sandbox,
             telemetry,
             instance_session_binding: std::sync::Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     /// Establish the initial pair or validate an idempotent same-pair binding.
@@ -700,17 +697,11 @@ impl SupervisorApp {
             inner
                 .processes
                 .get("gateway")
-                .and_then(|state| {
-                    state
-                        .spec
-                        .endpoints
-                        .get("websocket")
-                        .or_else(|| state.spec.endpoints.get("http"))
-                })
+                .and_then(|state| state.spec.endpoints.get("websocket"))
                 .cloned()
         }?;
 
-        let url = format!("{}/capabilities/status", endpoint.trim_end_matches('/'));
+        let url = format!("{}/runtime/status", endpoint.trim_end_matches('/'));
         let response = self.http.get(url).send().await.ok()?;
         if !response.status().is_success() {
             return None;
@@ -1069,6 +1060,7 @@ mod tests {
             env: BTreeMap::new(),
             bind: BTreeMap::new(),
             provides: vec![],
+            capabilities: BTreeMap::new(),
             depends_on: vec![],
             endpoints: BTreeMap::new(),
             health_url: None,
@@ -1097,6 +1089,32 @@ mod tests {
             },
             base_dir: ".".into(),
         })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gateway_status_returns_when_endpoint_stalls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _hold = socket;
+            std::future::pending::<()>().await;
+        });
+        let mut spec = test_spec(String::new(), RestartPolicy::Never);
+        spec.endpoints
+            .insert("websocket".into(), format!("http://{address}"));
+        let app = test_app_with_processes(BTreeMap::from([("gateway".into(), spec)]));
+
+        let result = tokio::time::timeout(
+            STATUS_REQUEST_TIMEOUT + Duration::from_secs(2),
+            app.fetch_gateway_status(),
+        )
+        .await;
+        server.abort();
+        assert!(result
+            .expect("Gateway status must have a bounded request timeout")
+            .is_none());
     }
 
     #[tokio::test]

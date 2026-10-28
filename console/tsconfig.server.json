@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "allowJs": true,
+    "resolveJsonModule": true
+  },
+  "include": ["server/plugin.ts", "server/runtime-selection.mjs", "vite.config.ts"]
+}

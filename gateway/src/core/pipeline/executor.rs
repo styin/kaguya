@@ -10,16 +10,16 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info};
 
 use crate::capabilities::RagCapability;
-use crate::context;
-use crate::history::History;
-use crate::output::OutputManager;
-use crate::persona::Persona;
+use crate::clients::reasoner::ReasonerManager;
+use crate::clients::talker::TalkerClient;
+use crate::core::context;
+use crate::core::history::History;
+use crate::core::output::OutputManager;
+use crate::core::persona::Persona;
+use crate::core::silence::SilenceTimers;
+use crate::core::types::InputEvent;
 use crate::proto;
-use crate::reasoner::ReasonerManager;
-use crate::silence::SilenceTimers;
-use crate::talker::TalkerClient;
 use crate::tools::ToolRegistry;
-use crate::types::InputEvent;
 
 use super::types::{PipelineAction, SessionState};
 
@@ -106,21 +106,21 @@ impl<'a> ActionExecutor<'a> {
 
             // ── Output routing ──
             PipelineAction::SendResponseStarted { generation_id } => {
-                self.output.send_response_started(&generation_id).await;
+                self.output.send_response_started(&generation_id);
             }
 
             PipelineAction::SendSentence {
                 generation_id,
                 text,
             } => {
-                self.output.send_sentence(&generation_id, &text).await;
+                self.output.send_sentence(&generation_id, &text);
             }
 
             PipelineAction::SendEmotion {
                 generation_id,
                 emotion,
             } => {
-                self.output.send_emotion(&generation_id, &emotion).await;
+                self.output.send_emotion(&generation_id, &emotion);
             }
 
             PipelineAction::SendResponseComplete {
@@ -128,20 +128,11 @@ impl<'a> ActionExecutor<'a> {
                 was_interrupted,
             } => {
                 self.output
-                    .send_response_complete(&generation_id, was_interrupted)
-                    .await;
+                    .send_response_complete(&generation_id, was_interrupted);
             }
 
             PipelineAction::SendUserInput { text } => {
-                self.output.send_user_input(&text).await;
-            }
-
-            PipelineAction::MuteOutput => {
-                self.output.mute_audio();
-            }
-
-            PipelineAction::UnmuteOutput => {
-                self.output.unmute_audio();
+                self.output.send_user_input(&text);
             }
 
             // ── History ──

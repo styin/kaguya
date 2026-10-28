@@ -24,7 +24,9 @@ process does not multiplex instances or sessions.
     audio frames, the turn detector, and the event queue feeding the gRPC.
 - **voice/turn_detector.py** — Rule-based end-of-turn detection (Phase 1; see
   REF-004 for the planned Phase 2 learned model).
-- **voice/speaker.py** — Spoken text → Kokoro TTS → audio out.
+- **voice/speaker.py** — Spoken text → Kokoro TTS → audio out. Barge-in
+  accounting acknowledges only completed playback batches; the interrupted
+  batch and queued text stay unspoken. Exact word delivery is not measured.
 - **inference/prompt_formatter.py** — `PromptContext` plus a typed generation
   trigger and cached `PersonaConfig` → Qwen3 chat-template prompt. Prefill uses
   the same snapshot renderer without a generation trigger.
@@ -220,21 +222,15 @@ The script generates Python + mypy `.pyi` stubs into `talker/proto/`
 uv run pytest -v
 ```
 
-`tests/test_grpc_handshake.py` exercises initialized bidi streams against an
-in-process server: valid init/start receives headers before ASR/inference
-output, missing/misordered/duplicate initialization fails promptly, and an
-invalid replacement cannot take over a live Listener stream.
+`tests/test_grpc_handshake.py` exercises stream setup against an in-process
+server: valid scope/start receives headers before ASR/inference output,
+malformed Talker initialization fails promptly, and an invalid replacement
+cannot take over a live Listener stream.
 `tests/test_instance_session_binding.py` checks typed scope rejection before
 persona, cache, or speaker mutation, plus cached persona and generation
 correlation. Startup and raw-audio scope validation have separate regressions.
 
-### Test harness (deprecated)
-
-`scripts/mic_to_listener_harness.py` was a single-process harness from
-before the Listener/Gateway gRPC role flip. It is currently **broken** —
-it dials Gateway as a gRPC client and uses removed proto messages
-(`ListenerEvent`, `StreamEvents`). Pending rewrite. See the file's
-top-of-file warning for details.
+### End-to-end text input
 
 For end-to-end testing without a real microphone, use the Gateway's
 WebSocket text-command path:
@@ -259,18 +255,22 @@ echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
   `SessionId { value }`. Scope is carried in protobuf requests, not custom
   gRPC identity metadata. `GenerationStart` has `session`, `generation_id`,
   `timestamp_ms`, `prompt_context`, and a trigger `oneof`: user input, tool
-  result, Reasoner result/progress, or silence. Tool results retain
-  `request_id`; Reasoner results/progress retain `task_id`. `PromptContext`
+  result, Reasoner result/progress/failure, or silence. Tool results retain
+  `request_id`; Reasoner results/progress/failures retain `task_id`. Failures
+  retain their error message and code instead of becoming successful results. `PromptContext`
   contains history, memory, tools, typed active tasks, and retrieval results.
   `PrefillRequest` carries `session` and `prompt_context` without inventing a
   generation or trigger. `UpdatePersonaRequest` carries `session` and `persona`.
-- **Initialized bidi streams.** Gateway prequeues `ListenerInput.init`
-  (`ListenerInit { session }`) or `TalkerInput.start` (`GenerationStart`)
-  before awaiting the RPC handshake. The server validates that first message,
-  then flushes response headers before waiting for ASR or inference output.
-  Missing, misordered, or repeated initialization is rejected. Listener queue
-  takeover happens only after scope validation. Subsequent Listener controls
-  inherit the stream scope; inline `BargeInSignal` explicitly asserts the pair.
+- **Stream setup.** Listener accepts a bidi stream beginning with
+  `ListenerInput.init` (`ListenerInit { session }`), followed by typed
+  `ListenerInput.control` messages. The declared reset control currently ends
+  the RPC with `UNIMPLEMENTED`; future pause/reconfiguration variants can extend
+  this boundary. Talker begins with `TalkerInput.start` (`GenerationStart`),
+  followed by inline `BargeInSignal` requests. Gateway queues each initial
+  message before waiting for headers, and both services validate scope before
+  sending them. Listener queue takeover happens only after scope validation.
+  Missing, misordered, or repeated initialization is rejected. Half-closing
+  Listener input leaves its event subscription active; cancellation closes it.
 - **Generation provenance.** Each Converse stream serves one generation.
   Every `TalkerOutput` carries its `generation_id` in the outer envelope; Gateway
   validates it against the dispatch before forwarding the protobuf directly.
@@ -309,7 +309,6 @@ sequenceDiagram
     G->>V: Raw TCP: 39-byte scope header, then length-prefixed PCM/Opus
     Note over V: Opus decode if needed, RealtimeSTT, utterance detection
     V-->>G: VAD events, partial transcripts, final transcript
-    G->>V: ListenerInput.control (inherits initialized stream scope)
 
     G->>V: Converse: first TalkerInput.start (GenerationStart)
     Note over V: Validate session, generation ID, prompt context, and typed trigger

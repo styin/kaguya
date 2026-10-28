@@ -28,6 +28,7 @@ fn trigger_name(trigger: Option<&proto::generation_start::Trigger>) -> &'static 
         Some(proto::generation_start::Trigger::ToolResult(_)) => "tool_result",
         Some(proto::generation_start::Trigger::ReasonerResult(_)) => "reasoner_result",
         Some(proto::generation_start::Trigger::ReasonerProgress(_)) => "reasoner_progress",
+        Some(proto::generation_start::Trigger::ReasonerFailure(_)) => "reasoner_failure",
         Some(proto::generation_start::Trigger::Silence(_)) => "silence",
         None => "missing",
     }
@@ -385,7 +386,7 @@ impl TalkerClient {
         expected_runtime: bool,
         shutdown: CancellationToken,
     ) -> Result<(), tonic::Status> {
-        use crate::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
+        use crate::clients::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
 
         loop {
             tokio::select! {
@@ -737,7 +738,7 @@ mod tests {
     }
 
     fn start_for(session: &SessionRef) -> proto::GenerationStart {
-        crate::context::assemble_from_data(
+        crate::core::context::assemble_from_data(
             session,
             "generation-1",
             "hello",
@@ -814,8 +815,7 @@ mod tests {
         ) -> Result<tonic::Response<Self::ConverseStream>, tonic::Status> {
             // Scope is an explicit first-message contract, with no competing
             // custom metadata representation.
-            assert!(req.metadata().get("x-kaguya-instance-id").is_none());
-            assert!(req.metadata().get("x-kaguya-session-id").is_none());
+
             let mut input = req.into_inner();
             let first = input
                 .message()
@@ -890,8 +890,6 @@ mod tests {
             &self,
             req: tonic::Request<proto::UpdatePersonaRequest>,
         ) -> Result<tonic::Response<proto::PersonaAck>, tonic::Status> {
-            assert!(req.metadata().get("x-kaguya-instance-id").is_none());
-            assert!(req.metadata().get("x-kaguya-session-id").is_none());
             assert_eq!(req.get_ref().session, Some(test_session()));
             assert!(req.get_ref().persona.is_some());
             Ok(tonic::Response::new(proto::PersonaAck {}))

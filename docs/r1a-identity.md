@@ -2,7 +2,7 @@
 
 The runtime TOML is the deployment entry point. It selects component settings,
 an explicit portable data root, and one instance-local manifest. Gateway owns
-instance creation, rekeying, persona/RAG adoption, and active data leases.
+instance creation, rekeying, persona initialization, and active data leases.
 Supervisor manages processes and sandbox allocations. R1a supports one active
 session per instance; history remains in memory until R1c.
 
@@ -42,7 +42,7 @@ absolute values are also supported. `instance.manifest` must be relative to
 the portable root, select `instances/<InstanceId>/instance.toml`, and contain
 no parent traversal. The directory component must be a canonical non-nil UUID,
 and loading the manifest requires it to equal the declared `instance_id`.
-Gateway persona initialization sources, RAG source, and file-tool workspace
+Gateway persona templates and file-tool workspace
 paths resolve relative to the selected Gateway settings file.
 
 `shared/deployment.rs` is the narrow shared Rust selection/path resolver;
@@ -81,10 +81,8 @@ gateway/data/
 The selected manifest's parent is the exact instance root: no second
 `instances/<id>` suffix is appended. `instance.toml` contains only
 `schema_version = 1`, `instance_id`, and `default_session_id`; both IDs are
-different, non-nil, canonical UUID strings. Generation uses UUIDv4. There is
-no duplicate `owner.toml` record and no legacy selection/migration interface.
-The default-session association is therefore not duplicated in directory
-ownership metadata. Changing it does not rename the instance directory; this
+different, non-nil, canonical UUID strings. Generation uses UUIDv4. The manifest
+is the sole identity authority. Changing it does not rename the instance directory; this
 does not add live session switching, and running services still enforce their
 existing pair binding.
 
@@ -118,9 +116,11 @@ cargo run --manifest-path gateway/Cargo.toml -- init-instance --runtime-config c
 
 Initialization requires an unselected deployment. It validates readable persona
 sources before creating directories, generates IDs and a new UUID directory,
-copies persona, snapshots an existing RAG source with SQLite `VACUUM INTO`,
-then publishes and reads back the local manifest. Missing RAG source means
-startup will create an empty RAG database. Sources are preserved.
+copies persona templates, then publishes and reads back the local manifest.
+Startup creates an empty instance-owned RAG database. Initialization never
+borrows or snapshots a previous database, and there is no external database
+source setting. Templates are preserved. Use `rekey-instance` when an independent
+copy of a selected instance and its existing data is intended.
 
 Output is JSON containing `instance_id`, `default_session_id`, absolute
 `manifest` and `instance_directory`, `manifest_reference`, and
@@ -186,21 +186,17 @@ construct or extract the generated reference at that boundary.
 Authoritative history, Reasoner implementation/run lifecycle, authorization,
 multiplexing, and ownership transfer remain their separate stages.
 
-The coordinated protocol cleanup intentionally replaces the former wire
-contract; no compatibility aliases remain. A protobuf `SessionRef` contains
+The protobuf schema is the shared runtime contract. A protobuf `SessionRef` contains
 named `InstanceId { value }` and `SessionId { value }` messages. Unary requests
-carry this assertion, while `ListenerInit`, `GenerationStart`, and Reasoner's
-initial `TaskRequest` establish stream scope. Voice validates the initial
-message before sending response headers or mutating stream state; malformed,
-misordered, duplicate or mismatched initialization fails. Clients enqueue that
-first message before waiting for headers, avoiding a startup deadlock. Scope is
+carry this assertion. Initial `ListenerInput.init` (`ListenerInit`),
+`GenerationStart`, and Reasoner's initial `TaskRequest` establish bidirectional
+stream scope. Voice validates scope before sending response headers or mutating
+state. Bidirectional clients enqueue their first message before waiting for
+headers, avoiding a startup deadlock. Scope is
 an assertion against the configured pair, not a routing or authentication key.
-Custom instance/session gRPC metadata and `InstanceIdentity.grpc_request()` are
-removed. Canonical `session_id` replaces `conversation_id` in bootstrap and
-telemetry, and `generation_id` replaces the old Talker dispatch `turn_id`.
 
 `GenerationStart` carries shared `PromptContext` plus exactly one typed trigger:
-user input, tool result (`request_id`), Reasoner result/progress (`task_id`), or
+user input, tool result (`request_id`), Reasoner result/progress/failure (`task_id`), or
 silence. Active tasks are typed rather than JSON inside the prompt context.
 `UpdatePersonaRequest` remains a separate scoped RPC on startup, reconnect and
 persona changes; persona is not resent with every generation. Every
@@ -218,15 +214,16 @@ frame.
 
 `TalkerOutput.generation_id` is a separate per-output field: a 36-character UUID
 uses 38 protobuf bytes. It accompanies every semantic output, including barge-in
-acknowledgments, but does not add bytes to audio frames. This pre-alpha protocol
-permits coordinated breaking changes: `TalkerOutput` uses fields 1/2 for
-`seq`/`generation_id` and 3-9 for payloads. `ResponseStarted` is empty and
-`ResponseComplete.was_interrupted` is field 1, without compatibility reservations.
-`ListenerInput` likewise uses `init = 1` and `control = 2`, without reserving the
-removed in-band audio field; audio continues over the separate raw socket.
+acknowledgments, but does not add bytes to audio frames. The canonical protobuf
+schema owns field numbering and message shapes.
+Listener retains its input control stream after initialization. The declared
+reset control currently returns `UNIMPLEMENTED`; future pause/reconfiguration
+variants can extend that boundary. Audio uses the separate raw socket.
+Gateway likewise retains `ApprovalSignal` in its control schema while rejecting
+approvals with `UNIMPLEMENTED` after scope validation and before P0 dispatch.
 All components must use the regenerated schema together.
 
-The raw audio connection still sends its existing header once:
+The raw audio connection sends its header once:
 
 ```text
 connection: [ KAGUYA1: 7 bytes ][ Instance UUID: 16 ][ Session UUID: 16 ]
@@ -241,8 +238,8 @@ counts describe the encoding; no latency/throughput benchmark is claimed.
 
 Sandbox `AllocationId`, opaque handle, tool request ID, and durable session
 remain separate. Release permits a fresh allocation under the same session.
-Docker's `supervisor_run_id` stays ephemeral and its existing container label
-is retained. Full workspace/task/policy binding and failure reconciliation
+Docker's `supervisor_run_id` stays ephemeral and uses the
+`kaguya.sandbox.supervisor_run` ownership label. Full workspace/task/policy binding and failure reconciliation
 remain R5.
 
 ## Read-only validation and redacted diagnostics
@@ -282,10 +279,8 @@ Deployment configuration contains trusted executable instructions. Current
 `command` / `command_win32` values execute through platform shells, including
 the existing Console launcher. Editing them can change executed code. R1d
 will define structured executable/argument descriptors, explicit shell use,
-and compatibility rules; this pass does not claim that migration is complete.
+and validated startup inputs; that consolidation remains unimplemented.
 
-The canonical implementation plan records Windows checks and outstanding
-macOS/deployment/live-voice acceptance. No actual instance was initialized in
-this checkout during the closure pass; the existing initialization sources
-were preserved. See [R1a through R1d](implementation-plan-v0.1.0.md#r1--session-identity-and-persistence)
+The canonical implementation plan records validation and outstanding
+macOS/deployment/live-voice acceptance. See [R1a through R1d](implementation-plan-v0.1.0.md#r1--session-identity-and-persistence)
 for the accepted work split and durability gates.

@@ -36,20 +36,15 @@ export type EgressMessage =
 // ─── Event log envelope ──────────────────────────────────────────────
 //
 // Direction is named relative to the browser (where this code runs):
-//   `ws_in`    / `audio_in`  — browser RECEIVES
-//   `ws_out`   / `audio_out` — browser SENDS
+//   `ws_in`  — browser RECEIVES
+//   `ws_out` — browser SENDS
 //
 // Semantic UI state derives from the WS event log via pure selectors in `store.ts`.
-// Audio byte counts live in a separate ring so they cannot evict turn events.
-// Audio frames carry only byte counts, never PCM payloads.
+// Microphone audio bypasses the event log.
 
 export type WsEvent =
   | { kind: "ws_in";     ts: number; msg: EgressMessage }
   | { kind: "ws_out";    ts: number; msg: IngressMessage };
-
-export type AudioEvent =
-  | { kind: "audio_in";  ts: number; bytes: number }
-  | { kind: "audio_out"; ts: number; bytes: number };
 
 // ─── Turn projection (derived) ───────────────────────────────────────
 //
@@ -124,6 +119,8 @@ export interface RuntimeLifecycleSnapshot {
 }
 
 export interface RuntimeStatusSnapshot {
+  instance_id: string;
+  session_id: string;
   lifecycle: RuntimeLifecycleSnapshot;
 }
 

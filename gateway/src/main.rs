@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
                 "startup"
             });
             report["instance"] = instance_state.as_ref().map(|(identity, _)| serde_json::json!({ "instance_id": identity.instance_id, "default_session_id": identity.default_session_id })).unwrap_or(serde_json::Value::Null);
-            report["initialization_sources"] = serde_json::json!({ "soul_path": config.files.soul_path, "persona_identity_path": config.files.identity_path, "rag_db_path": config.rag.db_path });
+            report["initialization_sources"] = serde_json::json!({ "soul_path": config.files.soul_path, "persona_identity_path": config.files.identity_path });
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }

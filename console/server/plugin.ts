@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
+import type { AppStatusSnapshot, ProcessInfo, ProcessStatus, LogEntry } from "../src/types";
 import {
   consoleLaunchPlan,
   resolveRuntimeSelection,
@@ -17,48 +18,11 @@ const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const SPINNER_RE = /^[\u2800-\u28ff]\s/;
 const VOICE_STATUS_SPINNER_RE = /^(?:[\\|/-]\s*)?(?:recording|speak now)\s*$/i;
 
-type ProcessStatus = "stopped" | "starting" | "running" | "errored";
 type ProcessAction = "start" | "stop" | "restart";
-
-interface ProcessInfo {
-  name: string;
-  label: string;
-  managed: boolean;
-  status: ProcessStatus;
-  group?: string;
-  blockedBy?: string[];
-  pid?: number;
-  uptimeSecs?: number;
-  exitCode?: number | null;
-  children?: RuntimeChildInfo[];
-}
-
-interface RuntimeChildInfo {
-  name: string;
-  label: string;
-  kind: "process" | "connection";
-  status: ProcessStatus;
-  pid?: number | null;
-  exitCode?: number | null;
-}
-
-interface AppStatusSnapshot {
-  state: "stopped" | "running" | "degraded" | "stopping";
-  processes: ProcessInfo[];
-  gateway?: unknown;
-}
 
 interface ActionResult {
   ok: boolean;
   error?: string | null;
-}
-
-interface LogEntry {
-  id: number;
-  timestamp: string;
-  source: string;
-  stream: "stdout" | "stderr";
-  line: string;
 }
 
 interface StandaloneProcessConfig {
@@ -114,7 +78,13 @@ export function supervisorPlugin(): Plugin {
 
       server.middlewares.use((req, res, next) => {
         if (!req.url?.startsWith("/api/")) return next();
-        void handleApi(req, res, standalone);
+        void handleApi(req, res, standalone).catch((error: unknown) => {
+          if (res.headersSent) { res.end(); return; }
+          json(res, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          }, 503);
+        });
       });
     },
   };
@@ -152,12 +122,10 @@ async function handleApi(
   const processAction = /^\/api\/process\/([^/]+)\/(start|stop|restart)$/.exec(
     url.pathname,
   );
-  if (processAction && req.method === "POST") {
-    const [, name, action] = processAction as [
-      string,
-      string,
-      ProcessAction,
-    ];
+  const action = processAction?.[2];
+  if (processAction && req.method === "POST" &&
+      (action === "start" || action === "stop" || action === "restart")) {
+    const name = processAction[1];
     if (name === "kaguya_app") {
       await handleAppProcessAction(action, res, standalone);
       return;
@@ -262,15 +230,16 @@ function proxyToSupervisor(
 }
 
 async function fetchSupervisorStatus(): Promise<AppStatusSnapshot> {
-  try {
-    const res = await fetch(`${SUPERVISOR_ORIGIN}/api/app/status`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    if (!res.ok) throw new Error(`supervisor status ${res.status}`);
-    return (await res.json()) as AppStatusSnapshot;
-  } catch {
-    return { state: "stopped", processes: [], gateway: null };
+  const res = await fetch(`${SUPERVISOR_ORIGIN}/api/app/status`, {
+    signal: AbortSignal.timeout(1000),
+  });
+  if (!res.ok) throw new Error(`supervisor status unavailable (${res.status})`);
+  const status = await res.json() as AppStatusSnapshot;
+  if (!status || !["stopped", "running", "degraded", "stopping"].includes(status.state) ||
+      !Array.isArray(status.processes)) {
+    throw new Error("supervisor returned invalid app status");
   }
+  return status;
 }
 
 function composeConsoleStatus(
@@ -369,8 +338,8 @@ async function supervisorAction(pathname: string): Promise<ActionResult> {
   }
 }
 
-function json(res: http.ServerResponse, payload: unknown): void {
-  res.writeHead(200, { "Content-Type": "application/json" });
+function json(res: http.ServerResponse, payload: unknown, status = 200): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(payload));
 }
 

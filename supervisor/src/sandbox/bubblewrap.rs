@@ -1,7 +1,7 @@
 //! Bubblewrap backend — Linux namespace isolation without a Docker daemon.
 //! `bwrap` supplies the mount/process boundary and unshares networking.
 //!
-//! Minimal usable bind list (see the debugging notes in the PR description):
+//! Filesystem mounts:
 //!   ro:    /usr /bin /sbin /lib /lib64 /etc   — interpreters, shared libs,
 //!                                                CA certs, /etc/passwd
 //!   proc:  /proc                              — some runtimes stat /proc
@@ -9,17 +9,15 @@
 //!   tmpfs: /tmp                               — scratch, isolated per run
 //!   bind:  <allocation dir> → /home/sandbox      — the only writable workspace,
 //!                                                persistent across calls in a
-//!                                                conversation
+//!                                                allocation
 //! Namespaces: `--unshare-all` (including network) + `--die-with-parent`.
 //! Env: cleared, then a minimal known-good set so HOME/TMPDIR are writable.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_trait::async_trait;
 use tokio::process::Command;
-use tokio::sync::Mutex;
 
 use super::{
     configure_process_group, run_spawned, sanitize_allocation, script_name, ExecRequest,
@@ -28,11 +26,10 @@ use super::{
 
 pub struct BubblewrapBackend {
     root: PathBuf,
-    allocations: Mutex<HashSet<String>>,
 }
 
 impl BubblewrapBackend {
-    pub fn new(_workspace_root: PathBuf) -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let ok = std::process::Command::new("bwrap")
             .arg("--version")
             .stdout(std::process::Stdio::null())
@@ -47,10 +44,9 @@ impl BubblewrapBackend {
         }
         Ok(Self {
             root: std::env::temp_dir().join("kaguya-sandbox"),
-            allocations: Mutex::new(HashSet::new()),
         })
     }
-    fn session_dir(&self, allocation: &str) -> PathBuf {
+    fn allocation_dir(&self, allocation: &str) -> PathBuf {
         self.root.join(sanitize_allocation(allocation))
     }
 }
@@ -58,19 +54,17 @@ impl BubblewrapBackend {
 #[async_trait]
 impl SandboxBackend for BubblewrapBackend {
     async fn acquire(&self, allocation: &str) -> Result<(), String> {
-        tokio::fs::create_dir_all(self.session_dir(allocation))
+        tokio::fs::create_dir_all(self.allocation_dir(allocation))
             .await
             .map_err(|error| format!("mkdir failed: {error}"))?;
-        self.allocations.lock().await.insert(allocation.to_string());
         Ok(())
     }
 
     async fn execute(&self, allocation: &str, req: ExecRequest) -> ExecResult {
-        let dir = self.session_dir(allocation);
+        let dir = self.allocation_dir(allocation);
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             return ExecResult::backend_error(format!("mkdir failed: {e}"));
         }
-        self.allocations.lock().await.insert(allocation.to_string());
 
         let script = script_name(req.language.ext());
         if let Err(e) = tokio::fs::write(dir.join(&script), &req.code).await {
@@ -130,7 +124,9 @@ impl SandboxBackend for BubblewrapBackend {
             .stderr(Stdio::piped());
 
         let result = match cmd.spawn() {
-            Ok(child) => run_spawned(child, req.stdin, req.timeout, req.max_output_bytes).await,
+            Ok(child) => {
+                run_spawned(child, req.stdin, req.timeout, req.max_output_bytes, || {}).await
+            }
             Err(e) => ExecResult::backend_error(format!("bwrap spawn: {e}")),
         };
         // Best-effort remove the transient runner script; user-created files stay.
@@ -139,8 +135,7 @@ impl SandboxBackend for BubblewrapBackend {
     }
 
     async fn cleanup(&self, allocation: &str) {
-        let _ = tokio::fs::remove_dir_all(self.session_dir(allocation)).await;
-        self.allocations.lock().await.remove(allocation);
+        let _ = tokio::fs::remove_dir_all(self.allocation_dir(allocation)).await;
     }
 
     fn name(&self) -> &'static str {

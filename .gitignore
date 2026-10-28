@@ -22,6 +22,8 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
+.ruff_cache/
+.uv-test-cache/
 .coverage
 htmlcov/
 
@@ -36,17 +38,13 @@ dist/
 
 # Proto generated stubs
 # Talker: stubs are COMMITTED (see M0 decision - zero setup for end users)
-# Reasoner: runtime loading via @grpc/proto-loader (no generation)
 # Gateway: tonic-build generates during cargo build (gitignored)
-/reasoner/proto/
-/gateway/src/proto/
 
 # Claude Code local settings (per-developer, not shared)
 .claude/
 .codex/
 
 # Local data
-/config/MEMORY.md
 /config/kaguya.local.toml
 # RAG memory store — SQLite + WAL/SHM files, per-user runtime data
 /gateway/data/

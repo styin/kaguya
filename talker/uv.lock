@@ -959,7 +959,7 @@ wheels = [
 [[package]]
 name = "kaguya-talker"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "grpcio" },

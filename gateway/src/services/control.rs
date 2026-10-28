@@ -4,10 +4,10 @@ use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::core::types::ControlSignal;
 use crate::proto;
 use crate::proto::router_control_service_server::RouterControlService;
 use crate::proto::SessionRef;
-use crate::types::ControlSignal;
 
 pub struct ControlServiceImpl {
     control_tx: mpsc::Sender<ControlSignal>,
@@ -46,9 +46,10 @@ impl RouterControlService for ControlServiceImpl {
                 info!("gRPC → P0: STOP");
                 ControlSignal::Stop
             }
-            Some(proto::control_signal::Signal::Approval(a)) => {
-                info!("gRPC → P0: APPROVAL");
-                ControlSignal::Approval { context: a.context }
+            Some(proto::control_signal::Signal::Approval(_)) => {
+                return Err(Status::unimplemented(
+                    "approval handling is not implemented",
+                ));
             }
             Some(proto::control_signal::Signal::Shutdown(_)) => {
                 info!("gRPC → P0: SHUTDOWN");
@@ -87,6 +88,62 @@ mod tests {
             signal: Some(proto::ControlSignal {
                 signal: Some(proto::control_signal::Signal::Stop(proto::StopSignal {})),
             }),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_is_explicitly_unimplemented_without_p0_dispatch() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let expected = session();
+        let service = ControlServiceImpl::new(tx, expected.clone());
+        let approval = |scope| proto::ControlRequest {
+            session: Some(scope),
+            signal: Some(proto::ControlSignal {
+                signal: Some(proto::control_signal::Signal::Approval(
+                    proto::ApprovalSignal {
+                        context: "approve a pending operation".into(),
+                    },
+                )),
+            }),
+        };
+        let mismatch = service
+            .send_control(Request::new(approval(session())))
+            .await
+            .unwrap_err();
+        assert_eq!(mismatch.code(), tonic::Code::FailedPrecondition);
+        let unsupported = service
+            .send_control(Request::new(approval(expected.clone())))
+            .await
+            .unwrap_err();
+        assert_eq!(unsupported.code(), tonic::Code::Unimplemented);
+        assert!(
+            rx.try_recv().is_err(),
+            "approval must not be acknowledged or queued"
+        );
+
+        for (signal, is_shutdown) in [
+            (
+                proto::control_signal::Signal::Stop(proto::StopSignal {}),
+                false,
+            ),
+            (
+                proto::control_signal::Signal::Shutdown(proto::ShutdownSignal {}),
+                true,
+            ),
+        ] {
+            service
+                .send_control(Request::new(proto::ControlRequest {
+                    session: Some(expected.clone()),
+                    signal: Some(proto::ControlSignal {
+                        signal: Some(signal),
+                    }),
+                }))
+                .await
+                .unwrap();
+            assert!(matches!(
+                (rx.recv().await.unwrap(), is_shutdown),
+                (ControlSignal::Stop, false) | (ControlSignal::Shutdown, true)
+            ));
         }
     }
 

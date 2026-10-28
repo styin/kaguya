@@ -7,25 +7,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub enum ControlSignal {
     Stop,
-    Approval { context: String },
     Shutdown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ControlEffect {
-    InterruptActiveWork,
-    RequestShutdown,
-    RecordApproval,
-}
-
-impl ControlSignal {
-    pub fn effect(&self) -> ControlEffect {
-        match self {
-            ControlSignal::Stop => ControlEffect::InterruptActiveWork,
-            ControlSignal::Approval { .. } => ControlEffect::RecordApproval,
-            ControlSignal::Shutdown => ControlEffect::RequestShutdown,
-        }
-    }
 }
 
 /// P1–P5 Input Priority Queue
@@ -125,6 +107,8 @@ pub enum DispatchKind {
     ReasonerNarration,
     /// P3 input — assistant continues with a Reasoner task summary.
     ReasonerResult,
+    /// P3 input — assistant reports a failed Reasoner task.
+    ReasonerFailure,
     /// P4 input — silence-triggered re-engagement.
     Silence,
 }
@@ -142,25 +126,6 @@ impl DispatchKind {
 mod tests {
     use super::*;
 
-    #[test]
-    fn p0_signals_distinguish_stop_from_shutdown() {
-        assert_eq!(
-            ControlSignal::Stop.effect(),
-            ControlEffect::InterruptActiveWork
-        );
-        assert_eq!(
-            ControlSignal::Shutdown.effect(),
-            ControlEffect::RequestShutdown
-        );
-        assert_eq!(
-            ControlSignal::Approval {
-                context: "allow".into(),
-            }
-            .effect(),
-            ControlEffect::RecordApproval
-        );
-    }
-
     // ── P0-3: dispatch-kind gating for evaluate_and_store ──
 
     #[test]
@@ -176,6 +141,7 @@ mod tests {
         assert!(!DispatchKind::ToolResult.should_persist_memory());
         assert!(!DispatchKind::ReasonerNarration.should_persist_memory());
         assert!(!DispatchKind::ReasonerResult.should_persist_memory());
+        assert!(!DispatchKind::ReasonerFailure.should_persist_memory());
         assert!(!DispatchKind::Silence.should_persist_memory());
     }
 }

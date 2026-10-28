@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { createWsClient } from "./ws";
 import { startCapture, type CaptureHandle } from "./audio/capture";
-import { startPlayback, type PlaybackHandle } from "./audio/playback";
 import type { EgressMessage, IngressMessage } from "./types";
 import { actions, useStore } from "./store";
 import { TurnsPanel } from "./regions/TurnsPanel/TurnsPanel";
@@ -11,10 +10,8 @@ import { TopBar } from "./regions/TopBar/TopBar";
 import { LogsPanel } from "./regions/LogsPanel/LogsPanel";
 import "./App.css";
 
-// WS frames and outgoing sends are recorded into the semantic event log in
-// `store.ts`; audio frames use a separate byte-count ring so an open mic
-// cannot evict turn lifecycle events. UI state derives from selectors over
-// those logs; nothing stores a separate `messages` mirror.
+// Conversation state derives from the semantic event log. Microphone audio
+// bypasses that log and streams directly to Gateway.
 
 export default function App() {
   const micActive = useStore((s) => s.micActive);
@@ -22,13 +19,6 @@ export default function App() {
 
   const wsRef = useRef<ReturnType<typeof createWsClient> | null>(null);
   const captureRef = useRef<CaptureHandle | null>(null);
-  const playbackRef = useRef<PlaybackHandle | null>(null);
-
-  const handleAudio = useCallback((data: ArrayBuffer) => {
-    actions.recordAudioIn(data.byteLength);
-    playbackRef.current?.feed(data);
-  }, []);
-
   const handleMessage = useCallback((msg: EgressMessage) => {
     actions.recordWsIn(msg);
   }, []);
@@ -48,37 +38,16 @@ export default function App() {
     const client = createWsClient({
       onStatus: actions.setWsStatus,
       onMessage: handleMessage,
-      onAudio: handleAudio,
     });
     wsRef.current = client;
     return () => client.close();
-  }, [handleMessage, handleAudio]);
-
-  useEffect(() => {
-    // StrictMode double-mounts in dev: cancel the pending startPlayback
-    // so a stale handle from mount-1 doesn't survive past mount-2's
-    // cleanup. Without this, two audio graphs run concurrently and the
-    // meter can latch onto the discarded one.
-    let cancelled = false;
-    let handle: PlaybackHandle | null = null;
-    startPlayback().then((h) => {
-      if (cancelled) { h.stop(); return; }
-      handle = h;
-      playbackRef.current = h;
-    });
-    return () => {
-      cancelled = true;
-      handle?.stop();
-      playbackRef.current = null;
-    };
-  }, []);
+  }, [handleMessage]);
 
   useEffect(() => {
     if (!micActive) return;
     let cancelled = false;
     let handle: CaptureHandle | null = null;
     startCapture((pcm16) => {
-      actions.recordAudioOut(pcm16.byteLength);
       wsRef.current?.sendBinary(pcm16);
     })
       .then((h) => {

@@ -9,11 +9,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::core::types::InputEvent;
 use crate::lifecycle::TaskSpawner;
 use crate::proto;
 use crate::proto::SessionRef;
 use crate::sandbox::SandboxClient;
-use crate::types::InputEvent;
 
 struct ToolMeta {
     name: String,
@@ -181,7 +181,6 @@ impl ToolRegistry {
                     "read_file" => exec_read_file(&root, &args_json).await,
                     "write_file" => exec_write_file(&root, &args_json).await,
                     // DISABLED: see tool registration above
-                    // "run_command"  => exec_run_command(&root, &args_json).await,
                     other => Err(format!("unknown tool: {other}")),
                 };
 
@@ -275,11 +274,11 @@ async fn exec_read_file(root: &Path, args: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     let trunc = if content.len() > 8192 {
-        format!(
-            "{}...[truncated, {} bytes]",
-            &content[..8192],
-            content.len()
-        )
+        let mut end = 8192;
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...[truncated, {} bytes]", &content[..end], content.len())
     } else {
         content
     };
@@ -304,45 +303,6 @@ async fn exec_write_file(root: &Path, args: &str) -> Result<String, String> {
     )
 }
 
-// Legacy direct-shell implementation retained for comparison only. It is not
-// registered; all model-authored code must use the Supervisor-owned provider.
-#[allow(dead_code)]
-async fn exec_run_command(root: &Path, args: &str) -> Result<String, String> {
-    let cmd = parse_arg(args, "cmd")?;
-    let blocked = [
-        "rm -rf /",
-        "format c:",
-        "mkfs",
-        "dd if=",
-        ":(){",
-        "shutdown",
-        "reboot",
-    ];
-    for b in &blocked {
-        if cmd.contains(b) {
-            return Err(format!("blocked: {b}"));
-        }
-    }
-    let output = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-        .args(if cfg!(windows) {
-            vec!["/C", &cmd]
-        } else {
-            vec!["-c", &cmd]
-        })
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(serde_json::json!({
-        "exit_code": output.status.code().unwrap_or(-1),
-        "stdout": &stdout[..stdout.len().min(4096)],
-        "stderr": &stderr[..stderr.len().min(2048)],
-    })
-    .to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -363,6 +323,21 @@ mod tests {
                 value: uuid::Uuid::new_v4().to_string(),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn read_file_truncates_utf8_at_a_character_boundary() {
+        let root = std::env::temp_dir().join(format!("kaguya-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("unicode.txt"), "界".repeat(3000)).unwrap();
+        let result = exec_read_file(&root, r#"{"path":"unicode.txt"}"#)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let content = result["content"].as_str().unwrap();
+        assert!(content.starts_with(&"界".repeat(2730)));
+        assert!(content.ends_with("...[truncated, 9000 bytes]"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -424,7 +399,8 @@ mod tests {
                 processes: BTreeMap::new(),
             },
             base_dir: ".".into(),
-        });
+        })
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {

@@ -70,6 +70,14 @@ def test_prompt_snapshot_contains_cached_persona_history_tools_memory_and_retrie
             "[REASONER_RESULT:task-1] Done",
         ),
         (
+            "reasoner_failure",
+            kaguya_pb2.ReasonerFailure(
+                task_id="task-1", message="Service unavailable", code=14
+            ),
+            "tool",
+            "[REASONER_FAILURE:task-1 code=14] Service unavailable",
+        ),
+        (
             "reasoner_progress",
             kaguya_pb2.ReasonerProgress(
                 task_id="task-1", description="Reading sources"
@@ -106,3 +114,12 @@ def test_prefill_renders_snapshot_without_synthetic_generation_or_trigger():
     assert "Current time:" not in prompt
     assert "<|im_start|>user" not in prompt
     assert prompt.endswith("<|im_start|>assistant\n")
+
+
+@pytest.mark.parametrize("role", [kaguya_pb2.ROLE_UNSPECIFIED, 99])
+def test_unknown_history_role_is_rejected(role):
+    prompt_context = kaguya_pb2.PromptContext(
+        history=[kaguya_pb2.ChatMessage(role=role, content="Unclassified content")]
+    )
+    with pytest.raises(ValueError, match="Unsupported history role"):
+        assemble_prompt(prompt_context, kaguya_pb2.PersonaConfig())

@@ -4,7 +4,7 @@
 
 **Version:** 0.1.0
 
-**Updated:** 2026-10-23
+**Updated:** 2026-10-28
 
 **Audience:** Developers working on Gateway and adjacent service contracts
 
@@ -133,7 +133,7 @@ flowchart TD
 | Context assembly | `GenerationStart` combines a reusable `PromptContext` with one typed trigger; active tasks are typed | Aggregate size accounting and explicit oversize behavior in R8 |
 | Memory retrieval/storage | Built-in `RagEngine` behind `RagCapability`; SQLite, BM25, optional vectors | Future providers remain behind the capability boundary |
 | Persona delivery | Load/watch SOUL.md and IDENTITY.md; synthesize memory from RAG; deliver via UpdatePersona | Preserve startup/reconnect behavior through R0/R1 |
-| Policy and approval | Local file-path checks and Supervisor backend limits; approval control is a placeholder | Unified policy resolution and correlated approvals in R2 |
+| Policy and approval | Local file-path checks and Supervisor backend limits; declared approval requests return `UNIMPLEMENTED` | Unified policy resolution and correlated approvals in R2 |
 | Input/control | P1–P5 channels, separate P0 channel and Talker-output channel | Verify/correct responsiveness under slow work in R0/R8 |
 | Tool dispatch | Rust Gateway registry and asynchronous execution; opaque Supervisor handles for `sandbox_exec` | Policy/binding integration and basic tool/MCP inventory decision in R5 |
 | Runtime lifecycle | Gateway supervises async work and service connections | Supervisor continues to own process launch, restart and termination |
@@ -154,10 +154,10 @@ then proactive/ambient work.
 
 | Priority | Source | Current behavior / status |
 | --- | --- | --- |
-| P0 | STOP, APPROVAL, SHUTDOWN | Separate control channel, first event-loop branch; approval handling remains a placeholder |
+| P0 | STOP, SHUTDOWN | Separate control channel, first event-loop branch |
 | P1 | FinalTranscript, TextCommand | Assemble context and dispatch when Talker is ready; cancel active silence |
-| P2 | VadSpeechStart, VadSpeechEnd, PartialTranscript | Speech start requests inline barge-in and mutes output; partials/end events are currently logged |
-| P3 | ToolResult, ReasonerStep, ReasonerCompleted, ReasonerError | Record/route results and eligible narration; Reasoner errors are currently logged |
+| P2 | VadSpeechStart, VadSpeechEnd, PartialTranscript | Speech start requests inline barge-in through Converse; partials/end events are currently logged |
+| P3 | ToolResult, ReasonerStep, ReasonerCompleted, ReasonerError | Record/route results and eligible narration; Reasoner failures enter history and a typed Talker continuation |
 | P4 | SilenceExceeded | Proactive dispatch gated by configuration, readiness and generation state |
 | P5 | Telemetry | Channel/event placeholder; OpenPod ambient producers are deferred |
 
@@ -192,9 +192,8 @@ capability; the details here describe the built-in implementation, not a
 requirement that all providers use SQLite.
 
 The active RAG database is `kaguya.db` inside the selected instance directory.
-`[rag] db_path` supplies an optional initialization/adoption source, resolved
-relative to the selected Gateway settings file; normal startup substitutes the
-instance-owned path. [RagStore](../gateway/src/rag/store.rs) creates:
+Initialization copies persona templates and starts with an empty memory store;
+rekeying snapshots the selected instance into a new independent instance. [RagStore](../gateway/src/rag/store.rs) creates:
 
 - `memories`: typed conversation/fact/preference/project content, originating user-generation reference and creation timestamp;
 - `memories_fts`: FTS5 index maintained by triggers, using `porter unicode61` (REF-009);
@@ -275,7 +274,7 @@ response history from RAG ingestion:
 - Only eligible `UserIntent` responses with a preceding user input invoke memory extraction; tool continuations, Reasoner narration/results and silence rounds do not create fresh user/assistant memory pairs.
 - Non-interrupted completion checks for changed memory, pushes updated persona when needed, and requests prefix prefill.
 - An interrupted response skips that normal completion path. A received `BargeInAck` contributes only its confirmed-spoken text.
-- Completion resets generation activity within `SessionState`, unmutes output and restarts the silence cascade.
+- Completion resets generation activity within `SessionState` and restarts the silence cascade.
 
 The user entry is appended during user-input handling, not as a new paired
 record after every response. R1/R8 must verify interruption and duplicate-event
@@ -287,9 +286,8 @@ generations receive fresh IDs without replacing that reference.
 ### 4.5 Future Evolution and Limits
 
 LLM-based extraction, alternative embedding providers and reranking remain
-possible extensions. A vector-store migration threshold requires measurement;
-the old approximate corpus-size trigger is not a settled rule. Storage/schema
-compatibility must be evaluated for whichever design is selected.
+possible extensions. A vector-store adoption threshold requires measurement; corpus size alone
+does not establish the need for a different store.
 
 R8 retains aggregate context-size accounting and clear oversize behavior as
 unfinished requirements. Optional per-field caps alone do not establish that a
@@ -313,11 +311,11 @@ schema.
 ```text
 Console raw audio → Gateway byte forwarding → Listener
 Listener speech onset → VadSpeechStart [P2]
-Gateway cancels silence, requests inline barge-in, mutes its output
+Gateway cancels silence and requests inline barge-in
   if an active Converse sender exists:
     Talker sets generation cancellation and stops TTS
     Talker queues BargeInAck with spoken/unspoken text
-    Gateway records received spoken text and unmutes output
+    Gateway records acknowledged spoken text
 
 Listener final transcript → FinalTranscript [P1]
 Gateway checks Talker readiness, retrieves memory and assembles context
@@ -366,11 +364,11 @@ description. Gateway's [ReasonerManager](../gateway/src/clients/reasoner.rs)
 tracks a volatile request, connects to the Reasoner endpoint as a gRPC client,
 opens Delegate, and adapts supported outputs into P3 events. It does not spawn a
 Reasoner OS process. Intermediate/output descriptions feed narration; completion
-feeds a summary continuation; errors are currently logged by the event loop.
+feeds a summary continuation; failures enter history and a typed Talker continuation.
 
-**Current limitation:** The Reasoner package has no service implementation.
-Connection exhaustion currently triggers simulated progress/completion in the
-Gateway client. Those events are not evidence of real task execution.
+**Current limitation:** There is no Reasoner service implementation. Connection
+exhaustion emits a scoped task error; no simulated progress or completion is
+produced.
 
 **Target (R3–R6):**
 
@@ -460,8 +458,7 @@ user's meaning changes is still an open design question.
 ### Current Console
 
 The [Axum endpoint](../gateway/src/services/endpoint.rs), behind the
-`dev-console` feature, serves `/ws`, `/health`, `/capabilities/status` and
-`/runtime/status`. The React/Vite Console proxies its Gateway connection;
+`dev-console` feature, serves `/ws`, `/health` and `/runtime/status`. The React/Vite Console proxies its Gateway connection;
 Supervisor HTTP/SSE traffic uses the Console's separate development proxy.
 
 ```text
@@ -472,7 +469,7 @@ Console → Gateway /ws:
 
 Gateway → Console /ws:
   JSON semantic metadata → turn display
-  binary audio receiver/send path exists, but has no Talker TTS producer yet
+  no binary audio egress; Talker plays speech on its own host
 
 Console → Supervisor HTTP/SSE:
   app/process actions, status, logs and available telemetry APIs
@@ -487,7 +484,7 @@ transcript replay or approval interaction; those remain R1c/R2/R7 work.
 
 OpenPod would supply text/audio/control and ambient events, with Gateway handling
 its protocol boundary. Raw audio must remain outside protobuf serialization.
-The exact endpoint integration and compatibility strategy are future work;
+The exact endpoint integration and audio framing are future work;
 Console remains the current development interface.
 
 ## 12. Output Stream
@@ -500,10 +497,8 @@ that generation rather than whichever response is most recently open. Tool/task
 detail, typing, presence and transcript replay remain incomplete.
 
 **Current audio:** Talker plays speech on its host. Gateway's
-[OutputManager](../gateway/src/core/output.rs) has audio mute/forward primitives
-and the endpoint can send binary frames, but no current caller supplies TTS
-audio to that path. Browser playback code expects PCM; an implemented
-Opus-encoded browser egress stream must not be assumed.
+[OutputManager](../gateway/src/core/output.rs) distributes semantic metadata.
+There is no outbound audio channel or browser playback implementation.
 
 **Target (R7):** Transport Talker speech to the endpoint through Gateway without
 decoding it there; agree codec/sample-rate and playback/interruption behavior.
@@ -521,7 +516,7 @@ The current TalkerOutput oneof is defined in the canonical schema:
 | EmotionEvent | Forward emotion metadata |
 | ToolRequest | Dispatch a known tool or record an unknown-tool error |
 | DelegateRequest | Start Gateway-side Reasoner request coordination |
-| BargeInAck | Append nonempty spoken_text and unmute; unspoken_text is not appended |
+| BargeInAck | Append nonempty acknowledged spoken_text; unspoken_text is not appended |
 | ResponseComplete | Conditional history/RAG/persona/prefill work, reset state, restart silence and emit completion metadata |
 
 Messages have a per-stream sequence field and an outer `generation_id` on
@@ -572,10 +567,10 @@ This table summarizes ownership without duplicating schema bodies:
 
 | Interface | Client | Server | Current status |
 | --- | --- | --- | --- |
-| ListenerService.Stream | Gateway | Listener inside voice stack | Implemented bidi stream |
+| ListenerService.Stream | Gateway | Listener inside voice stack | Bidirectional stream: initial scope, subsequent control extension point, streamed ASR events |
 | TalkerService.Converse / PrefillCache / UpdatePersona | Gateway | Talker inside voice stack | Implemented |
 | ReasonerService.Delegate / Interrupt / Telemetry | Gateway or designated subscriber | Reasoner | Schema and Gateway delegation client exist; service pending |
-| RouterControlService.SendControl | External control caller | Gateway | STOP/SHUTDOWN paths exist; approval semantics pending |
+| RouterControlService.SendControl | External control caller | Gateway | STOP/SHUTDOWN enter P0; declared approval returns `UNIMPLEMENTED` pending R2 |
 | Supervisor HTTP/SSE | Gateway and Console proxy | Supervisor | Process, sandbox, status/log/telemetry APIs |
 | Console WebSocket | Browser Console | Gateway | JSON semantic messages and separate binary audio frames |
 
@@ -584,23 +579,31 @@ Current service IPC uses TCP. The protobuf scope is
 message contains a `string value`. Both objects must be present. Validation
 requires canonical, non-nil, distinct UUIDs and equality with the receiver's
 startup scope. Scope is an assertion, not a routing key for multiplexing or
-proof of caller authentication. Custom `x-kaguya-instance-id` and
-`x-kaguya-session-id` metadata are no longer used; hosted authentication/tracing
-remain deferred.
+proof of caller authentication. Hosted authentication/tracing remain deferred.
 
 | RPC | Current association boundary |
 | --- | --- |
-| Listener `Stream` | Initial `ListenerInit.session`, validated before headers/events; controls follow |
+| Listener `Stream` | First `ListenerInput.init.session`, validated before headers/events; subsequent inputs use `control` |
 | Talker `Converse` | Initial `GenerationStart.session`/`generation_id`, validated before generation; inline `BargeInSignal.session` must agree |
 | Talker `PrefillCache` | `PrefillRequest.session` plus `PromptContext` |
 | Talker `UpdatePersona` | `UpdatePersonaRequest.session` plus cached `PersonaConfig` |
 | Reasoner `Delegate` | `TaskRequest.session`/`task_id`; context updates retain both; callback task IDs must agree |
 | Reasoner `Interrupt` | `InterruptRequest.session` and the selected signal; task cancel retains `task_id` |
 | Reasoner `Telemetry` | Scoped `TelemetrySubscribe`; schema exists, subscriber/service remain deferred |
-| Gateway `SendControl` | `ControlRequest.session` plus `ControlSignal`; validate before delivering to the separate P0 channel |
+| Gateway `SendControl` | `ControlRequest.session` plus `ControlSignal`; validate scope first, enqueue STOP/SHUTDOWN to P0, reject approval with `UNIMPLEMENTED` |
 
-Gateway queues the Listener/Converse initial message before awaiting response
-headers. Listener acceptance precedes opening the raw audio connection.
+Gateway queues the initial Listener and Converse messages before awaiting
+response headers. Listener accepts `ListenerInput.init` before Gateway opens the
+raw audio connection. Later Listener input retains a typed control extension
+point: reset currently terminates the RPC with `UNIMPLEMENTED`, while future
+pause/reconfiguration variants require defined semantics. Repeated init and
+empty input/control messages are invalid; request half-close alone does not
+close the event subscription.
+
+`ControlSignal` uses ordered fields `stop = 1`, `approval = 2`, `shutdown = 3`.
+`ApprovalSignal { context }` remains declared, but an otherwise valid scoped
+approval request returns gRPC `UNIMPLEMENTED` without entering P0 or granting
+authority. Correlated approval decisions, grants and resumption remain R2 work.
 Audio begins with the unchanged 39-byte prefix (`KAGUYA1`, binary InstanceId,
 binary SessionId), followed by `[u32 big-endian length][raw bytes]` records.
 Listener checks the prefix against its immutable startup scope. It accepts
@@ -610,8 +613,8 @@ PCM. Gateway never decodes these bytes.
 `PromptContext` holds history, memory content, tool definitions, typed active
 tasks and retrieval results. `GenerationStart.trigger` is a oneof of user input,
 tool result (`request_id`, content), Reasoner result (`task_id`, summary),
-Reasoner progress (`task_id`, description), or silence (`duration_ms`). This
-replaces the flat tool/Reasoner result aliases and JSON task list. Persona is
+Reasoner progress (`task_id`, description), Reasoner failure (`task_id`, message,
+code), or silence (`duration_ms`). Persona is
 still cached via UpdatePersona at startup/reconnect and on changes; it is not a
 per-generation `PersonaConfig` snapshot.
 
@@ -728,6 +731,6 @@ an existing feature.
 - **Context limits and compaction:** Aggregate size accounting, transport/model limits, overflow behavior and possible summarization. Adopted limits require rationale and configuration.
 - **Control responsiveness:** Scheduling/cancellation during slow calls, user speech versus P3 results, and measured STOP behavior.
 - **Audio and interruption:** Browser egress codec, playback completion, idle/false-onset recovery, and spoken-history accuracy during text/voice interruption.
-- **Memory quality and scaling:** Extraction quality, reranking, vector-store need and schema migration; use measurements rather than a fixed unsupported corpus threshold.
+- **Memory quality and scaling:** Extraction quality, reranking, vector-store need and storage design; use measurements rather than a fixed unsupported corpus threshold.
 - **Prefill and hardware:** Backend cache support, invalidation, benefit and GPU contention with STT/TTS and concurrent work.
 - **OpenPod transport:** Define raw-audio framing and endpoint compatibility while preserving the rule that audio bytes never enter protobuf serialization.

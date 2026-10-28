@@ -8,7 +8,6 @@ const CLOSE_SUPERSEDED = 4001;
 export type WsCallbacks = {
   onStatus: (status: WsStatus) => void;
   onMessage: (msg: EgressMessage) => void;
-  onAudio: (data: ArrayBuffer) => void;
 };
 
 export function createWsClient(callbacks: WsCallbacks) {
@@ -43,10 +42,7 @@ export function createWsClient(callbacks: WsCallbacks) {
     };
 
     ws.onmessage = (ev: MessageEvent) => {
-      if (ev.data instanceof ArrayBuffer) {
-        callbacks.onAudio(ev.data);
-        return;
-      }
+      if (typeof ev.data !== "string") return;
       try {
         const msg = JSON.parse(ev.data as string) as EgressMessage;
         callbacks.onMessage(msg);

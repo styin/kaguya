@@ -1,7 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { config } from "./config";
 import type {
-  AudioEvent,
   AssistantTurn,
   EgressMessage,
   IngressMessage,
@@ -15,7 +14,6 @@ import type { WsStatus } from "./ws";
 
 export interface AppState {
   events: WsEvent[];
-  audioEvents: AudioEvent[];
   wsStatus: WsStatus;
   wsOpenedAt: number | null;
   sessionIdentity: SessionInitEvent["data"] | null;
@@ -30,7 +28,6 @@ export interface AppState {
 
 const initial: AppState = {
   events: [],
-  audioEvents: [],
   wsStatus: "disconnected",
   wsOpenedAt: null,
   sessionIdentity: null,
@@ -86,10 +83,6 @@ function pushEvent(ev: WsEvent): void {
   setState({ events: pushRing(state.events, ev) });
 }
 
-function pushAudioEvent(ev: AudioEvent): void {
-  setState({ audioEvents: pushRing(state.audioEvents, ev) });
-}
-
 export const actions = {
   recordWsIn(msg: EgressMessage): void {
     const event: WsEvent = { kind: "ws_in", ts: Date.now(), msg };
@@ -100,12 +93,6 @@ export const actions = {
   },
   recordWsOut(msg: IngressMessage): void {
     pushEvent({ kind: "ws_out", ts: Date.now(), msg });
-  },
-  recordAudioIn(bytes: number): void {
-    pushAudioEvent({ kind: "audio_in", ts: Date.now(), bytes });
-  },
-  recordAudioOut(bytes: number): void {
-    pushAudioEvent({ kind: "audio_out", ts: Date.now(), bytes });
   },
   setWsStatus(status: WsStatus): void {
     if (status === "connected" && state.wsOpenedAt === null) {
@@ -197,54 +184,10 @@ export function turnDurationMs(t: AssistantTurn): number | null {
   return t.complete_at === null ? null : t.complete_at - t.started_at;
 }
 
-/**
- * "Time to first sound" — `started_at` to the first `audio_in` event
- * whose `ts` falls inside the turn. This matches the conventional TTFS
- * meaning ("when does the user actually hear something") rather than
- * the sentence-event latency used previously, which fired on text-side
- * sentence boundaries before TTS had finished rendering.
- */
-export function firstAudioLatencyMs(
-  audioEvents: AudioEvent[],
-  t: AssistantTurn,
-): number | null {
-  const end = t.complete_at ?? Number.POSITIVE_INFINITY;
-  for (const ev of audioEvents) {
-    if (ev.kind === "audio_in" && ev.ts >= t.started_at && ev.ts < end) {
-      return ev.ts - t.started_at;
-    }
-  }
-  return null;
-}
-
 export function selectWsInCount(events: WsEvent[]): number {
   return events.reduce((n, e) => n + (e.kind === "ws_in" ? 1 : 0), 0);
 }
 
 export function selectWsOutCount(events: WsEvent[]): number {
   return events.reduce((n, e) => n + (e.kind === "ws_out" ? 1 : 0), 0);
-}
-
-export function selectAudioInBytes(audioEvents: AudioEvent[]): number {
-  return audioEvents.reduce((n, e) => n + (e.kind === "audio_in" ? e.bytes : 0), 0);
-}
-
-export function selectAudioOutBytes(audioEvents: AudioEvent[]): number {
-  return audioEvents.reduce((n, e) => n + (e.kind === "audio_out" ? e.bytes : 0), 0);
-}
-
-/**
- * Bytes of TTS audio received during a given assistant turn — sum of
- * `audio_in` event byte counts with `ts ∈ [started_at, complete_at ?? +∞)`.
- * Derived purely from the audio event ring; no per-turn counter sits alongside it.
- */
-export function audioInBytesForTurn(audioEvents: AudioEvent[], t: AssistantTurn): number {
-  const end = t.complete_at ?? Number.POSITIVE_INFINITY;
-  let total = 0;
-  for (const ev of audioEvents) {
-    if (ev.kind === "audio_in" && ev.ts >= t.started_at && ev.ts < end) {
-      total += ev.bytes;
-    }
-  }
-  return total;
 }
