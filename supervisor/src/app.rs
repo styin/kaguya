@@ -28,6 +28,7 @@ use crate::process::{
     start_managed_process, stop_managed_process, ManagedProcess, ManagedProcessLogLine,
     ManagedProcessSnapshot, ManagedProcessStatus,
 };
+use crate::proto;
 use crate::sandbox::{SandboxManager, SandboxProvider};
 use crate::telemetry::TelemetryHub;
 
@@ -52,32 +53,36 @@ pub struct SupervisorApp {
     http: reqwest::Client,
     sandbox: SandboxProvider,
     telemetry: TelemetryHub,
-    instance_session_binding: std::sync::Arc<Mutex<Option<InstanceSessionBinding>>>,
+    instance_session_binding: std::sync::Arc<Mutex<Option<proto::SessionRef>>>,
 }
 
-/// The instance/session pair accepted by a single-session service.
-/// This binding is correlation and routing state, not user authentication.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstanceSessionBinding {
-    pub instance_id: String,
-    pub session_id: String,
-}
-
-impl InstanceSessionBinding {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        let instance = uuid::Uuid::parse_str(&self.instance_id)?;
-        let session = uuid::Uuid::parse_str(&self.session_id)?;
-        if instance.is_nil()
-            || session.is_nil()
-            || instance == session
-            || instance.to_string() != self.instance_id
-            || session.to_string() != self.session_id
-        {
-            anyhow::bail!("invalid instance/session binding");
+/// Validate the configured pair before using generated protobuf values.
+/// This scope assertion checks the configured pair; it is not user authentication.
+pub fn validate_session_ref(session: Option<&proto::SessionRef>) -> anyhow::Result<(&str, &str)> {
+    let session = session.ok_or_else(|| anyhow::anyhow!("session reference is required"))?;
+    let instance_id = session
+        .instance_id
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("instance_id is required"))?
+        .value
+        .as_str();
+    let session_id = session
+        .session_id
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("session_id is required"))?
+        .value
+        .as_str();
+    for (name, value) in [("instance_id", instance_id), ("session_id", session_id)] {
+        let id = uuid::Uuid::parse_str(value)
+            .map_err(|_| anyhow::anyhow!("{name} must be a canonical non-nil UUID"))?;
+        if id.is_nil() || id.to_string() != value {
+            anyhow::bail!("{name} must be a canonical non-nil UUID");
         }
-        Ok(())
     }
+    if instance_id == session_id {
+        anyhow::bail!("instance_id and session_id must differ");
+    }
+    Ok((instance_id, session_id))
 }
 
 struct SupervisorInner {
@@ -242,9 +247,9 @@ impl SupervisorApp {
     /// Establish the initial pair or validate an idempotent same-pair binding.
     pub async fn bind_instance_session(
         &self,
-        requested: InstanceSessionBinding,
-    ) -> anyhow::Result<InstanceSessionBinding> {
-        requested.validate()?;
+        requested: proto::SessionRef,
+    ) -> anyhow::Result<proto::SessionRef> {
+        validate_session_ref(Some(&requested))?;
         let mut binding = self.instance_session_binding.lock().await;
         match binding.as_ref() {
             Some(existing) if existing != &requested => {
@@ -261,8 +266,9 @@ impl SupervisorApp {
     /// Validate an existing binding without establishing a new one.
     pub async fn require_instance_session(
         &self,
-        requested: &InstanceSessionBinding,
+        requested: &proto::SessionRef,
     ) -> anyhow::Result<()> {
+        validate_session_ref(Some(requested))?;
         if self.instance_session_binding.lock().await.as_ref() != Some(requested) {
             anyhow::bail!("Supervisor instance/session binding is missing or mismatched");
         }
@@ -351,7 +357,7 @@ impl SupervisorApp {
 
     pub async fn acquire_sandbox(
         &self,
-        owner: &InstanceSessionBinding,
+        owner: &proto::SessionRef,
         allocation_id: &str,
     ) -> anyhow::Result<String> {
         self.require_instance_session(owner).await?;
@@ -360,7 +366,7 @@ impl SupervisorApp {
 
     pub async fn execute_in_sandbox(
         &self,
-        owner: &InstanceSessionBinding,
+        owner: &proto::SessionRef,
         handle: &str,
         request_id: &str,
         args_json: &str,
@@ -380,7 +386,7 @@ impl SupervisorApp {
 
     pub async fn release_sandbox(
         &self,
-        owner: &InstanceSessionBinding,
+        owner: &proto::SessionRef,
         handle: &str,
     ) -> anyhow::Result<()> {
         self.require_instance_session(owner).await?;
@@ -389,7 +395,7 @@ impl SupervisorApp {
 
     pub async fn start_process(&self, name: &str) -> anyhow::Result<()> {
         // A crashed Gateway cannot release its opaque handles. Clear stale
-        // conversation resources before every initial start or restart.
+        // session resources before every initial start or restart.
         if name == "gateway" {
             self.sandbox.cleanup_allocations().await;
         }
@@ -643,7 +649,16 @@ impl SupervisorApp {
             return;
         };
 
-        match gateway::request_gateway_shutdown(&endpoint, GATEWAY_DRAIN_TIMEOUT).await {
+        let session = self.instance_session_binding.lock().await.clone();
+        let Some(session) = session.filter(|binding| validate_session_ref(Some(binding)).is_ok())
+        else {
+            self.logs.push(
+                "gateway", "stderr",
+                "[supervisor] Gateway graceful shutdown requires a validated instance/session binding",
+            );
+            return;
+        };
+        match gateway::request_gateway_shutdown(&endpoint, &session, GATEWAY_DRAIN_TIMEOUT).await {
             Ok(()) => self.logs.push(
                 "gateway",
                 "stdout",
@@ -955,6 +970,91 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    fn test_session_ref() -> proto::SessionRef {
+        proto::SessionRef {
+            instance_id: Some(proto::InstanceId {
+                value: "01234567-89ab-4cde-8fab-0123456789ab".into(),
+            }),
+            session_id: Some(proto::SessionId {
+                value: "fedcba98-7654-4321-8fed-cba987654321".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn generated_session_refs_reject_missing_malformed_or_ambiguous_ids() {
+        let valid = test_session_ref();
+        assert_eq!(
+            validate_session_ref(Some(&valid)).unwrap(),
+            (
+                "01234567-89ab-4cde-8fab-0123456789ab",
+                "fedcba98-7654-4321-8fed-cba987654321",
+            )
+        );
+        assert!(validate_session_ref(None).is_err());
+        assert!(validate_session_ref(Some(&proto::SessionRef::default())).is_err());
+        let mut missing = valid.clone();
+        missing.instance_id = None;
+        assert!(validate_session_ref(Some(&missing)).is_err());
+        missing = valid.clone();
+        missing.session_id = None;
+        assert!(validate_session_ref(Some(&missing)).is_err());
+        for value in [
+            "",
+            "invalid",
+            "00000000-0000-0000-0000-000000000000",
+            "01234567-89AB-4CDE-8FAB-0123456789AB",
+            "0123456789ab4cde8fab0123456789ab",
+        ] {
+            let mut invalid = valid.clone();
+            invalid.instance_id = Some(proto::InstanceId {
+                value: value.into(),
+            });
+            assert!(validate_session_ref(Some(&invalid)).is_err());
+            let mut invalid = valid.clone();
+            invalid.session_id = Some(proto::SessionId {
+                value: value.into(),
+            });
+            assert!(validate_session_ref(Some(&invalid)).is_err());
+        }
+        let mut equal = valid;
+        equal.session_id = Some(proto::SessionId {
+            value: equal.instance_id.as_ref().unwrap().value.clone(),
+        });
+        assert!(validate_session_ref(Some(&equal)).is_err());
+    }
+
+    #[tokio::test]
+    async fn generated_scope_validation_preserves_fixed_binding_lifecycle() {
+        let app = test_app_with_processes(BTreeMap::new());
+        let scope = test_session_ref();
+        assert!(app.require_instance_session(&scope).await.is_err());
+        assert!(app
+            .bind_instance_session(proto::SessionRef::default())
+            .await
+            .is_err());
+        assert!(app.require_instance_session(&scope).await.is_err());
+        assert_eq!(
+            app.bind_instance_session(scope.clone()).await.unwrap(),
+            scope
+        );
+        assert_eq!(
+            app.bind_instance_session(scope.clone()).await.unwrap(),
+            scope
+        );
+        let mut other = scope.clone();
+        other.session_id = Some(proto::SessionId {
+            value: uuid::Uuid::new_v4().to_string(),
+        });
+        assert!(app.bind_instance_session(other.clone()).await.is_err());
+        assert!(app.require_instance_session(&other).await.is_err());
+        assert!(app
+            .require_instance_session(&proto::SessionRef::default())
+            .await
+            .is_err());
+        assert!(app.require_instance_session(&scope).await.is_ok());
+    }
 
     fn test_spec(command: String, restart: RestartPolicy) -> ProcessSpec {
         ProcessSpec {

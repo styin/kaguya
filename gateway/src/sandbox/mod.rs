@@ -7,16 +7,15 @@
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::instance::InstanceIdentity;
 use crate::proto;
+use crate::proto::SessionRef;
 
 pub struct SandboxClient {
     base_url: String,
     http: reqwest::Client,
     enabled: bool,
     backend: Option<String>,
-    instance_id: String,
-    session_id: String,
+    session: SessionRef,
     allocation: Mutex<Option<AllocationLease>>,
 }
 
@@ -76,15 +75,13 @@ struct ExecuteResponse {
 impl SandboxClient {
     pub async fn connect(
         base_url: impl Into<String>,
-        instance_context: &InstanceIdentity,
+        session: &SessionRef,
     ) -> anyhow::Result<Self> {
+        let (instance_id, session_id) = crate::instance::validate_session_ref(Some(session))?;
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let http = reqwest::Client::new();
         http.post(format!("{base_url}/api/owner/bind"))
-            .json(&serde_json::json!({
-                "instanceId": instance_context.instance_id,
-                "sessionId": instance_context.default_session_id,
-            }))
+            .json(&serde_json::json!({"instanceId": instance_id, "sessionId": session_id}))
             .send()
             .await?
             .error_for_status()?;
@@ -101,20 +98,18 @@ impl SandboxClient {
             http,
             enabled: status.enabled,
             backend: Some(status.backend),
-            instance_id: instance_context.instance_id.clone(),
-            session_id: instance_context.default_session_id.clone(),
+            session: session.clone(),
             allocation: Mutex::new(None),
         })
     }
 
-    pub fn disabled() -> Self {
+    pub fn disabled(session: SessionRef) -> Self {
         Self {
             base_url: String::new(),
             http: reqwest::Client::new(),
             enabled: false,
             backend: None,
-            instance_id: String::new(),
-            session_id: String::new(),
+            session,
             allocation: Mutex::new(None),
         }
     }
@@ -145,8 +140,10 @@ impl SandboxClient {
             Ok(handle) => handle,
             Err(error) => return error_json(error),
         };
+        let (instance_id, session_id) = crate::instance::validate_session_ref(Some(&self.session))
+            .expect("connected sandbox requires a validated SessionRef");
         debug!(
-            session_id = %self.session_id,
+            %session_id,
             request_id = %request_id,
             handle = %handle,
             backend = self.backend.as_deref().unwrap_or("unknown"),
@@ -156,8 +153,8 @@ impl SandboxClient {
             .http
             .post(format!("{}/api/sandbox/{handle}/execute", self.base_url))
             .json(&ExecuteRequest {
-                instance_id: &self.instance_id,
-                session_id: &self.session_id,
+                instance_id,
+                session_id,
                 request_id,
                 args_json,
             })
@@ -182,11 +179,14 @@ impl SandboxClient {
             return;
         };
         let result: Result<ReleaseResponse, String> = async {
+            let (instance_id, session_id) =
+                crate::instance::validate_session_ref(Some(&self.session))
+                    .map_err(|error| error.to_string())?;
             self.http
                 .delete(format!("{}/api/sandbox/{}", self.base_url, lease.handle))
                 .json(&ReleaseRequest {
-                    instance_id: &self.instance_id,
-                    session_id: &self.session_id,
+                    instance_id,
+                    session_id,
                 })
                 .send()
                 .await
@@ -213,6 +213,8 @@ impl SandboxClient {
     }
 
     async fn ensure_handle(&self) -> Result<String, String> {
+        let (instance_id, session_id) = crate::instance::validate_session_ref(Some(&self.session))
+            .map_err(|error| error.to_string())?;
         let mut current = self.allocation.lock().await;
         if let Some(lease) = current.as_ref() {
             debug!(allocation_id = %lease.allocation_id, handle = %lease.handle, "reusing Supervisor sandbox handle");
@@ -224,8 +226,8 @@ impl SandboxClient {
             .http
             .post(format!("{}/api/sandbox/acquire", self.base_url))
             .json(&AcquireRequest {
-                instance_id: &self.instance_id,
-                session_id: &self.session_id,
+                instance_id,
+                session_id,
                 allocation_id: &allocation_id,
             })
             .send()
@@ -280,11 +282,14 @@ mod tests {
 
     use super::*;
 
-    fn test_instance_context() -> InstanceIdentity {
-        InstanceIdentity {
-            schema_version: 1,
-            instance_id: uuid::Uuid::new_v4().to_string(),
-            default_session_id: uuid::Uuid::new_v4().to_string(),
+    fn test_instance_context() -> SessionRef {
+        SessionRef {
+            instance_id: Some(crate::proto::InstanceId {
+                value: uuid::Uuid::new_v4().to_string(),
+            }),
+            session_id: Some(crate::proto::SessionId {
+                value: uuid::Uuid::new_v4().to_string(),
+            }),
         }
     }
 

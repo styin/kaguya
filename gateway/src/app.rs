@@ -22,7 +22,7 @@ use crate::lifecycle::{LifecycleSupervisor, Readiness};
 use crate::narration::NarrationFilter;
 use crate::output::OutputManager;
 use crate::persona::Persona;
-use crate::pipeline::{self, PipelineComponents, TurnState};
+use crate::pipeline::{self, PipelineComponents, SessionState};
 use crate::proto;
 use crate::rag::RagEngine;
 use crate::reasoner::ReasonerManager;
@@ -41,6 +41,8 @@ pub async fn run(
     let mut lifecycle = LifecycleSupervisor::new();
 
     let instance_lease = instance::load_required(&selection)?;
+    let scope = instance_lease.identity.session_ref()?;
+    let (instance_id, session_id) = instance::validate_session_ref(Some(&scope))?;
     config.files.soul_path = instance_lease.paths.soul.clone();
     config.files.identity_path = instance_lease.paths.persona_identity.clone();
     config.rag.db_path = instance_lease.paths.rag_db.clone();
@@ -65,9 +67,7 @@ pub async fn run(
     });
 
     // ── Components ──
-    // Protobuf conversation_id remains the wire-compatible SessionId carrier.
-    let conversation_id = instance_lease.identity.default_session_id.clone();
-    let history = History::new(config.history.max_recent_turns, &instance_lease.identity);
+    let history = History::new(config.history.max_recent_turns, &scope);
     let persona = Persona::load(&config.files.soul_path, &config.files.identity_path).await?;
     let rag_engine = RagEngine::new(&config.rag, config.files.workspace_root.clone())?;
     let rag_embedder = rag_engine.embedder.clone();
@@ -82,16 +82,15 @@ pub async fn run(
     // Gateway holds only the client; it acquires an opaque handle lazily on the
     // first tool call. Backend policy and resource lifecycle stay in Supervisor.
     let supervisor_url = config.supervisor.resolved_url();
-    let telemetry = TelemetryClient::new(&supervisor_url, "gateway")
-        .with_instance_context(instance_lease.identity.clone());
+    let telemetry = TelemetryClient::new(&supervisor_url, "gateway", scope.clone());
     let binding_response = reqwest::Client::new()
         .post(format!(
             "{}/api/owner/bind",
             supervisor_url.trim_end_matches('/')
         ))
         .json(&serde_json::json!({
-            "instanceId": instance_lease.identity.instance_id,
-            "sessionId": instance_lease.identity.default_session_id,
+            "instanceId": instance_id,
+            "sessionId": session_id,
         }))
         .send()
         .await;
@@ -107,9 +106,9 @@ pub async fn run(
         }
     };
     let sandbox = match if supervisor_bound {
-        SandboxClient::connect(&supervisor_url, &instance_lease.identity).await
+        SandboxClient::connect(&supervisor_url, &scope).await
     } else {
-        Ok(SandboxClient::disabled())
+        Ok(SandboxClient::disabled(scope.clone()))
     } {
         Ok(client) => {
             info!(
@@ -120,7 +119,7 @@ pub async fn run(
         }
         Err(error) => {
             warn!(%error, %supervisor_url, "Supervisor sandbox unavailable; tool disabled");
-            Arc::new(SandboxClient::disabled())
+            Arc::new(SandboxClient::disabled(scope.clone()))
         }
     };
 
@@ -128,14 +127,14 @@ pub async fn run(
         config.files.workspace_root.clone(),
         task_spawner.clone(),
         Some(Arc::clone(&sandbox)),
-    )
-    .with_instance_context(instance_lease.identity.clone());
+        scope.clone(),
+    );
     let reasoner = ReasonerManager::new(
         clients.reasoner_addr.clone(),
         task_spawner.clone(),
         reasoner_connection,
-    )
-    .with_instance_context(instance_lease.identity.clone());
+        scope.clone(),
+    );
     let silence = SilenceTimers::new(
         config.silence.soft_prompt_secs,
         config.silence.follow_up_secs,
@@ -147,8 +146,8 @@ pub async fn run(
         clients.talker_addr.clone(),
         task_spawner.clone(),
         talker_connection,
+        scope.clone(),
     )
-    .with_instance_context(instance_lease.identity.clone())
     .with_telemetry(telemetry.clone());
     let output = OutputManager::new(audio_out_tx, metadata_out_tx);
     let narration = NarrationFilter::new(5);
@@ -161,7 +160,7 @@ pub async fn run(
 
     // ── gRPC server (RouterControlService only) ──
     let grpc_addr = config.server.grpc_addr.parse()?;
-    let control_svc = ControlServiceImpl::new(control_tx.clone());
+    let control_svc = ControlServiceImpl::new(control_tx.clone(), scope.clone());
     lifecycle.spawn("grpc_control_server", async move {
         info!(addr = %grpc_addr, "gRPC control server listening");
         if let Err(e) = Server::builder()
@@ -222,7 +221,7 @@ pub async fn run(
             let audio = listener_audio.clone();
             let p1 = input_tx.p1.clone();
             let p2 = input_tx.p2.clone();
-            let listener_context = instance_lease.identity.clone();
+            let listener_context = scope.clone();
             async move {
                 crate::listener::run_recovery_loop(
                     grpc_endpoint,
@@ -234,7 +233,7 @@ pub async fn run(
                     p1,
                     p2,
                     expected_voice_stack,
-                    Some(listener_context),
+                    listener_context,
                     shutdown,
                 )
                 .await;
@@ -246,7 +245,7 @@ pub async fn run(
     #[cfg(feature = "dev-console")]
     {
         let endpoint_state = Arc::new(endpoint::EndpointState {
-            instance_context: instance_lease.identity.clone(),
+            session: scope.clone(),
             control_tx: control_tx.clone(),
             p1_tx: input_tx.p1.clone(),
             audio_out_rx: tokio::sync::Mutex::new(_audio_out_rx),
@@ -255,7 +254,7 @@ pub async fn run(
             listener_audio: listener_audio.clone(),
             runtime_status: endpoint::RuntimeStatusState {
                 lifecycle: lifecycle.clone(),
-                instance_context: instance_lease.identity.clone(),
+                session: scope.clone(),
             },
         });
         let ws_addr = config.server.ws_addr.clone();
@@ -341,8 +340,7 @@ pub async fn run(
     info!("Kaguya Gateway ready");
 
     // ── Event Loop State ──
-    let turn = TurnState::new(conversation_id.clone(), last_memory_md)
-        .with_instance_id(instance_lease.identity.instance_id.clone());
+    let session = SessionState::new(scope, last_memory_md);
     let pipeline = PipelineComponents {
         talker: &talker,
         history: &history,
@@ -359,7 +357,7 @@ pub async fn run(
 
     pipeline::run(
         &pipeline,
-        turn,
+        session,
         narration,
         control_rx,
         input_rx,

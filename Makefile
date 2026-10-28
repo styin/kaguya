@@ -3,13 +3,16 @@
 
 PROTO_DIR  := proto
 PROTO_FILE := $(PROTO_DIR)/kaguya/v1/kaguya.proto
+# Override when using an already-provisioned environment, e.g.
+# make proto TALKER_PYTHON=/absolute/path/to/python
+TALKER_PYTHON ?= uv run python
 
 # ── Proto (Python) ──
 # Delegates to talker/scripts/gen_proto.py: generates flat-layout stubs into
 # talker/proto/, also writes mypy-protobuf .pyi stubs, and patches the gRPC
 # import to be relative. Pure Python — works on macOS, Linux, Windows.
 proto-py:
-	cd talker && uv run python scripts/gen_proto.py
+	cd talker && $(TALKER_PYTHON) scripts/gen_proto.py
 
 # ── Proto (Rust) ──
 # tonic-build in gateway/build.rs regenerates Rust stubs on every cargo build.

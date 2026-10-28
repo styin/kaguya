@@ -69,7 +69,7 @@ impl RagEngine {
         &self,
         user_input: &str,
         assistant_response: &str,
-        turn_id: &str,
+        generation_id: &str,
     ) {
         let extractions = Self::extract_memories(user_input, assistant_response);
         for (raw_content, mem_type) in extractions {
@@ -81,7 +81,7 @@ impl RagEngine {
                 id: uuid::Uuid::new_v4().to_string(),
                 content,
                 memory_type: mem_type,
-                source: turn_id.to_string(),
+                source: generation_id.to_string(),
                 created_at: chrono::Utc::now().timestamp_millis(),
             };
             if let Err(e) = self.store.insert_memory(&entry).await {
@@ -157,8 +157,13 @@ impl RagCapability for RagEngine {
         self.retriever.retrieve(query).await
     }
 
-    async fn evaluate_and_store(&self, user_input: &str, assistant_response: &str, turn_id: &str) {
-        RagEngine::evaluate_and_store(self, user_input, assistant_response, turn_id).await
+    async fn evaluate_and_store(
+        &self,
+        user_input: &str,
+        assistant_response: &str,
+        generation_id: &str,
+    ) {
+        RagEngine::evaluate_and_store(self, user_input, assistant_response, generation_id).await
     }
 
     async fn export_memory_md(&self) -> String {

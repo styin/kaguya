@@ -57,30 +57,30 @@ class TurnDetector:
         self._vad_stop_ts: float | None = None  # set by on_vad_stop
         self._emitted: bool = False
         self._emit_lock = threading.Lock()  # guards _emitted + _buffer read in _emit()
-        self._turn_id: int = (
+        self._utterance_epoch: int = (
             0  # incremented on each speech start; used to cancel stale tick loops
         )
 
     @property
     def has_emitted(self) -> bool:
-        """Returns True if a final_transcript has already been emitted this turn."""
+        """Returns True if a final_transcript has already been emitted this utterance."""
         return self._emitted
 
     @property
-    def turn_id(self) -> int:
-        """Current turn ID. Incremented on each speech start.
+    def utterance_epoch(self) -> int:
+        """Current utterance epoch. Incremented on each speech start.
 
         Used by the listener's silence tick loop to detect stale loops
         that survived from a previous utterance.
         """
-        return self._turn_id
+        return self._utterance_epoch
 
     def on_speech_start(self) -> None:
         """Called on vad_speech_start. Resets state for a new utterance."""
         self._buffer = ""
         self._vad_stop_ts = None
         self._emitted = False
-        self._turn_id += 1
+        self._utterance_epoch += 1
 
     def on_vad_stop(self) -> None:
         """Called on vad_speech_end. Marks when silence began."""

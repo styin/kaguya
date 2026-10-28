@@ -1,55 +1,48 @@
 //! Core pipeline data types.
 //!
-//! [`TurnState`] holds mutable per-conversation state across event loop
+//! [`SessionState`] holds mutable per-session state across event loop
 //! iterations. [`PipelineAction`] enumerates every side effect a handler
 //! can request — one variant per I/O call, enabling precise test assertions.
 
 use tokio_util::sync::CancellationToken;
 
 use crate::proto;
+use crate::proto::SessionRef;
 use crate::types::DispatchKind;
 
-/// Mutable conversation state shared between the orchestrator, handlers,
+/// Mutable session state shared between the orchestrator, handlers,
 /// and executor across event loop iterations.
 #[derive(Debug)]
-pub struct TurnState {
-    /// Durable instance associated with this session; set by application startup.
-    pub instance_id: String,
+pub struct SessionState {
+    /// Immutable instance/session pair validated during application startup.
+    pub scope: SessionRef,
     /// Cancellation token for the active Talker generation, if any.
     pub active_gen: Option<CancellationToken>,
     /// Cancellation token for the active silence timer cascade, if any.
     pub active_silence: Option<CancellationToken>,
     /// Accumulated sentence text from the current response stream.
     pub current_response: String,
-    /// Turn ID of the most recent user-intent dispatch.
-    pub last_turn_id: String,
+    /// Generation ID of the most recent user-intent dispatch.
+    pub last_user_generation_id: String,
     /// What kind of round triggered the active dispatch.
     /// Read on `ResponseComplete` to gate memory persistence.
     pub current_dispatch_kind: Option<DispatchKind>,
     /// Last exported memory markdown, used to detect changes for persona push.
     pub last_memory_md: String,
-    /// Selected SessionId carried in the existing conversation_id field.
-    pub conversation_id: String,
 }
 
-impl TurnState {
+impl SessionState {
     /// Initialize state for a new conversation session.
-    pub fn new(conversation_id: String, initial_memory_md: String) -> Self {
+    pub fn new(scope: SessionRef, initial_memory_md: String) -> Self {
         Self {
-            instance_id: String::new(),
+            scope,
             active_gen: None,
             active_silence: None,
             current_response: String::new(),
-            last_turn_id: String::new(),
+            last_user_generation_id: String::new(),
             current_dispatch_kind: None,
             last_memory_md: initial_memory_md,
-            conversation_id,
         }
-    }
-
-    pub fn with_instance_id(mut self, instance_id: String) -> Self {
-        self.instance_id = instance_id;
-        self
     }
 
     /// Returns `true` if a Talker generation is currently in progress.
@@ -80,9 +73,9 @@ impl TurnState {
 pub enum PipelineAction {
     // ── Talker ──
     /// Open a Converse bidi stream. Executor stores the returned
-    /// cancellation token in `TurnState::active_gen`.
+    /// cancellation token in `SessionState::active_gen`.
     DispatchTalker {
-        context: proto::TalkerContext,
+        context: proto::GenerationStart,
         kind: DispatchKind,
     },
     /// Interrupt the active generation stream.
@@ -90,16 +83,18 @@ pub enum PipelineAction {
 
     // ── Output ──
     SendResponseStarted {
-        turn_id: String,
+        generation_id: String,
     },
     SendSentence {
+        generation_id: String,
         text: String,
     },
     SendEmotion {
+        generation_id: String,
         emotion: String,
     },
     SendResponseComplete {
-        turn_id: String,
+        generation_id: String,
         was_interrupted: bool,
     },
     /// Echo voice transcript to WebSocket clients.
@@ -141,7 +136,7 @@ pub enum PipelineAction {
     EvaluateAndStoreMemory {
         user_input: String,
         assistant_response: String,
-        turn_id: String,
+        generation_id: String,
     },
     /// Push updated persona to Talker if memory changed since last turn.
     UpdatePersonaIfChanged,
@@ -157,20 +152,32 @@ pub enum PipelineAction {
 mod tests {
     use super::*;
 
+    fn test_scope() -> SessionRef {
+        SessionRef {
+            instance_id: Some(proto::InstanceId {
+                value: "00000000-0000-4000-8000-000000000001".into(),
+            }),
+            session_id: Some(proto::SessionId {
+                value: "00000000-0000-4000-8000-000000000002".into(),
+            }),
+        }
+    }
+
     #[test]
-    fn turn_state_new_initializes_empty() {
-        let state = TurnState::new("conv-1".into(), "# Memory".into());
-        assert_eq!(state.conversation_id, "conv-1");
+    fn session_state_new_initializes_empty() {
+        let scope = test_scope();
+        let state = SessionState::new(scope.clone(), "# Memory".into());
+        assert_eq!(state.scope, scope);
         assert_eq!(state.last_memory_md, "# Memory");
         assert!(!state.is_generating());
         assert!(state.current_response.is_empty());
-        assert!(state.last_turn_id.is_empty());
+        assert!(state.last_user_generation_id.is_empty());
         assert!(state.current_dispatch_kind.is_none());
     }
 
     #[test]
     fn is_generating_reflects_active_gen() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(test_scope(), String::new());
         assert!(!state.is_generating());
 
         state.active_gen = Some(CancellationToken::new());
@@ -179,7 +186,7 @@ mod tests {
 
     #[test]
     fn cancel_active_gen_clears_and_cancels() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(test_scope(), String::new());
         let token = CancellationToken::new();
         let child = token.clone();
         state.active_gen = Some(token);
@@ -192,14 +199,14 @@ mod tests {
 
     #[test]
     fn cancel_active_gen_noop_when_none() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(test_scope(), String::new());
         state.cancel_active_gen(); // should not panic
         assert!(state.active_gen.is_none());
     }
 
     #[test]
     fn cancel_active_silence_clears_and_cancels() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(test_scope(), String::new());
         let token = CancellationToken::new();
         let child = token.clone();
         state.active_silence = Some(token);
@@ -218,9 +225,11 @@ mod tests {
         assert_eq!(a, b);
 
         let c = PipelineAction::SendSentence {
+            generation_id: "generation-1".into(),
             text: "hello".into(),
         };
         let d = PipelineAction::SendSentence {
+            generation_id: "generation-1".into(),
             text: "hello".into(),
         };
         assert_eq!(c, d);

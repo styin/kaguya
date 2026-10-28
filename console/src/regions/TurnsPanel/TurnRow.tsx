@@ -3,7 +3,7 @@ import type { AssistantTurn, AudioEvent, Turn } from "../../types";
 import { firstAudioLatencyMs, turnDurationMs } from "../../store";
 
 export function turnKey(t: Turn): string {
-  return t.kind === "assistant" ? `assistant:${t.turn_id}` : `user:${t.ts}`;
+  return t.kind === "assistant" ? `assistant:${t.generation_id}` : `user:${t.ts}`;
 }
 
 export function turnBody(t: Turn): string {
@@ -57,7 +57,7 @@ export function TurnRow({
         <div className="turn-who">
           <span className="who-name">{isUser ? "User" : "Kaguya"}</span>
           {!isUser && (
-            <span className="turn-id mono">{(turn as AssistantTurn).turn_id.slice(0, 8)}</span>
+            <span className="turn-id mono">{(turn as AssistantTurn).generation_id.slice(0, 8)}</span>
           )}
           <span className="turn-tags">
             {streaming && <span className="tag live">live</span>}

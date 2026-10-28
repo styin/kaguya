@@ -21,10 +21,10 @@ use crate::talker::TalkerClient;
 use crate::tools::ToolRegistry;
 use crate::types::InputEvent;
 
-use super::types::{PipelineAction, TurnState};
+use super::types::{PipelineAction, SessionState};
 
 /// All Gateway component references needed by the executor, minus
-/// `TurnState`. Constructed once before the event loop; lends short-lived
+/// `SessionState`. Constructed once before the event loop; lends short-lived
 /// [`ActionExecutor`] instances per select-branch via [`executor()`](Self::executor).
 pub struct PipelineComponents<'a> {
     pub talker: &'a TalkerClient,
@@ -41,8 +41,8 @@ pub struct PipelineComponents<'a> {
 }
 
 impl<'a> PipelineComponents<'a> {
-    /// Borrow `TurnState` to produce a ready-to-run executor.
-    pub fn executor<'b>(&'b self, state: &'b mut TurnState) -> ActionExecutor<'b>
+    /// Borrow `SessionState` to produce a ready-to-run executor.
+    pub fn executor<'b>(&'b self, state: &'b mut SessionState) -> ActionExecutor<'b>
     where
         'a: 'b,
     {
@@ -77,7 +77,7 @@ pub struct ActionExecutor<'a> {
     pub shared_persona: &'a Arc<RwLock<proto::PersonaConfig>>,
     pub talker_output_tx: mpsc::Sender<proto::TalkerOutput>,
     pub p3_tx: mpsc::Sender<InputEvent>,
-    pub state: &'a mut TurnState,
+    pub state: &'a mut SessionState,
 }
 
 impl<'a> ActionExecutor<'a> {
@@ -101,28 +101,34 @@ impl<'a> ActionExecutor<'a> {
             }
 
             PipelineAction::BargeIn => {
-                self.talker.barge_in(&self.state.conversation_id).await;
+                self.talker.barge_in().await;
             }
 
             // ── Output routing ──
-            PipelineAction::SendResponseStarted { turn_id } => {
-                self.output.send_response_started(&turn_id).await;
+            PipelineAction::SendResponseStarted { generation_id } => {
+                self.output.send_response_started(&generation_id).await;
             }
 
-            PipelineAction::SendSentence { text } => {
-                self.output.send_sentence(&text).await;
+            PipelineAction::SendSentence {
+                generation_id,
+                text,
+            } => {
+                self.output.send_sentence(&generation_id, &text).await;
             }
 
-            PipelineAction::SendEmotion { emotion } => {
-                self.output.send_emotion(&emotion).await;
+            PipelineAction::SendEmotion {
+                generation_id,
+                emotion,
+            } => {
+                self.output.send_emotion(&generation_id, &emotion).await;
             }
 
             PipelineAction::SendResponseComplete {
-                turn_id,
+                generation_id,
                 was_interrupted,
             } => {
                 self.output
-                    .send_response_complete(&turn_id, was_interrupted)
+                    .send_response_complete(&generation_id, was_interrupted)
                     .await;
             }
 
@@ -162,7 +168,13 @@ impl<'a> ActionExecutor<'a> {
                 args_json,
             } => {
                 self.tools.dispatch(
-                    self.state.conversation_id.clone(),
+                    self.state
+                        .scope
+                        .session_id
+                        .as_ref()
+                        .expect("validated SessionRef")
+                        .value
+                        .clone(),
                     request_id,
                     tool_name,
                     args_json,
@@ -183,10 +195,10 @@ impl<'a> ActionExecutor<'a> {
             PipelineAction::EvaluateAndStoreMemory {
                 user_input,
                 assistant_response,
-                turn_id,
+                generation_id,
             } => {
                 self.rag
-                    .evaluate_and_store(&user_input, &assistant_response, &turn_id)
+                    .evaluate_and_store(&user_input, &assistant_response, &generation_id)
                     .await;
             }
 
@@ -208,16 +220,13 @@ impl<'a> ActionExecutor<'a> {
             PipelineAction::PrefillCache => {
                 let tasks = self.reasoner.active_tasks().await;
                 let pctx = context::for_prefill(
-                    &self.state.conversation_id,
                     self.history,
                     &self.state.last_memory_md,
                     self.tools,
                     &tasks,
                 )
                 .await;
-                self.talker
-                    .prefill_cache(&self.state.conversation_id, pctx)
-                    .await;
+                self.talker.prefill_cache(pctx).await;
             }
 
             // ── Silence ──

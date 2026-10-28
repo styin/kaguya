@@ -3,7 +3,7 @@ pub struct TelemetryClient {
     base_url: String,
     source: String,
     http: reqwest::Client,
-    instance_context: Option<crate::instance::InstanceIdentity>,
+    session: crate::proto::SessionRef,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -11,63 +11,58 @@ pub struct TelemetryClient {
 struct TelemetryPayload {
     source: String,
     kind: String,
-    instance_id: Option<String>,
-    session_id: Option<String>,
+    instance_id: String,
+    session_id: String,
     allocation_id: Option<String>,
-    conversation_id: Option<String>,
-    turn_id: Option<String>,
+    generation_id: Option<String>,
     request_id: Option<String>,
     fields: serde_json::Value,
 }
 
 impl TelemetryClient {
-    pub fn new(base_url: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        source: impl Into<String>,
+        session: crate::proto::SessionRef,
+    ) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             source: source.into(),
             http: reqwest::Client::new(),
-            instance_context: None,
+            session,
         }
-    }
-
-    pub fn with_instance_context(
-        mut self,
-        instance_context: crate::instance::InstanceIdentity,
-    ) -> Self {
-        self.instance_context = Some(instance_context);
-        self
     }
 
     pub fn emit(
         &self,
         kind: impl Into<String>,
-        conversation_id: Option<String>,
-        turn_id: Option<String>,
+        originating_session_id: Option<String>,
+        generation_id: Option<String>,
         request_id: Option<String>,
         fields: serde_json::Value,
     ) {
-        if let (Some(instance_context), Some(conversation_id)) =
-            (&self.instance_context, &conversation_id)
+        let (instance_id, session_id) =
+            match crate::instance::validate_session_ref(Some(&self.session)) {
+                Ok(ids) => ids,
+                Err(error) => {
+                    tracing::warn!(%error, "dropping telemetry with invalid configured scope");
+                    return;
+                }
+            };
+        if originating_session_id
+            .as_deref()
+            .is_some_and(|id| id != session_id)
         {
-            if conversation_id != &instance_context.default_session_id {
-                tracing::warn!(%conversation_id, "dropping telemetry with mismatched originating session correlation");
-                return;
-            }
+            tracing::warn!("dropping telemetry with mismatched originating session correlation");
+            return;
         }
         let payload = TelemetryPayload {
             source: self.source.clone(),
             kind: kind.into(),
-            instance_id: self
-                .instance_context
-                .as_ref()
-                .map(|instance_context| instance_context.instance_id.clone()),
-            session_id: self
-                .instance_context
-                .as_ref()
-                .map(|instance_context| instance_context.default_session_id.clone()),
+            instance_id: instance_id.to_owned(),
+            session_id: session_id.to_owned(),
             allocation_id: None,
-            conversation_id,
-            turn_id,
+            generation_id,
             request_id,
             fields,
         };

@@ -16,11 +16,22 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
-use crate::instance::InstanceIdentity;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::talker_service_client::TalkerServiceClient;
+use crate::proto::SessionRef;
 use crate::telemetry::TelemetryClient;
+
+fn trigger_name(trigger: Option<&proto::generation_start::Trigger>) -> &'static str {
+    match trigger {
+        Some(proto::generation_start::Trigger::UserInput(_)) => "user_input",
+        Some(proto::generation_start::Trigger::ToolResult(_)) => "tool_result",
+        Some(proto::generation_start::Trigger::ReasonerResult(_)) => "reasoner_result",
+        Some(proto::generation_start::Trigger::ReasonerProgress(_)) => "reasoner_progress",
+        Some(proto::generation_start::Trigger::Silence(_)) => "silence",
+        None => "missing",
+    }
+}
 
 /// Persistent gRPC client for the Talker process.
 ///
@@ -36,12 +47,23 @@ pub struct TalkerClient {
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
     telemetry: Option<TelemetryClient>,
-    instance_context: Option<InstanceIdentity>,
+    session: SessionRef,
 }
 
 impl TalkerClient {
-    pub fn new(endpoint: String, tasks: TaskSpawner, connection: ManagedConnectionHandle) -> Self {
-        Self::with_reconnect_policy(endpoint, tasks, connection, ReconnectPolicy::default())
+    pub fn new(
+        endpoint: String,
+        tasks: TaskSpawner,
+        connection: ManagedConnectionHandle,
+        session: SessionRef,
+    ) -> Self {
+        Self::with_reconnect_policy(
+            endpoint,
+            tasks,
+            connection,
+            ReconnectPolicy::default(),
+            session,
+        )
     }
 
     pub fn with_reconnect_policy(
@@ -49,6 +71,7 @@ impl TalkerClient {
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
+        session: SessionRef,
     ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(None)),
@@ -58,17 +81,12 @@ impl TalkerClient {
             connection,
             reconnect,
             telemetry: None,
-            instance_context: None,
+            session,
         }
     }
 
     pub fn with_telemetry(mut self, telemetry: TelemetryClient) -> Self {
         self.telemetry = Some(telemetry);
-        self
-    }
-
-    pub fn with_instance_context(mut self, instance_context: InstanceIdentity) -> Self {
-        self.instance_context = Some(instance_context);
         self
     }
 
@@ -85,8 +103,8 @@ impl TalkerClient {
     }
 
     /// Attempt to establish a gRPC channel using the configured reconnect
-    /// policy. Returns `true` on success (readiness → Ready), `false` if all
-    /// attempts are exhausted (readiness → Degraded).
+    /// policy. A connected channel stays Starting until UpdatePersona accepts
+    /// the configured scope. Exhaustion marks the connection Degraded.
     pub async fn try_connect(&self) -> bool {
         match Self::connect_with_policy(&self.endpoint, self.connection.clone(), self.reconnect)
             .await
@@ -106,16 +124,24 @@ impl TalkerClient {
     /// Open a bidi Converse stream, send `ctx` as the start payload, and
     /// forward Talker outputs to `output_tx`.
     ///
-    /// Returns a [`CancellationToken`] that cancels the stream when dropped.
+    /// Returns a [`CancellationToken`] that the caller can cancel to stop the stream.
     /// The stream sender is registered *before* the task spawns so that a
     /// [`barge_in`](Self::barge_in) call racing immediately after this returns
     /// finds the live sender.
     pub async fn dispatch(
         &self,
-        ctx: proto::TalkerContext,
+        ctx: proto::GenerationStart,
         output_tx: mpsc::Sender<proto::TalkerOutput>,
     ) -> CancellationToken {
         let token = CancellationToken::new();
+        match crate::instance::validate_session_ref(ctx.session.as_ref()) {
+            Ok(_) if ctx.session.as_ref() == Some(&self.session) => {}
+            result => {
+                error!(error = ?result.err(), "rejecting Talker dispatch with a different or invalid session");
+                token.cancel();
+                return token;
+            }
+        }
         let child = token.child_token();
         let inner = Arc::clone(&self.inner);
         let stream_tx_arc = Arc::clone(&self.stream_tx);
@@ -123,9 +149,14 @@ impl TalkerClient {
         let connection = self.connection.clone();
         let reconnect = self.reconnect;
         let telemetry = self.telemetry.clone();
-        let instance_context = self.instance_context.clone();
-        let conversation_id = ctx.conversation_id.clone();
-        let turn_id = ctx.turn_id.clone();
+        let session_id = self
+            .session
+            .session_id
+            .as_ref()
+            .expect("validated SessionRef")
+            .value
+            .clone();
+        let generation_id = ctx.generation_id.clone();
         let dispatch_started = std::time::Instant::now();
 
         // Create the bidi channel and register the sender BEFORE spawning.
@@ -134,15 +165,19 @@ impl TalkerClient {
         if let Some(telemetry) = &telemetry {
             telemetry.emit(
                 "talker.dispatch.started",
-                Some(conversation_id.clone()),
-                Some(turn_id.clone()),
+                Some(session_id.clone()),
+                Some(generation_id.clone()),
                 None,
                 serde_json::json!({
-                    "history_count": ctx.history.len(),
-                    "retrieval_count": ctx.retrieval_results.len(),
-                    "memory_chars": ctx.memory_contents.chars().count(),
-                    "tool_count": ctx.tools.len(),
-                    "user_input_chars": ctx.user_input.chars().count(),
+                    "history_count": ctx.prompt_context.as_ref().map_or(0, |prompt| prompt.history.len()),
+                    "retrieval_count": ctx.prompt_context.as_ref().map_or(0, |prompt| prompt.retrieval_results.len()),
+                    "memory_chars": ctx.prompt_context.as_ref().map_or(0, |prompt| prompt.memory_contents.chars().count()),
+                    "tool_count": ctx.prompt_context.as_ref().map_or(0, |prompt| prompt.tools.len()),
+                    "user_input_chars": match ctx.trigger.as_ref() {
+                        Some(proto::generation_start::Trigger::UserInput(input)) => input.text.chars().count(),
+                        _ => 0,
+                    },
+                    "trigger": trigger_name(ctx.trigger.as_ref()),
                 }),
             );
         }
@@ -169,10 +204,7 @@ impl TalkerClient {
             };
 
             let outbound = ReceiverStream::new(rx);
-            let request = match &instance_context {
-                Some(instance_context) => instance_context.grpc_request(outbound),
-                None => tonic::Request::new(outbound),
-            };
+            let request = tonic::Request::new(outbound);
             let mut inbound = match client.converse(request).await {
                 Ok(resp) => {
                     connection.set_readiness(Readiness::Ready);
@@ -197,13 +229,18 @@ impl TalkerClient {
                     result = inbound.message() => {
                         match result {
                             Ok(Some(output)) => {
+                                if output.generation_id.is_empty() || output.generation_id != generation_id {
+                                    connection.set_readiness(Readiness::Degraded);
+                                    error!(%generation_id, response_generation = %output.generation_id, "Talker response generation is missing or differs from its stream");
+                                    break;
+                                }
                                 if let Some(telemetry) = &telemetry {
                                     if !first_output_sent {
                                         first_output_sent = true;
                                         telemetry.emit(
                                             "talker.first_output",
-                                            Some(conversation_id.clone()),
-                                            Some(turn_id.clone()),
+                                            Some(session_id.clone()),
+                                            Some(generation_id.clone()),
                                             None,
                                             serde_json::json!({
                                                 "duration_ms": dispatch_started.elapsed().as_millis() as u64,
@@ -219,8 +256,8 @@ impl TalkerClient {
                                         first_sentence_sent = true;
                                         telemetry.emit(
                                             "talker.first_sentence",
-                                            Some(conversation_id.clone()),
-                                            Some(turn_id.clone()),
+                                            Some(session_id.clone()),
+                                            Some(generation_id.clone()),
                                             None,
                                             serde_json::json!({
                                                 "duration_ms": dispatch_started.elapsed().as_millis() as u64,
@@ -260,7 +297,8 @@ impl TalkerClient {
                 .await
             {
                 Ok(Ok(client)) => {
-                    connection.set_readiness(Readiness::Ready);
+                    // Transport connectivity does not establish persona/session readiness.
+                    // Recovery marks Ready only after UpdatePersona succeeds.
                     return Some(client);
                 }
                 Ok(Err(e)) => {
@@ -300,13 +338,13 @@ impl TalkerClient {
     }
 
     /// Send inline barge-in on the active Converse stream.
-    pub async fn barge_in(&self, conversation_id: &str) {
+    pub async fn barge_in(&self) {
         let guard = self.stream_tx.lock().await;
         if let Some(tx) = guard.as_ref() {
             let msg = proto::TalkerInput {
                 payload: Some(proto::talker_input::Payload::BargeIn(
                     proto::BargeInSignal {
-                        conversation_id: conversation_id.into(),
+                        session: Some(self.session.clone()),
                     },
                 )),
             };
@@ -321,19 +359,16 @@ impl TalkerClient {
     }
 
     /// Hint the Talker to prefill its KV cache for the next turn.
-    pub async fn prefill_cache(&self, conversation_id: &str, ctx: proto::TalkerContext) {
+    pub async fn prefill_cache(&self, context: proto::PromptContext) {
         let Some(mut client) = self.inner.read().await.clone() else {
             return;
         };
         debug!("→ PrefillCache");
         let payload = proto::PrefillRequest {
-            conversation_id: conversation_id.into(),
-            context: Some(ctx),
+            session: Some(self.session.clone()),
+            prompt_context: Some(context),
         };
-        let request = match &self.instance_context {
-            Some(instance_context) => instance_context.grpc_request(payload),
-            None => tonic::Request::new(payload),
-        };
+        let request = tonic::Request::new(payload);
         if let Err(e) = client.prefill_cache(request).await {
             warn!("PrefillCache failed: {e}");
         }
@@ -424,10 +459,10 @@ impl TalkerClient {
             memory_len = config.memory_md.len(),
             "→ UpdatePersona"
         );
-        let request = match &self.instance_context {
-            Some(instance_context) => instance_context.grpc_request(config),
-            None => tonic::Request::new(config),
-        };
+        let request = tonic::Request::new(proto::UpdatePersonaRequest {
+            session: Some(self.session.clone()),
+            persona: Some(config),
+        });
         if let Err(e) = client.update_persona(request).await {
             self.connection.set_readiness(Readiness::Degraded);
             error!("UpdatePersona failed: {e}");
@@ -445,6 +480,17 @@ mod tests {
 
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
+
+    fn test_session() -> SessionRef {
+        SessionRef {
+            instance_id: Some(proto::InstanceId {
+                value: "00000000-0000-4000-8000-000000000001".into(),
+            }),
+            session_id: Some(proto::SessionId {
+                value: "00000000-0000-4000-8000-000000000002".into(),
+            }),
+        }
+    }
 
     fn fast_policy() -> ReconnectPolicy {
         ReconnectPolicy::bounded(
@@ -464,6 +510,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
+            test_session(),
         );
 
         talker.try_connect().await;
@@ -483,6 +530,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
+            test_session(),
         );
 
         talker.try_connect().await;
@@ -531,7 +579,7 @@ mod tests {
 
         async fn update_persona(
             &self,
-            _req: tonic::Request<proto::PersonaConfig>,
+            _req: tonic::Request<proto::UpdatePersonaRequest>,
         ) -> Result<tonic::Response<proto::PersonaAck>, tonic::Status> {
             Err(tonic::Status::failed_precondition(
                 "instance/session binding mismatch",
@@ -560,7 +608,7 @@ mod tests {
 
         async fn update_persona(
             &self,
-            _req: tonic::Request<proto::PersonaConfig>,
+            _req: tonic::Request<proto::UpdatePersonaRequest>,
         ) -> Result<tonic::Response<proto::PersonaAck>, tonic::Status> {
             Ok(tonic::Response::new(proto::PersonaAck {}))
         }
@@ -593,18 +641,13 @@ mod tests {
         });
         let lifecycle = LifecycleSupervisor::new();
         let connection = lifecycle.register_connection("talker");
-        let instance_context = InstanceIdentity {
-            schema_version: 1,
-            instance_id: uuid::Uuid::new_v4().to_string(),
-            default_session_id: uuid::Uuid::new_v4().to_string(),
-        };
         let client = TalkerClient::with_reconnect_policy(
             format!("http://{address}"),
             lifecycle.spawner(),
             connection,
             fast_policy(),
-        )
-        .with_instance_context(instance_context);
+            test_session(),
+        );
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             client.run_recovery_loop(
@@ -662,6 +705,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
+            test_session(),
         );
 
         let persona = Arc::new(RwLock::new(proto::PersonaConfig::default()));
@@ -690,5 +734,265 @@ mod tests {
         poll_readiness(&connection, Readiness::Ready).await;
 
         shutdown.cancel();
+    }
+
+    fn start_for(session: &SessionRef) -> proto::GenerationStart {
+        crate::context::assemble_from_data(
+            session,
+            "generation-1",
+            "hello",
+            vec![],
+            "",
+            vec![],
+            vec![],
+            &[],
+        )
+    }
+
+    #[tokio::test]
+    async fn invalid_or_mismatched_dispatch_does_not_replace_active_stream() {
+        let lifecycle = LifecycleSupervisor::new();
+        let connection = lifecycle.register_connection("talker");
+        let client = TalkerClient::with_reconnect_policy(
+            "not a valid uri".into(),
+            lifecycle.spawner(),
+            connection.clone(),
+            fast_policy(),
+            test_session(),
+        );
+        let (active_tx, mut active_rx) = mpsc::channel(2);
+        *client.stream_tx.lock().await = Some(active_tx.clone());
+        let mut other = test_session();
+        other.session_id = Some(proto::SessionId {
+            value: "00000000-0000-4000-8000-000000000003".into(),
+        });
+        let mut malformed = test_session();
+        malformed.session_id = Some(proto::SessionId {
+            value: "not-a-uuid".into(),
+        });
+        for requested in [Some(other), None, Some(malformed)] {
+            let mut start = start_for(&test_session());
+            start.session = requested;
+            let (output_tx, _output_rx) = mpsc::channel(2);
+            let token = client.dispatch(start, output_tx).await;
+            assert!(token.is_cancelled());
+            assert!(client
+                .stream_tx
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .same_channel(&active_tx));
+            assert!(matches!(
+                active_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+        assert_eq!(connection.readiness(), Readiness::Starting);
+        // The still-active sender remains usable, and inline control carries
+        // the client's configured scope rather than the rejected caller scope.
+        client.barge_in().await;
+        let message = active_rx.recv().await.unwrap();
+        let Some(proto::talker_input::Payload::BargeIn(signal)) = message.payload else {
+            panic!("expected inline barge-in");
+        };
+        assert_eq!(signal.session, Some(test_session()));
+    }
+
+    struct HandshakeTalker {
+        mismatch: Option<(u32, &'static str)>,
+        received: mpsc::UnboundedSender<(SessionRef, String)>,
+    }
+
+    #[tonic::async_trait]
+    impl TalkerServiceTrait for HandshakeTalker {
+        type ConverseStream = ReceiverStream<Result<proto::TalkerOutput, tonic::Status>>;
+
+        async fn converse(
+            &self,
+            req: tonic::Request<tonic::Streaming<proto::TalkerInput>>,
+        ) -> Result<tonic::Response<Self::ConverseStream>, tonic::Status> {
+            // Scope is an explicit first-message contract, with no competing
+            // custom metadata representation.
+            assert!(req.metadata().get("x-kaguya-instance-id").is_none());
+            assert!(req.metadata().get("x-kaguya-session-id").is_none());
+            let mut input = req.into_inner();
+            let first = input
+                .message()
+                .await?
+                .ok_or_else(|| tonic::Status::invalid_argument("missing start"))?;
+            let Some(proto::talker_input::Payload::Start(start)) = first.payload else {
+                return Err(tonic::Status::invalid_argument("start must be first"));
+            };
+            crate::instance::validate_session_ref(start.session.as_ref())
+                .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
+            let scope = start.session.clone().expect("validated SessionRef");
+            assert_eq!(scope, test_session());
+            self.received
+                .send((scope, start.generation_id.clone()))
+                .unwrap();
+            // Reading the first message before response headers is deliberate:
+            // this would deadlock if the client waited for headers before Start.
+            use proto::talker_output::Payload;
+            let payloads = [
+                Payload::ResponseStarted(proto::ResponseStarted {}),
+                Payload::Sentence(proto::SentenceEvent {
+                    text: "hello".into(),
+                }),
+                Payload::Emotion(proto::EmotionEvent {
+                    emotion: "joy".into(),
+                }),
+                Payload::ToolRequest(proto::ToolRequest {
+                    request_id: "request-1".into(),
+                    tool_name: "read_file".into(),
+                    args_json: "{}".into(),
+                }),
+                Payload::DelegateRequest(proto::DelegateRequest {
+                    task_id: "task-1".into(),
+                    description: "research".into(),
+                }),
+                Payload::BargeInAck(proto::BargeInAck {
+                    spoken_text: "hello".into(),
+                    unspoken_text: String::new(),
+                }),
+                Payload::ResponseComplete(proto::ResponseComplete {
+                    was_interrupted: false,
+                }),
+            ];
+            let (tx, rx) = mpsc::channel(payloads.len());
+            for (index, payload) in payloads.into_iter().enumerate() {
+                let seq = index as u32 + 1;
+                let generation_id = match self.mismatch {
+                    Some((mismatched_seq, value)) if mismatched_seq == seq => value.to_owned(),
+                    _ => start.generation_id.clone(),
+                };
+                tx.send(Ok(proto::TalkerOutput {
+                    seq,
+                    generation_id,
+                    payload: Some(payload),
+                }))
+                .await
+                .unwrap();
+            }
+            Ok(tonic::Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn prefill_cache(
+            &self,
+            req: tonic::Request<proto::PrefillRequest>,
+        ) -> Result<tonic::Response<proto::PrefillAck>, tonic::Status> {
+            assert_eq!(req.get_ref().session, Some(test_session()));
+            assert!(req.get_ref().prompt_context.is_some());
+            Ok(tonic::Response::new(proto::PrefillAck {}))
+        }
+
+        async fn update_persona(
+            &self,
+            req: tonic::Request<proto::UpdatePersonaRequest>,
+        ) -> Result<tonic::Response<proto::PersonaAck>, tonic::Status> {
+            assert!(req.metadata().get("x-kaguya-instance-id").is_none());
+            assert!(req.metadata().get("x-kaguya-session-id").is_none());
+            assert_eq!(req.get_ref().session, Some(test_session()));
+            assert!(req.get_ref().persona.is_some());
+            Ok(tonic::Response::new(proto::PersonaAck {}))
+        }
+    }
+
+    async fn start_handshake_talker(
+        mismatch: Option<(u32, &'static str)>,
+    ) -> (
+        String,
+        mpsc::UnboundedReceiver<(SessionRef, String)>,
+        CancellationToken,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let shutdown = CancellationToken::new();
+        let token = shutdown.clone();
+        let (received, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TalkerServiceServer::new(HandshakeTalker {
+                    mismatch,
+                    received,
+                }))
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), token.cancelled())
+                .await
+                .unwrap();
+        });
+        (endpoint, rx, shutdown)
+    }
+
+    #[tokio::test]
+    async fn first_start_handshake_carries_scope_and_preserves_generation_provenance() {
+        let (endpoint, mut received, shutdown) = start_handshake_talker(None).await;
+        let lifecycle = LifecycleSupervisor::new();
+        let connection = lifecycle.register_connection("talker");
+        let client = TalkerClient::with_reconnect_policy(
+            endpoint,
+            lifecycle.spawner(),
+            connection.clone(),
+            fast_policy(),
+            test_session(),
+        );
+        assert!(client.try_connect().await);
+        assert_eq!(connection.readiness(), Readiness::Starting);
+        client
+            .update_persona(proto::PersonaConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(connection.readiness(), Readiness::Ready);
+        client.prefill_cache(proto::PromptContext::default()).await;
+        let (tx, mut rx) = mpsc::channel(4);
+        client.dispatch(start_for(&test_session()), tx).await;
+        let observed = tokio::time::timeout(Duration::from_secs(3), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed, (test_session(), "generation-1".into()));
+        let mut outputs = Vec::new();
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+        {
+            assert_eq!(event.generation_id, "generation-1");
+            outputs.push(event);
+        }
+        assert_eq!(outputs.len(), 7);
+        assert!(matches!(
+            outputs[1].payload,
+            Some(proto::talker_output::Payload::Sentence(_))
+        ));
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn missing_or_mismatched_generation_on_any_payload_never_enters_the_shared_queue() {
+        for mismatch in (1..=7).flat_map(|seq| [(seq, "wrong-generation"), (seq, "")]) {
+            let expected_outputs = mismatch.0 as usize - 1;
+            let (endpoint, _received, shutdown) = start_handshake_talker(Some(mismatch)).await;
+            let lifecycle = LifecycleSupervisor::new();
+            let connection = lifecycle.register_connection("talker");
+            let client = TalkerClient::with_reconnect_policy(
+                endpoint,
+                lifecycle.spawner(),
+                connection.clone(),
+                fast_policy(),
+                test_session(),
+            );
+            let (tx, mut rx) = mpsc::channel(4);
+            client.dispatch(start_for(&test_session()), tx).await;
+            let mut count = 0;
+            while tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await
+                .unwrap()
+                .is_some()
+            {
+                count += 1;
+            }
+            assert_eq!(count, expected_outputs);
+            assert_eq!(connection.readiness(), Readiness::Degraded);
+            shutdown.cancel();
+        }
     }
 }

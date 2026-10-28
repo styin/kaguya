@@ -13,11 +13,11 @@ use crate::proto;
 use crate::telemetry::TelemetryClient;
 use crate::types::{ControlSignal, InputEvent};
 
-use super::{handlers, PipelineComponents, TurnState};
+use super::{handlers, PipelineComponents, SessionState};
 
 pub async fn run(
     pipeline: &PipelineComponents<'_>,
-    mut turn: TurnState,
+    mut session: SessionState,
     mut narration: NarrationFilter,
     mut control_rx: mpsc::Receiver<ControlSignal>,
     mut input_rx: InputReceivers,
@@ -32,8 +32,12 @@ pub async fn run(
     let tools = pipeline.tools;
     let reasoner = pipeline.reasoner;
     let rag = pipeline.rag;
+    let (expected_instance_id, expected_session_id) =
+        crate::instance::validate_session_ref(Some(&session.scope))?;
+    let expected_instance_id = expected_instance_id.to_owned();
+    let expected_session_id = expected_session_id.to_owned();
     anyhow::ensure!(
-        history.matches_instance_session(&turn.instance_id, &turn.conversation_id),
+        history.matches_session(&session.scope),
         "pipeline history instance/session context does not match"
     );
 
@@ -46,16 +50,16 @@ pub async fn run(
                 match ctrl {
                     ControlSignal::Stop => {
                         info!("P0: STOP");
-                        turn.cancel_active_gen();
-                        turn.cancel_active_silence();
+                        session.cancel_active_gen();
+                        session.cancel_active_silence();
                         reasoner.cancel_all().await;
                         output.mute_audio();
-                        talker.barge_in(&turn.conversation_id).await;
+                        talker.barge_in().await;
                     }
                     ControlSignal::Shutdown => {
                         info!("P0: SHUTDOWN");
-                        turn.cancel_active_gen();
-                        turn.cancel_active_silence();
+                        session.cancel_active_gen();
+                        session.cancel_active_silence();
                         reasoner.cancel_all().await;
                         lifecycle.shutdown(ShutdownReason::ControlShutdown).await;
                         break;
@@ -68,17 +72,18 @@ pub async fn run(
 
             // ── Talker Output ──
             Some(out) = talker_output_rx.recv() => {
+                let generation_id = &out.generation_id;
+                debug!(%generation_id, "processing Talker generation event");
                 let actions = match out.payload {
-                    Some(proto::talker_output::Payload::ResponseStarted(rs)) => {
-                        debug!(turn = %rs.turn_id, "response started");
-                        handlers::handle_response_started(&mut turn, &rs.turn_id)
+                    Some(proto::talker_output::Payload::ResponseStarted(_)) => {
+                        handlers::handle_response_started(&mut session, generation_id)
                     }
                     Some(proto::talker_output::Payload::Sentence(se)) => {
                         debug!(text = %se.text, "→ [SENTENCE]");
-                        handlers::handle_sentence(&mut turn, &se.text)
+                        handlers::handle_sentence(&mut session, generation_id, &se.text)
                     }
                     Some(proto::talker_output::Payload::Emotion(em)) => {
-                        handlers::handle_emotion(&em.emotion)
+                        handlers::handle_emotion(generation_id, &em.emotion)
                     }
                     Some(proto::talker_output::Payload::ToolRequest(tr)) => {
                         info!(tool = %tr.tool_name, "→ [TOOL]");
@@ -103,12 +108,12 @@ pub async fn run(
                         debug!(interrupted = rc.was_interrupted, "response complete");
                         let last_user = history.last_user_input().await;
                         handlers::handle_response_complete(
-                            &mut turn, &rc.turn_id, rc.was_interrupted, last_user,
+                            &mut session, generation_id, rc.was_interrupted, last_user,
                         )
                     }
                     None => continue,
                 };
-                pipeline.executor(&mut turn).execute_all(actions).await;
+                pipeline.executor(&mut session).execute_all(actions).await;
             }
 
             // ── P1: User Intent ──
@@ -155,14 +160,14 @@ pub async fn run(
                 }
 
                 let actions = handlers::handle_user_intent(
-                    &mut turn, &text, is_voice, ready,
+                    &mut session, &text, is_voice, ready,
                     retrieval, recent, tool_defs, &tasks,
                 );
                 if let Some(duration_ms) = rag_elapsed_ms {
                     telemetry.emit(
                         "rag.retrieve.completed",
-                        Some(turn.conversation_id.clone()),
-                        Some(turn.last_turn_id.clone()),
+                        Some(expected_session_id.clone()),
+                        Some(session.last_user_generation_id.clone()),
                         None,
                         serde_json::json!({
                             "duration_ms": duration_ms,
@@ -173,7 +178,7 @@ pub async fn run(
                         }),
                     );
                 }
-                pipeline.executor(&mut turn).execute_all(actions).await;
+                pipeline.executor(&mut session).execute_all(actions).await;
             }
 
             // ── P2: ASR States ──
@@ -181,8 +186,8 @@ pub async fn run(
                 match event {
                     InputEvent::VadSpeechStart => {
                         debug!("P2: vad_speech_start → BARGE-IN");
-                        let actions = handlers::handle_vad_speech_start(&mut turn);
-                        pipeline.executor(&mut turn).execute_all(actions).await;
+                        let actions = handlers::handle_vad_speech_start(&mut session);
+                        pipeline.executor(&mut session).execute_all(actions).await;
                     }
                     InputEvent::PartialTranscript { text } => {
                         debug!(text = %text, "P2: partial");
@@ -198,7 +203,7 @@ pub async fn run(
             Some(event) = input_rx.p3.recv() => {
                 let actions = match event {
                     InputEvent::ToolResult { instance_id, session_id, request_id, tool_name, content } => {
-                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                        if instance_id != expected_instance_id || session_id != expected_session_id {
                             warn!(%instance_id, %session_id, %request_id, "dropping tool callback with mismatched originating instance/session correlation");
                             continue;
                         }
@@ -208,12 +213,12 @@ pub async fn run(
                         let tasks = reasoner.active_tasks().await;
                         let ready = talker.is_ready();
                         handlers::handle_tool_result(
-                            &mut turn, &request_id, &tool_name, &content,
+                            &mut session, &request_id, &tool_name, &content,
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerStep { instance_id, session_id, task_id: _, description } => {
-                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                    InputEvent::ReasonerStep { instance_id, session_id, task_id, description } => {
+                        if instance_id != expected_instance_id || session_id != expected_session_id {
                             warn!(%instance_id, %session_id, "dropping Reasoner step with mismatched originating instance/session correlation");
                             continue;
                         }
@@ -222,18 +227,18 @@ pub async fn run(
                         // short-circuit anyway (narration filtered or already
                         // generating). Avoids unnecessary RwLock contention on
                         // the high-frequency reasoner step path.
-                        if !should_narrate || turn.is_generating() {
+                        if !should_narrate || session.is_generating() {
                             continue;
                         }
                         let recent = history.recent().await;
                         let ready = talker.is_ready();
                         handlers::handle_reasoner_step(
-                            &mut turn, &description,
+                            &mut session, &task_id, &description,
                             should_narrate, ready, recent,
                         )
                     }
                     InputEvent::ReasonerCompleted { instance_id, session_id, task_id, summary } => {
-                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                        if instance_id != expected_instance_id || session_id != expected_session_id {
                             warn!(%instance_id, %session_id, %task_id, "dropping Reasoner completion with mismatched originating instance/session correlation");
                             continue;
                         }
@@ -243,12 +248,12 @@ pub async fn run(
                         let tasks = reasoner.active_tasks().await;
                         let ready = talker.is_ready();
                         handlers::handle_reasoner_completed(
-                            &mut turn, &task_id, &summary,
+                            &mut session, &task_id, &summary,
                             ready, recent, tool_defs, &tasks,
                         )
                     }
                     InputEvent::ReasonerError { instance_id, session_id, task_id, message, .. } => {
-                        if instance_id != turn.instance_id || session_id != turn.conversation_id {
+                        if instance_id != expected_instance_id || session_id != expected_session_id {
                             warn!(%instance_id, %session_id, %task_id, "dropping Reasoner error with mismatched originating instance/session correlation");
                             continue;
                         }
@@ -258,7 +263,7 @@ pub async fn run(
                     _ => continue,
                 };
                 if !actions.is_empty() {
-                    pipeline.executor(&mut turn).execute_all(actions).await;
+                    pipeline.executor(&mut session).execute_all(actions).await;
                 }
             }
 
@@ -270,11 +275,11 @@ pub async fn run(
                     let tool_defs = tools.definitions();
                     let ready = talker.is_ready();
                     let actions = handlers::handle_silence(
-                        &mut turn, duration, silence_enabled,
+                        &mut session, duration, silence_enabled,
                         ready, recent, tool_defs,
                     );
                     if !actions.is_empty() {
-                        pipeline.executor(&mut turn).execute_all(actions).await;
+                        pipeline.executor(&mut session).execute_all(actions).await;
                     }
                 }
             }

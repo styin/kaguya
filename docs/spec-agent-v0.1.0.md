@@ -4,7 +4,7 @@
 
 **Components:** Listener Agent, Talker Agent
 **Version:** 0.1.0
-**Date:** March 2026
+**Updated:** 2026-10-23
 **Audience:** Developers working on the Listener and Talker modules
 
 ---
@@ -19,13 +19,35 @@ The Listener and Talker share a single Python process to avoid GPU context switc
 │  - Shared GPU context (faster-whisper + Kokoro on same GPU)    │
 │  - Listener: RealtimeSTT (VAD + STT + turn detection)          │
 │  - Talker: RealtimeTTS (Kokoro) + LLM HTTP client              │
-│  - Custom PREPARE signal handling, sentence boundary detection  │
-│  - gRPC client → Gateway                                       │
+│  - Inline barge-in handling, sentence boundary detection       │
+│  - gRPC servers ← Gateway clients                             │
 │  - HTTP client → llama.cpp server                              │
 └───────────────────────────────────────────────────────────────┘
 ```
 
 Both run as persistent `asyncio` tasks. Custom code total: ~700-1150 lines of Python.
+
+**Current deployment scope:** One Gateway serves one instance and one selected
+session. Its dedicated Supervisor/voice services accept that same fixed pair;
+there is no instance/session routing or multiplexing. Shared workers and
+concurrent sessions remain a future architecture.
+
+Before loading voice dependencies or opening ports, voice startup requires and
+validates `KAGUYA_INSTANCE_ID` and `KAGUYA_SESSION_ID`. Managed and Console
+launchers derive them from the selected manifest; standalone startup must supply
+them explicitly. Talker, Listener gRPC, and raw audio ingress share one immutable
+`InstanceSessionBinding`. Requests assert this configured pair; the first RPC
+cannot claim or rebind the process. The voice process never reads the manifest.
+
+The canonical [protobuf schema](../proto/kaguya/v1/kaguya.proto) defines
+`SessionRef { InstanceId instance_id, SessionId session_id }`; each named ID
+message holds a `string value`. Receivers require both objects and validate
+canonical, non-nil, distinct UUIDs before comparing the pair. Rust Gateway and
+Supervisor use their generated `proto::SessionRef` internally, with small local
+validation helpers; the immutable Python `InstanceSessionBinding` remains the
+voice process's configured pair. Identity agreement is not caller
+authentication. Hosted authorization remains deferred.
+
 
 ---
 
@@ -154,7 +176,19 @@ service ListenerService {
 }
 ```
 
-`ListenerOutput` carries one of: `vad_speech_start`, `vad_speech_end`, `partial_transcript`, `final_transcript`. `ListenerInput` carries optional `ListenerControl` (e.g. reset on new session). Audio is delivered out-of-band: the Gateway opens a TCP connection to `listener_audio_addr:listener_audio_port`, writes a 39-byte owner header (`KAGUYA1` followed by the 16-byte binary InstanceId and SessionId), then sends frames as `[u32 BE length][bytes]`. The Listener rejects a header that differs from its bound owner. Audio bytes still never enter protobuf.
+Every stream starts with `ListenerInput.init = ListenerInit { session:
+SessionRef }`. The Listener validates it before sending response headers or
+session events; missing/invalid initialization and repeated initialization fail.
+Only Listener control messages may follow. The Gateway queues Init before
+awaiting stream acceptance, then opens the audio connection.
+
+`ListenerOutput` carries `vad_speech_start`, `vad_speech_end`,
+`partial_transcript`, or `final_transcript`; events inherit the validated stream
+scope. Audio remains out-of-band: Gateway writes a 39-byte connection prefix
+(`KAGUYA1`, 16-byte binary InstanceId, 16-byte binary SessionId), then
+`[u32 BE length][bytes]` frames. Audio ingress checks the prefix against the
+startup pair before processing frames. It does not lazily establish ownership;
+audio bytes never enter protobuf.
 
 ---
 
@@ -171,19 +205,22 @@ The Talker Agent is Kaguya's voice. It owns the fast-path LLM and TTS. It is the
 - Tool execution (Talker emits `[TOOL:...]` tags; Gateway dispatches to Toolkit).
 - Filesystem access (Talker receives all configuration and context via gRPC from Gateway).
 
-**The Talker is stateless.** It receives all context via gRPC from the Gateway every turn.
+**The Talker is stateless with respect to conversation history and application
+tasks.** Each generation receives its prompt snapshot and triggering event from
+Gateway. Persona is configuration cached through `UpdatePersona`; Talker does
+not own durable conversation state or load instance data itself.
 
 ### 3.2 Responsibilities
 
-- Receive context packages from the Gateway containing: user input, RAG retrieval results, conversation history, active tasks, tool list, tool results, and current metadata.
-- Receive persona configuration (`SOUL.md`, `IDENTITY.md`, and a synthesized `memory_md` produced by the Gateway from its RAG store) from the Gateway at startup and on change via `UpdatePersona` gRPC call. Cache all three in memory. Never access the filesystem directly.
+- Receive `GenerationStart` with the fixed `SessionRef`, `generation_id`, timestamp, reusable `PromptContext`, and exactly one typed trigger.
+- Receive persona configuration (`SOUL.md`, `IDENTITY.md`, and a synthesized `memory_md` produced by the Gateway from its RAG store) from the Gateway at startup and on change via scoped `UpdatePersonaRequest { session, persona }` at startup/reconnect and on change. Cache all three in memory. Never access the filesystem directly.
 - Format the final LLM prompt string from the context package + cached persona config.
 - Run streaming LLM inference on the fast-path local model (Qwen3-8B via llama.cpp HTTP).
 - Detect sentence boundaries in the token stream.
 - Post-process LLM output through the soul container.
 - Stream spoken text to TTS for synthesis → audio out to OpenPod (Channel D, via Gateway mux).
 - Send post-process metadata to the Gateway via gRPC: transcript text, emotion tags, tool requests, delegation requests, response completion signal.
-- Trigger always-on prefix KV cache prefill when the Gateway sends a context package marked as prefill-only (`PrefillCache` gRPC call).
+- Prefill from `PrefillRequest { session, prompt_context }`; prefill has no synthetic generation ID or trigger.
 
 ### 3.3 Prompt Structure
 
@@ -211,7 +248,25 @@ The Talker Agent is Kaguya's voice. It owns the fast-path LLM and TTS. It is the
 [User: {final_transcript}]
 ```
 
-The Gateway assembles the context package — including the synthesized `memory_md` and per-turn `retrieval_results` from its RAG engine. The Talker formats this into the above prompt structure. The Gateway has no knowledge of the prompt format. The Talker caches the persona config (received via `UpdatePersona`) in memory; it does not read any file directly.
+Gateway assembles `PromptContext`: recent `ChatMessage` history,
+`memory_contents`, tool definitions, typed `ActiveTask { task_id, description }`
+records, and retrieval results. `GenerationStart` adds one of:
+
+- `UserInput { text }`;
+- `ToolResult { request_id, content }`;
+- `ReasonerResult { task_id, summary }`;
+- `ReasonerProgress { task_id, description }`;
+- `SilenceTrigger { duration_ms }`.
+
+A result reference and its content stay together. Tool results consistently use
+`request_id`; Reasoner progress/results use the existing `task_id`. They do not
+introduce new task/run identities. Prompt formatting remains Talker's concern;
+typed progress and silence retain the existing rendered prompt cues.
+
+Persona remains cached configuration delivered through `UpdatePersonaRequest`.
+It is not folded into `PromptContext` or retransmitted as a `PersonaConfig` on
+every generation. Existing memory/history inputs remain in the prompt snapshot;
+Talker never reads persona files directly.
 
 ### 3.4 The Soul Container (Post-Processing Middleware)
 
@@ -272,7 +327,7 @@ Phase 1: sentence-level boundaries for correct TTS intonation. Phase 2: clause-l
 
 ### 3.8 Barge-In Handling (inline on Converse stream)
 
-Barge-in is delivered as a `BargeInSignal` on the active `TalkerService.Converse` bidi stream — there is no separate `Prepare` RPC. The Gateway sends one on every `vad_speech_start` or text-command pre-emption.
+Barge-in is delivered as a `BargeInSignal { session }` on the active `TalkerService.Converse` bidi stream — there is no separate `Prepare` RPC. The current voice speech-start path sends it on `vad_speech_start`; text input cancels the prior Gateway dispatch token. Complete text interruption/playback accounting remains acceptance work.
 
 **IF the Talker is currently speaking/generating:**
 
@@ -280,7 +335,7 @@ Barge-in is delivered as a `BargeInSignal` on the active `TalkerService.Converse
 2. Stop RealtimeTTS playback (mid-word if necessary).
 3. Compute the spoken / unspoken split for the in-flight response.
 4. Emit `BargeInAck { spoken_text, unspoken_text }` back on the same Converse stream. Gateway uses `spoken_text` to append only the spoken portion to conversation history, then unmutes audio.
-5. The current Converse stream completes naturally with `ResponseComplete { was_interrupted = true }`.
+5. The current Converse stream completes naturally with `TalkerOutput { generation_id, response_complete: { was_interrupted: true } }`.
 
 **IF the Talker is already idle (no active Converse stream):**
 
@@ -292,7 +347,7 @@ Implementation: ~100-150 lines of Python, tracking playback position against the
 
 The LLM prompt has two parts: a _stable prefix_ (system prompt + memory + conversation history) that changes only between turns, and a _variable suffix_ (the user's current input) that changes per request. The stable prefix is typically large (~1000-3000 tokens); user input is small (~10-50 tokens).
 
-**Phase 1 — Always-On Prefix Prefill.** Immediately after the Talker finishes generating a response for turn N, the Gateway sends an updated context package via `PrefillCache` gRPC call. The Talker issues:
+**Phase 1 — Always-On Prefix Prefill.** After a non-interrupted generation completes, Gateway sends a fresh `PromptContext` through scoped `PrefillCache`. It contains updated history and no `GenerationStart` or trigger. The Talker issues:
 
 ```json
 {
@@ -351,7 +406,7 @@ The Talker wraps RealtimeTTS, feeding it complete sentences from the LLM token s
 - Language: Python. Shares process with Listener for GPU context sharing.
 - LLM: HTTP client to local llama.cpp server (OpenAI-compatible completions API, localhost, ~0.1ms overhead).
 - TTS: RealtimeTTS with Kokoro engine (in-process GPU inference).
-- gRPC client connecting to Gateway.
+- Exposes the Talker gRPC server; Gateway connects as its client.
 
 Cloud fallback (TTS): ElevenLabs Flash.
 
@@ -386,7 +441,10 @@ Reference implementation: KoljaB/RealtimeVoiceChat demonstrates the full Listene
 
 ### 4.1 Role and Mandate
 
-The Reasoner Agent handles slow-path tasks via existing orchestration frameworks. It is spawned on demand by the Gateway when the Talker emits a `[DELEGATE:...]` tag.
+The target Reasoner handles slow-path tasks through orchestration frameworks.
+Currently Gateway has a gRPC delegation client and volatile task tracking; the
+Reasoner service itself remains R6 work. Gateway coordinates requests when Talker
+emits a `[DELEGATE:...]` tag; Supervisor owns any managed OS process lifecycle.
 
 **Output flows through Gateway only.** The Reasoner never communicates directly with the Talker or the user.
 
@@ -399,13 +457,13 @@ The Reasoner Agent handles slow-path tasks via existing orchestration frameworks
 
 ### 4.3 Multi-Agent Support
 
-The Gateway manages multiple concurrent Reasoner Agents, each with a unique `task_id`. The Talker can spin up multiple agents simultaneously.
+Gateway can track multiple initiated tasks in the selected session, each with a unique `task_id`. This does not imply multiple instance/session runtimes, a delivered Reasoner backend, or durable task recovery; those remain separately staged.
 
 ### 4.4 Implementation
 
 - Language: TypeScript (ecosystem compatibility with OpenClaw/Node.js).
-- Spawned on demand by Gateway, one process per task.
-- gRPC client connecting to Gateway.
+- Reasoner is the target gRPC server; Gateway connects as its client.
+- Backend task execution and durable task/run lifecycle remain R3/R6 work. Managed processes belong to Supervisor.
 - Adapter pattern: swapping frameworks (OpenClaw → Claude Code → custom) requires only a new adapter, not architectural changes.
 
 ### 4.5 IPC: Gateway ↔ Reasoner
@@ -436,7 +494,7 @@ service ListenerService {
 
 // Talker: Gateway = client, Talker = server
 service TalkerService {
-  // Bidi: Gateway sends TalkerInput.start (TalkerContext) to begin, then
+  // Bidi: Gateway sends TalkerInput.start (GenerationStart) first, then
   // optionally TalkerInput.barge_in to interrupt. Talker streams back
   // TalkerOutput (sentences, emotion tags, tool requests, barge-in acks,
   // response_complete).
@@ -444,7 +502,7 @@ service TalkerService {
   // Between-turn: speculative prefix prefill on warm cache.
   rpc PrefillCache(PrefillRequest) returns (PrefillAck);
   // Persona delivery — soul + identity + synthesized memory_md.
-  rpc UpdatePersona(PersonaConfig) returns (PersonaAck);
+  rpc UpdatePersona(UpdatePersonaRequest) returns (PersonaAck);
 }
 
 // Reasoner: Gateway = client, Reasoner = server
@@ -455,7 +513,37 @@ service ReasonerService {
 }
 ```
 
-Audio frames flow on a dedicated raw TCP socket between Gateway and Listener. Gateway writes the R1a instance/session header once, then `[u32 BE length][bytes]` records, never via gRPC. `InstanceSessionBinding` in `talker/binding.py` is shared by Talker, Listener gRPC, and audio ingress; `bind_or_validate()` pins the first valid pair and rejects a different instance or session. Persona identity content remains a separate responsibility. The metadata, frame, and payload spellings are unchanged by this naming refactor.
+The current fixed-scope protocol uses explicit protobuf `SessionRef`, not
+`x-kaguya-instance-id` / `x-kaguya-session-id` metadata. A request asserts the
+receiver's configured pair; it does not select another runtime. Invalid or
+missing references fail validation, and a different valid pair is rejected
+before persona, speaker, Listener state, or control queues are mutated.
+
+| RPC boundary | Association |
+| --- | --- |
+| Listener `Stream` | First `ListenerInit.session`; subsequent events inherit that scope |
+| Talker `Converse` | First `GenerationStart.session` and `generation_id`; only scoped inline barge-in may follow |
+| `PrefillCache` | `PrefillRequest.session` plus `PromptContext` |
+| `UpdatePersona` | `UpdatePersonaRequest.session` plus cached `PersonaConfig` |
+| Reasoner `Delegate` | Initial `TaskRequest.session`/`task_id`; context updates retain both |
+| Reasoner `Interrupt` / `Telemetry` | Scoped request/subscription; service implementation remains deferred |
+| Gateway `SendControl` | `ControlRequest.session` plus `ControlSignal`; validation precedes P0 dispatch |
+
+Converse validates the first message, prompt, and trigger before response headers
+and generation side effects. Each RPC serves one generation; another Start on
+the same stream is invalid. Every `TalkerOutput` echoes its `generation_id` in
+the outer envelope, including sentences, emotions, tool/delegation requests,
+and barge-in acknowledgments. `ResponseStarted` is a marker and
+`ResponseComplete` carries the interruption outcome; neither duplicates the ID.
+Gateway rejects a missing or mismatched envelope ID before forwarding the
+generated protobuf directly into the shared queue. This does not establish a
+new stale-generation rejection or cancellation policy.
+
+Audio still uses the unchanged raw 39-byte connection prefix followed by
+length-prefixed frames. The immutable `InstanceSessionBinding` in
+`talker/binding.py` checks that prefix against the startup pair. Persona
+identity content is separate from instance/session identity. Caller
+authentication/tracing and multiplexed worker routing remain deferred.
 
 ---
 
@@ -493,7 +581,7 @@ Audio frames flow on a dedicated raw TCP socket between Gateway and Listener. Ga
 
 ### 8.1 Phase 1: System Prompt Steering + File-Based Memory
 
-Persona enforced via `SOUL.md` + `IDENTITY.md` loaded by the Gateway at startup and delivered to the Talker via `UpdatePersona` gRPC. The Gateway's RAG engine synthesizes a `memory_md` document (user profile + project context + recent semantic memories from its SQLite store) and bundles it into the same `UpdatePersona` call; the Talker caches all three alongside the persona files. The Talker injects them as the fixed prefix of every LLM call. Action tags (`[EMOTION:...]`, `[DELEGATE:...]`, `[TOOL:...]`) instructed in the system prompt.
+Persona enforced via `SOUL.md` + `IDENTITY.md` loaded by the Gateway at startup and delivered to the Talker via `UpdatePersona` gRPC. The Gateway's RAG engine synthesizes a `memory_md` document (user profile + project context + recent semantic memories from its SQLite store) and bundles it into the same `UpdatePersona` call; the Talker caches all three alongside the persona files. The Talker injects the cached values into every LLM prompt; Gateway re-sends them on reconnect and actual changes, not in every `GenerationStart`. Action tags (`[EMOTION:...]`, `[DELEGATE:...]`, `[TOOL:...]`) instructed in the system prompt.
 
 When the Gateway's post-turn `RagEngine::evaluate_and_store` adds entries that change the synthesized `memory_md`, it sends a fresh `UpdatePersona` call to the Talker with the new content. The Talker replaces its cached copy. The Talker never reads or writes any file directly.
 

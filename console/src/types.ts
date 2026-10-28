@@ -6,17 +6,17 @@ export type IngressMessage = TextMessage | ControlMessage;
 // Egress: Gateway → browser
 export type SessionInitEvent = {
   event_type: "session_init";
-  data: { instance_id: string; session_id: string; conversation_id: string };
+  data: { instance_id: string; session_id: string };
 };
-export type SentenceEvent = { event_type: "sentence"; data: { text: string } };
-export type EmotionEvent = { event_type: "emotion"; data: { emotion: string } };
+export type SentenceEvent = { event_type: "sentence"; data: { generation_id: string; text: string } };
+export type EmotionEvent = { event_type: "emotion"; data: { generation_id: string; emotion: string } };
 export type ResponseStartedEvent = {
   event_type: "response_started";
-  data: { turn_id: string };
+  data: { generation_id: string };
 };
 export type ResponseCompleteEvent = {
   event_type: "response_complete";
-  data: { turn_id: string; interrupted: boolean };
+  data: { generation_id: string; interrupted: boolean };
 };
 // Echo of voice transcripts so the UI can render them as user messages.
 // Typed prompts are added locally by the input form and are NOT echoed.
@@ -62,7 +62,7 @@ export type Sentence = { text: string; ts: number };
 
 export type AssistantTurn = {
   kind: "assistant";
-  turn_id: string;
+  generation_id: string;
   started_at: number;
   complete_at: number | null;
   interrupted: boolean;

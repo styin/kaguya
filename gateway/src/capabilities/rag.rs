@@ -23,7 +23,12 @@ pub trait RagCapability: Send + Sync {
 
     /// Post-turn memory evaluation. Decide what to extract and persist
     /// from the (user, assistant) exchange.
-    async fn evaluate_and_store(&self, user_input: &str, assistant_response: &str, turn_id: &str);
+    async fn evaluate_and_store(
+        &self,
+        user_input: &str,
+        assistant_response: &str,
+        generation_id: &str,
+    );
 
     /// Export the current memory state as markdown for the persona prefix.
     async fn export_memory_md(&self) -> String;
@@ -73,7 +78,7 @@ pub(crate) mod test_support {
             &self,
             _user_input: &str,
             _assistant_response: &str,
-            _turn_id: &str,
+            _generation_id: &str,
         ) {
             self.evaluate_call_count.fetch_add(1, Ordering::SeqCst);
         }

@@ -11,10 +11,14 @@ import {
   parseRuntimeDocument,
   resolveDeclaredPath,
   resolveRuntimeSelection,
+  resolveLaunchSession,
+  sameResolvedPath,
   runtimeProcess,
 } from "./runtime-selection.mjs";
 
 const INSTANCE_ID = "11111111-2222-3333-4444-555555555555";
+const SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const SESSION = { instance_id: INSTANCE_ID, session_id: SESSION_ID };
 const MANIFEST_LINE = `manifest = "instances/${INSTANCE_ID}/instance.toml"`;
 
 function fixture(t, content = runtimeFixture()) {
@@ -49,6 +53,8 @@ command = '.venv/bin/python main.py'
 command_win32 = '.venv\\Scripts\\python.exe main.py'
 cwd = "../voice app"
 [profiles.app.processes.voice_stack.env]
+KAGUYA_INSTANCE_ID = "wrong-instance"
+KAGUYA_SESSION_ID = "wrong-session"
 KAGUYA_RUNTIME_CONFIG = "wrong-voice-root"
 KAGUYA_RUNTIME_PROFILE = "wrong-voice-profile"
 [profiles.app.processes.voice_stack.bind]
@@ -123,13 +129,17 @@ test("external root and process cwd resolve without depending on later child cwd
 test("app and direct children preserve one owner selection despite environment collisions", (t) => {
   const { config } = fixture(t);
   const selected = resolveRuntimeSelection({ runtimeConfig: config }, {});
-  const inherited = { KAGUYA_RUNTIME_CONFIG: "wrong-parent", KAGUYA_RUNTIME_PROFILE: "wrong-parent-profile", SHARED: "kept" };
-  const plan = consoleLaunchPlan(selected, inherited, "win32");
+  const inherited = { KAGUYA_RUNTIME_CONFIG: "wrong-parent", KAGUYA_RUNTIME_PROFILE: "wrong-parent-profile", SHARED: "kept", KAGUYA_INSTANCE_ID: "wrong-parent-instance", KAGUYA_SESSION_ID: "wrong-parent-session", kaguya_instance_id: "case-instance", kaguya_session_id: "case-session" };
+  const plan = consoleLaunchPlan(selected, SESSION, inherited, "win32");
   const environments = [plan.supervisorEnv, ...plan.standalone.map((child) => child.env)];
   for (const env of environments) {
     assert.equal(env.KAGUYA_RUNTIME_CONFIG, selected.configPath);
     assert.equal(env.KAGUYA_RUNTIME_PROFILE, selected.profile);
     assert.equal(env.SHARED, "kept");
+    assert.equal(env.KAGUYA_INSTANCE_ID, INSTANCE_ID);
+    assert.equal(env.KAGUYA_SESSION_ID, SESSION_ID);
+    assert.equal(env.kaguya_instance_id, undefined);
+    assert.equal(env.kaguya_session_id, undefined);
   }
   assert.equal(plan.supervisorEnv.KAGUYA_SUPERVISOR_AUTOSTART, "false");
   assert.equal(plan.standalone[0].command, "cargo.exe run");
@@ -148,10 +158,10 @@ test("missing selections and required launch settings fail without fallback", (t
   const selected = resolveRuntimeSelection({ runtimeConfig: config }, {});
   assert.throws(() => runtimeProcess(selected, "missing"), /not defined/);
   selected.processes.get("gateway").cwd = undefined;
-  assert.throws(() => consoleLaunchPlan(selected, {}, "linux"), /cwd/);
+  assert.throws(() => consoleLaunchPlan(selected, SESSION, {}, "linux"), /cwd/);
   selected.processes.get("gateway").cwd = ".";
   selected.processes.get("gateway").command = undefined;
-  assert.throws(() => consoleLaunchPlan(selected, {}, "linux"), /command/);
+  assert.throws(() => consoleLaunchPlan(selected, SESSION, {}, "linux"), /command/);
 });
 
 test("single-line TOML projection handles quoted names, literals, escapes and comments", () => {
@@ -229,11 +239,71 @@ test("portable root may be absent but cannot be an existing regular file", (t) =
 
 test("declared bind/endpoint disagreement is retained as a launch error", (t) => {
   const { config } = fixture(t, runtimeFixture().replace('talker_grpc = "http://127.0.0.1:50053"', 'talker_grpc = "http://127.0.0.1:50054"'));
-  assert.throws(() => consoleLaunchPlan(resolveRuntimeSelection({ runtimeConfig: config }, {}), {}), /matching explicit ports/);
+  assert.throws(() => consoleLaunchPlan(resolveRuntimeSelection({ runtimeConfig: config }, {}), SESSION, {}), /matching explicit ports/);
 });
 
 test("dev wrapper forwards ordinary Vite flags after consuming deployment flags", () => {
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("./dev.mjs", import.meta.url)), "--runtime-config", "a root with spaces.toml", "--profile", "custom", "--version"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /vite\//);
+});
+
+
+test("resolved deployment paths compare drive and UNC verbatim forms without losing the root", () => {
+  const windows = path.win32;
+  for (const [ordinary, verbatim] of [
+    [String.raw`F:\deploy with spaces\runtime.toml`, String.raw`\\?\F:\deploy with spaces\runtime.toml`],
+    [String.raw`\\server\share\deploy with spaces\runtime.toml`, String.raw`\\?\UNC\server\share\deploy with spaces\runtime.toml`],
+  ]) {
+    assert.equal(sameResolvedPath(ordinary, verbatim, windows), true);
+    assert.equal(sameResolvedPath(verbatim, ordinary, windows), true);
+    assert.equal(sameResolvedPath(verbatim, windows.join(windows.dirname(ordinary), "other.toml"), windows), false);
+  }
+  assert.equal(sameResolvedPath(String.raw`\\?\F:\deploy\runtime.toml`, String.raw`G:\deploy\runtime.toml`, windows), false);
+  assert.equal(sameResolvedPath(String.raw`\\?\UNC\server\share\runtime.toml`, String.raw`\\other-server\share\runtime.toml`, windows), false);
+  assert.equal(sameResolvedPath(String.raw`\\?\UNC\server\share\runtime.toml`, String.raw`\\server\other-share\runtime.toml`, windows), false);
+  assert.equal(sameResolvedPath("/deploy/runtime.toml", "/deploy/runtime.toml", path.posix), true);
+  assert.equal(sameResolvedPath("/deploy/runtime.toml", "/deploy/other.toml", path.posix), false);
+  assert.equal(sameResolvedPath(undefined, "/deploy/runtime.toml", path.posix), false);
+  assert.equal(sameResolvedPath("runtime.toml", "/deploy/runtime.toml", path.posix), false);
+});
+
+test("Gateway preflight supplies the exact launch pair through an explicit readonly command", (t) => {
+  const { config } = fixture(t);
+  const selected = resolveRuntimeSelection({ runtimeConfig: config }, {});
+  let calls = 0;
+  const execute = (command, args, options) => {
+    calls += 1;
+    assert.equal(command, "cargo");
+    assert.deepEqual(args.slice(args.indexOf("--") + 1), ["show-config", "--runtime-config", selected.configPath, "--profile", "app"]);
+    assert.equal(options.shell, false);
+    assert.equal(options.windowsHide, true);
+    assert.equal(options.env.KAGUYA_INSTANCE_ID, undefined);
+    assert.equal(options.env.KAGUYA_SESSION_ID, undefined);
+    return { status: 0, stdout: JSON.stringify({
+      validation_mode: "startup", selection: { runtime_config: path.toNamespacedPath(selected.configPath), profile: "app" },
+      instance: { instance_id: INSTANCE_ID, default_session_id: SESSION_ID },
+    }) };
+  };
+  const session = resolveLaunchSession(selected, { KAGUYA_INSTANCE_ID: "stale", KAGUYA_SESSION_ID: "stale" }, execute);
+  assert.deepEqual(session, SESSION);
+  assert.equal(Object.isFrozen(session), true);
+  assert.equal(calls, 1);
+  assert.equal(fs.existsSync(selected.portableRoot), false, "Node bootstrap must not read or create instance data");
+});
+
+test("launch preflight fails closed before any application process launch", (t) => {
+  const { config } = fixture(t);
+  const selected = resolveRuntimeSelection({ runtimeConfig: config }, {});
+  const valid = { validation_mode: "startup", selection: { runtime_config: selected.configPath, profile: "app" }, instance: { instance_id: INSTANCE_ID, default_session_id: SESSION_ID } };
+  const reports = [
+    { status: 1, stderr: "configuration failed" },
+    { status: 0, stdout: "not-json" },
+    { status: 0, stdout: JSON.stringify({ ...valid, validation_mode: "initialization" }) },
+    { status: 0, stdout: JSON.stringify({ ...valid, selection: { ...valid.selection, runtime_config: "other" } }) },
+    { status: 0, stdout: JSON.stringify({ ...valid, instance: null }) },
+    { status: 0, stdout: JSON.stringify({ ...valid, instance: { instance_id: INSTANCE_ID, default_session_id: INSTANCE_ID } }) },
+  ];
+  for (const result of reports) assert.throws(() => resolveLaunchSession(selected, {}, () => result), /preflight/);
+  assert.throws(() => consoleLaunchPlan(selected, undefined, {}), /validated instance\/session pair/);
 });

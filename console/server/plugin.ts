@@ -6,6 +6,7 @@ import type { Plugin } from "vite";
 import {
   consoleLaunchPlan,
   resolveRuntimeSelection,
+  resolveLaunchSession,
 } from "./runtime-selection.mjs";
 
 const SUPERVISOR_ORIGIN = "http://127.0.0.1:3001";
@@ -87,7 +88,8 @@ export function supervisorPlugin(): Plugin {
     name: "kaguya-supervisor",
     configureServer(server) {
       const selection = resolveRuntimeSelection();
-      const plan = consoleLaunchPlan(selection);
+      const session = resolveLaunchSession(selection);
+      const plan = consoleLaunchPlan(selection, session);
       const standalone = new StandaloneManager(plan.standalone);
       supervisor = startRustSupervisor(plan.supervisorEnv);
 

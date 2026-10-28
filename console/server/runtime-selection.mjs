@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 /** Consume deployment flags before Vite parses its own arguments. */
@@ -148,8 +150,70 @@ export function runtimeProcess(selection, name, platform = process.platform) {
   };
 }
 
+/** Compare canonical absolute paths in one platform namespace (including Windows UNC). */
+export function sameResolvedPath(actual, expected, paths = path) {
+  if (typeof actual !== "string" || typeof expected !== "string" ||
+      !paths.isAbsolute(actual) || !paths.isAbsolute(expected)) return false;
+  // Rust canonicalize emits Windows verbatim paths while Node realpath may
+  // retain ordinary drive/UNC spelling. Convert both through the path API;
+  // string-prefix stripping would mishandle verbatim UNC roots.
+  return paths.relative(paths.toNamespacedPath(actual), paths.toNamespacedPath(expected)) === "";
+}
+
+/** Ask Gateway to validate the exact selected deployment; Node does not parse instance data. */
+export function resolveLaunchSession(selection, inheritedEnv = process.env, execute = spawnSync) {
+  const gatewayDir = fileURLToPath(new URL("../../gateway/", import.meta.url));
+  const args = ["run", "--quiet", "--manifest-path", path.join(gatewayDir, "Cargo.toml"), "--", "show-config", "--runtime-config", selection.configPath];
+  if (selection.profile !== undefined) args.push("--profile", selection.profile);
+  const env = selectionEnvironment(selection, inheritedEnv);
+  // The manifest is authoritative; stale parent assertions cannot select bootstrap identity.
+  clearSessionEnvironment(env);
+  const result = execute("cargo", args, {
+    cwd: gatewayDir, env, encoding: "utf8", shell: false, windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error("Gateway deployment preflight failed; run Gateway show-config for the selected deployment", { cause: result.error });
+  }
+  let report;
+  try { report = JSON.parse(result.stdout); }
+  catch { throw new Error("Gateway deployment preflight returned invalid JSON"); }
+  if (report.validation_mode !== "startup" || !sameResolvedPath(report.selection?.runtime_config, selection.configPath) ||
+      (report.selection?.profile ?? undefined) !== selection.profile) {
+    throw new Error("Gateway deployment preflight did not validate the selected deployment");
+  }
+  const session = {
+    instance_id: report.instance?.instance_id,
+    session_id: report.instance?.default_session_id,
+  };
+  validateLaunchSession(session);
+  return Object.freeze(session);
+}
+
+function validateLaunchSession(session) {
+  const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const ids = [session?.instance_id, session?.session_id];
+  if (ids.some((id) => typeof id !== "string" || !canonicalUuid.test(id) || id === "00000000-0000-0000-0000-000000000000") || ids[0] === ids[1]) {
+    throw new Error("Gateway deployment preflight requires a validated instance/session pair");
+  }
+}
+
+function clearSessionEnvironment(env) {
+  for (const name of Object.keys(env)) {
+    if (["KAGUYA_INSTANCE_ID", "KAGUYA_SESSION_ID"].includes(name.toUpperCase())) delete env[name];
+  }
+}
+
+function sessionEnvironment(selection, session, ...layers) {
+  const env = selectionEnvironment(selection, ...layers);
+  clearSessionEnvironment(env);
+  env.KAGUYA_INSTANCE_ID = session.instance_id;
+  env.KAGUYA_SESSION_ID = session.session_id;
+  return env;
+}
+
 /** App and direct launch controls share one deployment; they differ in who starts children. */
-export function consoleLaunchPlan(selection, inheritedEnv = process.env, platform = process.platform) {
+export function consoleLaunchPlan(selection, session, inheritedEnv = process.env, platform = process.platform) {
+  validateLaunchSession(session);
   const gateway = runtimeProcess(selection, "gateway", platform);
   const voice = runtimeProcess(selection, "voice_stack", platform);
   const voiceEnv = {};
@@ -161,15 +225,15 @@ export function consoleLaunchPlan(selection, inheritedEnv = process.env, platfor
     voiceEnv.KAGUYA_LISTENER_AUDIO_PORT = voice.bind.listener_audio.slice(index + 1);
   }
   return {
-    supervisorEnv: selectionEnvironment(selection, inheritedEnv, {
+    supervisorEnv: sessionEnvironment(selection, session, inheritedEnv, {
       KAGUYA_SUPERVISOR_AUTOSTART: "false",
       RUST_LOG: inheritedEnv.RUST_LOG ?? "kaguya_supervisor=info",
     }),
     standalone: [
       { name: "gateway_standalone", label: gateway.label ?? "Gateway", command: gateway.command, cwd: gateway.cwd,
-        env: selectionEnvironment(selection, inheritedEnv, gateway.env) },
+        env: sessionEnvironment(selection, session, inheritedEnv, gateway.env) },
       { name: "voice_stack_standalone", label: voice.label ?? "Voice Stack", command: voice.command, cwd: voice.cwd,
-        env: selectionEnvironment(selection, inheritedEnv, voice.env, voiceEnv) },
+        env: sessionEnvironment(selection, session, inheritedEnv, voice.env, voiceEnv) },
     ],
   };
 }

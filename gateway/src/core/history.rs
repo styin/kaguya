@@ -2,31 +2,29 @@
 //!
 //! In-memory storage of recent conversation turns, including user inputs, assistant responses, and tool results.
 
-use crate::instance::InstanceIdentity;
 use crate::proto;
+use crate::proto::SessionRef;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct History {
-    instance_id: String,
-    session_id: String,
+    scope: SessionRef,
     turns: Arc<RwLock<Vec<proto::ChatMessage>>>,
     max_recent: usize,
 }
 
 impl History {
-    pub fn new(max_recent: usize, instance_context: &InstanceIdentity) -> Self {
+    pub fn new(max_recent: usize, scope: &SessionRef) -> Self {
         Self {
-            instance_id: instance_context.instance_id.clone(),
-            session_id: instance_context.default_session_id.clone(),
+            scope: scope.clone(),
             turns: Arc::new(RwLock::new(Vec::new())),
             max_recent,
         }
     }
 
-    pub fn matches_instance_session(&self, instance_id: &str, session_id: &str) -> bool {
-        self.instance_id == instance_id && self.session_id == session_id
+    pub fn matches_session(&self, scope: &SessionRef) -> bool {
+        &self.scope == scope
     }
 
     pub async fn append_user(&self, text: &str) {
@@ -47,7 +45,7 @@ impl History {
         self.push(proto::Role::Tool, result, tool_name).await;
     }
 
-    /// 获取最近 N 轮 — 直接作为 TalkerContext.history，零转换
+    /// Return the configured recent message window for prompt snapshots.
     pub async fn recent(&self) -> Vec<proto::ChatMessage> {
         let t = self.turns.read().await;
         let start = t.len().saturating_sub(self.max_recent);
@@ -85,23 +83,25 @@ mod tests {
 
     #[test]
     fn history_handle_matches_one_instance_and_session() {
-        let instance_context = InstanceIdentity {
-            schema_version: 1,
-            instance_id: uuid::Uuid::new_v4().to_string(),
-            default_session_id: uuid::Uuid::new_v4().to_string(),
+        let scope = SessionRef {
+            instance_id: Some(proto::InstanceId {
+                value: "00000000-0000-4000-8000-000000000001".into(),
+            }),
+            session_id: Some(proto::SessionId {
+                value: "00000000-0000-4000-8000-000000000002".into(),
+            }),
         };
-        let history = History::new(10, &instance_context);
-        assert!(history.matches_instance_session(
-            &instance_context.instance_id,
-            &instance_context.default_session_id
-        ));
-        assert!(!history.matches_instance_session(
-            &uuid::Uuid::new_v4().to_string(),
-            &instance_context.default_session_id
-        ));
-        assert!(!history.matches_instance_session(
-            &instance_context.instance_id,
-            &uuid::Uuid::new_v4().to_string()
-        ));
+        let history = History::new(10, &scope);
+        assert!(history.matches_session(&scope));
+        let mut other_instance = scope.clone();
+        other_instance.instance_id = Some(proto::InstanceId {
+            value: "00000000-0000-4000-8000-000000000003".into(),
+        });
+        assert!(!history.matches_session(&other_instance));
+        let mut other_session = scope;
+        other_session.session_id = Some(proto::SessionId {
+            value: "00000000-0000-4000-8000-000000000004".into(),
+        });
+        assert!(!history.matches_session(&other_session));
     }
 }

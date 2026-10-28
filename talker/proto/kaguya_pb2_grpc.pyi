@@ -100,7 +100,7 @@ class TalkerServiceStub:
     """Bidi: Gateway sends context + inline barge-in; Talker streams output"""
     PrefillCache: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.PrefillRequest, _kaguya_pb2.PrefillAck]
     """Between-turn operations (unary, no need for bidi)"""
-    UpdatePersona: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.PersonaConfig, _kaguya_pb2.PersonaAck]
+    UpdatePersona: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.UpdatePersonaRequest, _kaguya_pb2.PersonaAck]
 
 @_typing.type_check_only
 class TalkerServiceAsyncStub(TalkerServiceStub):
@@ -113,7 +113,7 @@ class TalkerServiceAsyncStub(TalkerServiceStub):
     """Bidi: Gateway sends context + inline barge-in; Talker streams output"""
     PrefillCache: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.PrefillRequest, _kaguya_pb2.PrefillAck]  # type: ignore[assignment]
     """Between-turn operations (unary, no need for bidi)"""
-    UpdatePersona: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.PersonaConfig, _kaguya_pb2.PersonaAck]  # type: ignore[assignment]
+    UpdatePersona: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.UpdatePersonaRequest, _kaguya_pb2.PersonaAck]  # type: ignore[assignment]
 
 class TalkerServiceServicer(metaclass=_abc_1.ABCMeta):
     """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
@@ -139,7 +139,7 @@ class TalkerServiceServicer(metaclass=_abc_1.ABCMeta):
     @_abc_1.abstractmethod
     def UpdatePersona(
         self,
-        request: _kaguya_pb2.PersonaConfig,
+        request: _kaguya_pb2.UpdatePersonaRequest,
         context: _ServicerContext,
     ) -> _typing.Union[_kaguya_pb2.PersonaAck, _abc.Awaitable[_kaguya_pb2.PersonaAck]]: ...
 
@@ -210,7 +210,7 @@ class RouterControlServiceStub:
     def __new__(cls, channel: _grpc.Channel) -> _Self: ...
     @_typing.overload
     def __new__(cls, channel: _aio.Channel) -> RouterControlServiceAsyncStub: ...
-    SendControl: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.ControlSignal, _kaguya_pb2.ControlAck]
+    SendControl: _grpc.UnaryUnaryMultiCallable[_kaguya_pb2.ControlRequest, _kaguya_pb2.ControlAck]
 
 @_typing.type_check_only
 class RouterControlServiceAsyncStub(RouterControlServiceStub):
@@ -220,7 +220,7 @@ class RouterControlServiceAsyncStub(RouterControlServiceStub):
     """
 
     def __init__(self, channel: _aio.Channel) -> None: ...
-    SendControl: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.ControlSignal, _kaguya_pb2.ControlAck]  # type: ignore[assignment]
+    SendControl: _aio.UnaryUnaryMultiCallable[_kaguya_pb2.ControlRequest, _kaguya_pb2.ControlAck]  # type: ignore[assignment]
 
 class RouterControlServiceServicer(metaclass=_abc_1.ABCMeta):
     """─────────────────────────────────────────────
@@ -231,7 +231,7 @@ class RouterControlServiceServicer(metaclass=_abc_1.ABCMeta):
     @_abc_1.abstractmethod
     def SendControl(
         self,
-        request: _kaguya_pb2.ControlSignal,
+        request: _kaguya_pb2.ControlRequest,
         context: _ServicerContext,
     ) -> _typing.Union[_kaguya_pb2.ControlAck, _abc.Awaitable[_kaguya_pb2.ControlAck]]: ...
 

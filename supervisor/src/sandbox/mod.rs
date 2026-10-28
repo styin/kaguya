@@ -30,8 +30,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::app::InstanceSessionBinding;
+use crate::app::validate_session_ref;
 use crate::config::{SandboxBackendKind, SandboxConfig, SandboxModeKind};
+use crate::proto;
 use crate::telemetry::{TelemetryCorrelation, TelemetryHub};
 
 const SANDBOX_CLEANUP_GRACE: Duration = Duration::from_secs(2);
@@ -353,7 +354,7 @@ pub struct SandboxProvider {
 
 #[derive(Clone)]
 struct AllocationRecord {
-    owner: InstanceSessionBinding,
+    owner: proto::SessionRef,
     allocation_id: String,
 }
 
@@ -389,13 +390,13 @@ impl SandboxProvider {
 
     pub async fn acquire(
         &self,
-        owner: &InstanceSessionBinding,
+        owner: &proto::SessionRef,
         allocation_id: &str,
     ) -> anyhow::Result<String> {
         if !self.is_enabled() {
             anyhow::bail!("sandbox provider is disabled");
         }
-        owner.validate()?;
+        validate_session_ref(Some(owner))?;
         let allocation_uuid = Uuid::parse_str(allocation_id)
             .map_err(|_| anyhow::anyhow!("sandbox allocation_id must be a UUID"))?;
         if allocation_uuid.is_nil() || allocation_uuid.to_string() != allocation_id {
@@ -447,11 +448,15 @@ impl SandboxProvider {
 
     pub async fn execute(
         &self,
-        owner: &InstanceSessionBinding,
+        owner: &proto::SessionRef,
         handle: &str,
         request_id: &str,
         args_json: &str,
     ) -> String {
+        let (instance_id, session_id) = match validate_session_ref(Some(owner)) {
+            Ok(pair) => pair,
+            Err(error) => return ExecResult::backend_error(error.to_string()).to_tool_json(),
+        };
         if request_id.trim().is_empty() {
             return ExecResult::backend_error("sandbox request_id must not be empty")
                 .to_tool_json();
@@ -476,16 +481,15 @@ impl SandboxProvider {
                             "supervisor",
                             "sandbox.exec.completed",
                             TelemetryCorrelation {
-                                instance_id: Some(owner.instance_id.clone()),
-                                session_id: Some(owner.session_id.clone()),
+                                instance_id: Some(instance_id.to_owned()),
+                                session_id: Some(session_id.to_owned()),
                                 allocation_id: Some(allocation_id.clone()),
                             },
-                            Some(owner.session_id.clone()),
                             None,
                             Some(request_id.to_string()),
                             serde_json::json!({
-                                "instance_id": owner.instance_id,
-                                "session_id": owner.session_id,
+                                "instance_id": instance_id,
+                                "session_id": session_id,
                                 "allocation_id": allocation_id,
                                 "handle": handle,
                                 "backend": self.backend_name(),
@@ -507,11 +511,8 @@ impl SandboxProvider {
         }
     }
 
-    pub async fn release(
-        &self,
-        owner: &InstanceSessionBinding,
-        handle: &str,
-    ) -> anyhow::Result<()> {
+    pub async fn release(&self, owner: &proto::SessionRef, handle: &str) -> anyhow::Result<()> {
+        validate_session_ref(Some(owner))?;
         let mut handles = self.handles.lock().await;
         let Some(record) = handles.get(handle) else {
             anyhow::bail!("unknown or released sandbox handle");

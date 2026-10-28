@@ -2,8 +2,8 @@
 //! the default config and actually run code through it. Guards the port of the
 //! Supervisor-owned sandbox provider beyond mere compilation.
 
-use kaguya_supervisor::app::InstanceSessionBinding;
 use kaguya_supervisor::config::SandboxConfig;
+use kaguya_supervisor::proto;
 use kaguya_supervisor::sandbox::{SandboxManager, SandboxProvider};
 
 #[tokio::test]
@@ -29,7 +29,7 @@ async fn native_backend_executes_python_and_persists_files() {
     );
     assert!(v["error"].is_null(), "no backend error expected: {out}");
 
-    // 2) Per-conversation affinity: a file written in one call is visible in the
+    // 2) Per-allocation affinity: a file written in one call is visible in the
     //    next call for the same session (shared scratch dir).
     let write = mgr
         .exec_from_json(
@@ -200,9 +200,13 @@ async fn opaque_handle_controls_execution_and_release() {
     let cfg = SandboxConfig::default();
     let provider =
         SandboxProvider::new(SandboxManager::from_config(&cfg, std::env::temp_dir()).unwrap());
-    let owner = InstanceSessionBinding {
-        instance_id: uuid::Uuid::new_v4().to_string(),
-        session_id: uuid::Uuid::new_v4().to_string(),
+    let owner = proto::SessionRef {
+        instance_id: Some(proto::InstanceId {
+            value: uuid::Uuid::new_v4().to_string(),
+        }),
+        session_id: Some(proto::SessionId {
+            value: uuid::Uuid::new_v4().to_string(),
+        }),
     };
     let allocation_id = uuid::Uuid::new_v4().to_string();
     let handle = provider.acquire(&owner, &allocation_id).await.unwrap();
@@ -212,6 +216,24 @@ async fn opaque_handle_controls_execution_and_release() {
         "acquisition retries must return the existing opaque handle"
     );
 
+    let mut malformed_owner = owner.clone();
+    malformed_owner.session_id = None;
+    assert!(provider
+        .acquire(&malformed_owner, &allocation_id)
+        .await
+        .is_err());
+    assert!(provider.release(&malformed_owner, &handle).await.is_err());
+    let rejected = provider
+        .execute(
+            &malformed_owner,
+            &handle,
+            "invalid-owner",
+            r#"{"language":"python","code":"print('must-not-run')"}"#,
+        )
+        .await;
+    let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
+    assert!(rejected["error"].as_str().unwrap().contains("session_id"));
+    assert_eq!(rejected["stdout"], "");
     let output = provider
         .execute(
             &owner,

@@ -10,6 +10,8 @@ import logging
 import struct
 import time
 
+import grpc
+
 from binding import AUDIO_MAGIC, InstanceSessionBinding
 from config import TalkerConfig
 from proto import kaguya_pb2, kaguya_pb2_grpc  # type: ignore[import]
@@ -38,7 +40,7 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
     """
 
     def __init__(
-        self, event_queue: asyncio.Queue, binding: InstanceSessionBinding | None = None
+        self, event_queue: asyncio.Queue, binding: InstanceSessionBinding
     ) -> None:
         self._event_queue = event_queue
         self._binding = binding
@@ -47,73 +49,81 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
         self._active_terminate: asyncio.Event | None = None
 
     async def Stream(self, request_iterator, context):
-        if self._binding:
-            await self._binding.bind_or_validate(context)
-        # Flush response headers immediately. Without this, grpcio-aio defers
-        # sending the HTTP/2 HEADERS frame until the first `yield`, but our
-        # event queue is empty until ASR fires — so the client's `Stream(...)`
-        # call would block on the handshake indefinitely.
-        await context.send_initial_metadata(())
+        request_iterator = aiter(request_iterator)
+        try:
+            first = await anext(request_iterator)
+        except StopAsyncIteration:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "Listener requires init first"
+            )
+            return
+        if first.WhichOneof("payload") != "init":
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "Listener requires init first"
+            )
+        await self._binding.require(first.init.session, context)
 
-        # Tell the prior handler (if any) to wind down. We replace the
-        # registered terminate-event with our own; if a future handler
-        # arrives, it'll signal us through this same event.
+        # Only a fully validated replacement may take the queue from a live
+        # client. Returning headers now means initialization has been accepted.
         if self._active_terminate is not None:
             self._active_terminate.set()
         terminate = asyncio.Event()
         self._active_terminate = terminate
+        await context.send_initial_metadata(())
+        input_failure = asyncio.get_running_loop().create_future()
 
         async def read_control():
-            async for msg in request_iterator:
-                which = msg.WhichOneof("payload")
-                if which == "control":
+            try:
+                async for msg in request_iterator:
+                    if msg.WhichOneof("payload") != "control":
+                        await context.abort(
+                            grpc.StatusCode.INVALID_ARGUMENT,
+                            "Listener permits exactly one init",
+                        )
                     ctrl = msg.control
+                    if ctrl.WhichOneof("signal") is None:
+                        await context.abort(
+                            grpc.StatusCode.INVALID_ARGUMENT,
+                            "Listener requires a control signal",
+                        )
                     if ctrl.HasField("reset"):
                         logger.info("Listener reset signal received")
+            except Exception as exc:  # noqa: BLE001 - forwarded to the stream handler
+                input_failure.set_result(exc)
 
         control_task = asyncio.create_task(read_control())
+        get_task = None
+        term_task = None
         try:
             while True:
-                # Race: queue event vs. takeover-signal. Whichever fires
-                # first decides whether we yield or exit.
                 get_task = asyncio.create_task(self._event_queue.get())
                 term_task = asyncio.create_task(terminate.wait())
-                done, pending = await asyncio.wait(
-                    {get_task, term_task},
+                done, _ = await asyncio.wait(
+                    {get_task, term_task, input_failure},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                # Cancel the loser; if it grabbed an event from the queue
-                # before the cancel landed, requeue so the takeover handler
-                # doesn't lose it.
-                for p in pending:
-                    p.cancel()
-                if get_task in done:
-                    if term_task in done:
-                        # Tie: takeover fired and we also drained an event.
-                        # Put the event back so the new handler gets it.
-                        try:
-                            self._event_queue.put_nowait(get_task.result())
-                        except asyncio.QueueFull:
-                            pass
-                        break
-                    yield get_task.result()
-                else:
-                    # Takeover fired first. If get_task was cancelled with
-                    # an event already pulled, requeue it.
-                    try:
-                        if get_task.done() and not get_task.cancelled():
-                            self._event_queue.put_nowait(get_task.result())
-                    except (asyncio.QueueFull, asyncio.CancelledError):
-                        pass
+                for task in (get_task, term_task):
+                    if task not in done:
+                        task.cancel()
+                await asyncio.gather(get_task, term_task, return_exceptions=True)
+                if input_failure in done or term_task in done:
+                    # Cancellation/takeover must not consume an event intended
+                    # for the live connection when both wake up together.
+                    if not get_task.cancelled() and get_task.exception() is None:
+                        self._event_queue.put_nowait(get_task.result())
+                    if input_failure in done:
+                        raise input_failure.result()
                     logger.info("Listener Stream replaced by newer client; exiting")
-                    break
+                    return
+                yield get_task.result()
         except asyncio.CancelledError:
             pass
         finally:
             control_task.cancel()
-            # Only clear the registry if we're still the registered one.
-            # If a takeover already replaced us, leave that handler's
-            # event in place.
+            pending = [task for task in (get_task, term_task) if task is not None]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(control_task, *pending, return_exceptions=True)
             if self._active_terminate is terminate:
                 self._active_terminate = None
 
@@ -121,9 +131,7 @@ class ListenerServiceImpl(kaguya_pb2_grpc.ListenerServiceServicer):
 class Listener:
     """Owns RealtimeSTT, turn detection, audio socket, and ASR event queue."""
 
-    def __init__(
-        self, config: TalkerConfig, binding: InstanceSessionBinding | None = None
-    ) -> None:
+    def __init__(self, config: TalkerConfig, binding: InstanceSessionBinding) -> None:
         self._config = config
         self._binding = binding
         self._opus = OpusDecoder()
@@ -163,18 +171,17 @@ class Listener:
     ) -> None:
         codec = self._config.audio_input_codec
 
-        if self._binding:
-            try:
-                header = await reader.readexactly(len(AUDIO_MAGIC) + 32)
-            except asyncio.IncompleteReadError:
-                writer.close()
-                await writer.wait_closed()
-                return
-            if not self._binding.matches_audio_header(header):
-                logger.warning("Rejected audio socket with mismatched binding")
-                writer.close()
-                await writer.wait_closed()
-                return
+        try:
+            header = await reader.readexactly(len(AUDIO_MAGIC) + 32)
+        except asyncio.IncompleteReadError:
+            writer.close()
+            await writer.wait_closed()
+            return
+        if not self._binding.matches_audio_header(header):
+            logger.warning("Rejected audio socket with mismatched binding")
+            writer.close()
+            await writer.wait_closed()
+            return
         logger.info("Audio client connected (codec=%s)", codec)
         try:
             while True:
@@ -266,9 +273,9 @@ class Listener:
             )
         )
         if self._loop is not None:
-            turn_id = self._turn_detector.turn_id
+            utterance_epoch = self._turn_detector.utterance_epoch
             asyncio.run_coroutine_threadsafe(
-                self._silence_tick_loop(turn_id), self._loop
+                self._silence_tick_loop(utterance_epoch), self._loop
             )
 
     def _on_partial(self, text: str) -> None:
@@ -282,11 +289,11 @@ class Listener:
         if final is not None:
             self._emit_final(final)
 
-    async def _silence_tick_loop(self, started_turn_id: int) -> None:
+    async def _silence_tick_loop(self, started_utterance_epoch: int) -> None:
         tick_s = self._config.silence_tick_interval_ms / 1000.0
         while True:
             await asyncio.sleep(tick_s)
-            if self._turn_detector.turn_id != started_turn_id:
+            if self._turn_detector.utterance_epoch != started_utterance_epoch:
                 return
             final = self._turn_detector.on_silence_tick()
             if final is not None:

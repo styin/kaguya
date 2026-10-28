@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
-use crate::instance::InstanceIdentity;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::reasoner_service_client::ReasonerServiceClient;
+use crate::proto::SessionRef;
 use crate::types::*;
 
 struct Agent {
@@ -27,12 +27,23 @@ pub struct ReasonerManager {
     tasks: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
-    instance_context: Option<InstanceIdentity>,
+    session: SessionRef,
 }
 
 impl ReasonerManager {
-    pub fn new(endpoint: String, tasks: TaskSpawner, connection: ManagedConnectionHandle) -> Self {
-        Self::with_reconnect_policy(endpoint, tasks, connection, ReconnectPolicy::default())
+    pub fn new(
+        endpoint: String,
+        tasks: TaskSpawner,
+        connection: ManagedConnectionHandle,
+        session: SessionRef,
+    ) -> Self {
+        Self::with_reconnect_policy(
+            endpoint,
+            tasks,
+            connection,
+            ReconnectPolicy::default(),
+            session,
+        )
     }
 
     pub fn with_reconnect_policy(
@@ -40,6 +51,7 @@ impl ReasonerManager {
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
+        session: SessionRef,
     ) -> Self {
         Self {
             agents: Arc::new(RwLock::new(HashMap::new())),
@@ -48,13 +60,8 @@ impl ReasonerManager {
             tasks,
             connection,
             reconnect,
-            instance_context: None,
+            session,
         }
-    }
-
-    pub fn with_instance_context(mut self, instance_context: InstanceIdentity) -> Self {
-        self.instance_context = Some(instance_context);
-        self
     }
 
     pub async fn start(
@@ -63,6 +70,14 @@ impl ReasonerManager {
         description: String,
         p3_tx: mpsc::Sender<InputEvent>,
     ) {
+        let (instance_id, session_id) =
+            match crate::instance::validate_session_ref(Some(&self.session)) {
+                Ok((instance_id, session_id)) => (instance_id.to_owned(), session_id.to_owned()),
+                Err(error) => {
+                    warn!(%error, "rejecting Reasoner task with invalid configured scope");
+                    return;
+                }
+            };
         let cancel = CancellationToken::new();
         let child = cancel.child_token();
 
@@ -81,15 +96,7 @@ impl ReasonerManager {
         let tid = task_id.clone();
         let connection = self.connection.clone();
         let reconnect = self.reconnect;
-        let instance_context = self.instance_context.clone();
-        let instance_id = instance_context
-            .as_ref()
-            .map(|instance_context| instance_context.instance_id.clone())
-            .unwrap_or_default();
-        let session_id = instance_context
-            .as_ref()
-            .map(|instance_context| instance_context.default_session_id.clone())
-            .unwrap_or_default();
+        let session = self.session.clone();
 
         self.tasks
             .spawn(format!("reasoner_task:{tid}"), async move {
@@ -125,6 +132,7 @@ impl ReasonerManager {
                     .send(proto::DelegateInput {
                         payload: Some(proto::delegate_input::Payload::StartTask(
                             proto::TaskRequest {
+                                session: Some(session.clone()),
                                 task_id: tid.clone(),
                                 description: description.clone(),
                                 metadata: HashMap::new(),
@@ -133,11 +141,7 @@ impl ReasonerManager {
                     })
                     .await;
 
-                let request = match &instance_context {
-                    Some(instance_context) => instance_context.grpc_request(outbound),
-                    None => tonic::Request::new(outbound),
-                };
-                match client.delegate(request).await {
+                match client.delegate(outbound).await {
                     Ok(resp) => {
                         connection.set_readiness(Readiness::Ready);
                         let mut stream = resp.into_inner();
@@ -147,15 +151,12 @@ impl ReasonerManager {
                                     info!(task_id = %tid, "Reasoner cancelled");
                                     // Send Interrupt
                                     let interrupt = proto::InterruptRequest {
+                                        session: Some(session.clone()),
                                         signal: Some(proto::interrupt_request::Signal::Cancel(
                                             proto::TaskCancel { task_id: tid.clone() }
                                         )),
                                     };
-                                    let request = match &instance_context {
-                                        Some(instance_context) => instance_context.grpc_request(interrupt),
-                                        None => tonic::Request::new(interrupt),
-                                    };
-                                    let _ = client.interrupt(request).await;
+                                    let _ = client.interrupt(interrupt).await;
                                     break;
                                 }
                                 result = stream.message() => {
@@ -344,6 +345,14 @@ mod tests {
                 Duration::from_millis(1),
                 Duration::from_millis(1),
             ),
+            SessionRef {
+                instance_id: Some(crate::proto::InstanceId {
+                    value: uuid::Uuid::new_v4().to_string(),
+                }),
+                session_id: Some(crate::proto::SessionId {
+                    value: uuid::Uuid::new_v4().to_string(),
+                }),
+            },
         );
         let (p3_tx, mut p3_rx) = mpsc::channel(4);
 
@@ -358,5 +367,168 @@ mod tests {
         reasoner.cancel_all().await;
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(p3_rx.try_recv().is_err());
+    }
+
+    struct RecordingReasoner {
+        calls: mpsc::UnboundedSender<(String, SessionRef, String)>,
+    }
+
+    #[tonic::async_trait]
+    impl crate::proto::reasoner_service_server::ReasonerService for RecordingReasoner {
+        type DelegateStream = ReceiverStream<Result<proto::DelegateOutput, tonic::Status>>;
+        type TelemetryStream = ReceiverStream<Result<proto::TelemetryEvent, tonic::Status>>;
+
+        async fn delegate(
+            &self,
+            request: tonic::Request<tonic::Streaming<proto::DelegateInput>>,
+        ) -> Result<tonic::Response<Self::DelegateStream>, tonic::Status> {
+            assert!(!request.metadata().contains_key("x-kaguya-instance-id"));
+            assert!(!request.metadata().contains_key("x-kaguya-session-id"));
+            let first = request.into_inner().message().await?.unwrap();
+            let Some(proto::delegate_input::Payload::StartTask(task)) = first.payload else {
+                return Err(tonic::Status::invalid_argument(
+                    "task must start the stream",
+                ));
+            };
+            crate::instance::validate_session_ref(task.session.as_ref())
+                .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
+            let session = task.session.unwrap();
+            self.calls
+                .send(("delegate".into(), session, task.task_id.clone()))
+                .unwrap();
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(Ok(proto::DelegateOutput {
+                task_id: task.task_id,
+                timestamp_ms: 0,
+                event: Some(proto::delegate_output::Event::Step(
+                    proto::ReasonerIntermediateStep {
+                        description: "progress".into(),
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+            tokio::spawn(async move {
+                std::future::pending::<()>().await;
+                drop(tx);
+            });
+            Ok(tonic::Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn interrupt(
+            &self,
+            request: tonic::Request<proto::InterruptRequest>,
+        ) -> Result<tonic::Response<proto::InterruptAck>, tonic::Status> {
+            assert!(!request.metadata().contains_key("x-kaguya-instance-id"));
+            assert!(!request.metadata().contains_key("x-kaguya-session-id"));
+            let request = request.into_inner();
+            crate::instance::validate_session_ref(request.session.as_ref())
+                .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
+            let session = request.session.unwrap();
+            let Some(proto::interrupt_request::Signal::Cancel(cancel)) = request.signal else {
+                return Err(tonic::Status::invalid_argument(
+                    "expected task cancellation",
+                ));
+            };
+            self.calls
+                .send(("interrupt".into(), session, cancel.task_id))
+                .unwrap();
+            Ok(tonic::Response::new(proto::InterruptAck {}))
+        }
+
+        async fn telemetry(
+            &self,
+            _request: tonic::Request<proto::TelemetrySubscribe>,
+        ) -> Result<tonic::Response<Self::TelemetryStream>, tonic::Status> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(tonic::Response::new(ReceiverStream::new(rx)))
+        }
+    }
+
+    #[tokio::test]
+    async fn delegation_and_cancellation_use_explicit_scope_and_preserve_callback_origin() {
+        use crate::proto::reasoner_service_server::ReasonerServiceServer;
+        use tokio_stream::wrappers::TcpListenerStream;
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let (calls_tx, mut calls_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let token = shutdown.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ReasonerServiceServer::new(RecordingReasoner {
+                    calls: calls_tx,
+                }))
+                .serve_with_incoming_shutdown(TcpListenerStream::new(tcp), token.cancelled())
+                .await
+                .unwrap();
+        });
+        let lifecycle = LifecycleSupervisor::new();
+        let session = SessionRef {
+            instance_id: Some(crate::proto::InstanceId {
+                value: uuid::Uuid::new_v4().to_string(),
+            }),
+            session_id: Some(crate::proto::SessionId {
+                value: uuid::Uuid::new_v4().to_string(),
+            }),
+        };
+        let reasoner = ReasonerManager::new(
+            format!("http://{addr}"),
+            lifecycle.spawner(),
+            lifecycle.register_connection("reasoner"),
+            session.clone(),
+        );
+        let (p3_tx, mut p3_rx) = mpsc::channel(4);
+        reasoner
+            .start("task-1".into(), "test scoped delegation".into(), p3_tx)
+            .await;
+        let started = tokio::time::timeout(Duration::from_secs(3), calls_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            started,
+            ("delegate".into(), session.clone(), "task-1".into())
+        );
+        let event = tokio::time::timeout(Duration::from_secs(3), p3_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            InputEvent::ReasonerStep {
+                instance_id,
+                session_id,
+                task_id,
+                ..
+            } => {
+                assert_eq!(
+                    instance_id,
+                    session
+                        .instance_id
+                        .as_ref()
+                        .expect("validated SessionRef")
+                        .value
+                        .as_str()
+                );
+                assert_eq!(
+                    session_id,
+                    session
+                        .session_id
+                        .as_ref()
+                        .expect("validated SessionRef")
+                        .value
+                        .as_str()
+                );
+                assert_eq!(task_id, "task-1");
+            }
+            _ => panic!("expected scoped Reasoner progress callback"),
+        }
+        reasoner.cancel_all().await;
+        let cancelled = tokio::time::timeout(Duration::from_secs(3), calls_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled, ("interrupt".into(), session, "task-1".into()));
+        shutdown.cancel();
     }
 }

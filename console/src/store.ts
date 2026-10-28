@@ -116,7 +116,7 @@ export const actions = {
       setState({ wsStatus: status });
     }
   },
-  setSelTurn(turn_id: string | null): void { setState({ selTurn: turn_id }); },
+  setSelTurn(generation_id: string | null): void { setState({ selTurn: generation_id }); },
   setLogsCollapsed(v: boolean): void { setState({ logsCollapsed: v }); },
   setSearchQuery(q: string): void { setState({ searchQuery: q }); },
   setLogSrc(src: AppState["logSrc"]): void { setState({ logSrc: src }); },
@@ -141,29 +141,29 @@ export function selectTurns(events: WsEvent[]): Turn[] {
         case "response_started": {
           const t: AssistantTurn = {
             kind: "assistant",
-            turn_id: m.data.turn_id,
+            generation_id: m.data.generation_id,
             started_at: ev.ts,
             complete_at: null,
             interrupted: false,
             sentences: [],
           };
-          assistantById.set(m.data.turn_id, t);
+          assistantById.set(m.data.generation_id, t);
           turns.push(t);
           break;
         }
         case "sentence": {
-          // Append to the most recently opened, still-streaming turn.
-          const open = lastOpenAssistant(turns);
+          // Preserve the validated output-envelope generation, including delayed output.
+          const open = assistantById.get(m.data.generation_id);
           if (open) open.sentences.push({ text: m.data.text, ts: ev.ts });
           break;
         }
         case "emotion": {
-          const open = lastOpenAssistant(turns);
+          const open = assistantById.get(m.data.generation_id);
           if (open) open.emotion = m.data.emotion;
           break;
         }
         case "response_complete": {
-          const t = assistantById.get(m.data.turn_id);
+          const t = assistantById.get(m.data.generation_id);
           if (t) {
             t.complete_at = ev.ts;
             t.interrupted = m.data.interrupted;
@@ -184,13 +184,6 @@ export function selectTurns(events: WsEvent[]): Turn[] {
 }
 
 
-function lastOpenAssistant(turns: Turn[]): AssistantTurn | null {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i];
-    if (t.kind === "assistant" && t.complete_at === null) return t;
-  }
-  return null;
-}
 
 export function selectStreamingTurn(turns: Turn[]): AssistantTurn | null {
   for (let i = turns.length - 1; i >= 0; i--) {

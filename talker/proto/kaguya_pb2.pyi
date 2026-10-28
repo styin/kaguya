@@ -45,6 +45,65 @@ ROLE_TOOL: Role.ValueType  # 4
 Global___Role: _TypeAlias = Role  # noqa: Y015
 
 @_typing.final
+class InstanceId(_message.Message):
+    """Distinct ID types keep instance and session roles explicit in generated APIs.
+    Receivers still validate canonical, non-nil UUIDs and the accepted pair.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VALUE_FIELD_NUMBER: _builtins.int
+    value: _builtins.str
+    def __init__(
+        self,
+        *,
+        value: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["value", b"value"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___InstanceId: _TypeAlias = InstanceId  # noqa: Y015
+
+@_typing.final
+class SessionId(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VALUE_FIELD_NUMBER: _builtins.int
+    value: _builtins.str
+    def __init__(
+        self,
+        *,
+        value: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["value", b"value"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SessionId: _TypeAlias = SessionId  # noqa: Y015
+
+@_typing.final
+class SessionRef(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    INSTANCE_ID_FIELD_NUMBER: _builtins.int
+    SESSION_ID_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def instance_id(self) -> Global___InstanceId: ...
+    @_builtins.property
+    def session_id(self) -> Global___SessionId: ...
+    def __init__(
+        self,
+        *,
+        instance_id: Global___InstanceId | None = ...,
+        session_id: Global___SessionId | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["instance_id", b"instance_id", "session_id", b"session_id"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["instance_id", b"instance_id", "session_id", b"session_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SessionRef: _TypeAlias = SessionRef  # noqa: Y015
+
+@_typing.final
 class ChatMessage(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -95,23 +154,48 @@ Global___ToolDefinition: _TypeAlias = ToolDefinition  # noqa: Y015
 class ListenerInput(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
+    INIT_FIELD_NUMBER: _builtins.int
     CONTROL_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def init(self) -> Global___ListenerInit: ...
     @_builtins.property
     def control(self) -> Global___ListenerControl: ...
     def __init__(
         self,
         *,
+        init: Global___ListenerInit | None = ...,
         control: Global___ListenerControl | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["control", b"control", "payload", b"payload"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["control", b"control", "init", b"init", "payload", b"payload"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["control", b"control", "payload", b"payload"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["control", b"control", "init", b"init", "payload", b"payload"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["control"]  # noqa: Y015
+    _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["init", "control"]  # noqa: Y015
     _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_payload) -> _WhichOneofReturnType_payload | None: ...
 
 Global___ListenerInput: _TypeAlias = ListenerInput  # noqa: Y015
+
+@_typing.final
+class ListenerInit(_message.Message):
+    """First message on every Listener stream, before controls or session events."""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SESSION_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
+    def __init__(
+        self,
+        *,
+        session: Global___SessionRef | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ListenerInit: _TypeAlias = ListenerInit  # noqa: Y015
 
 @_typing.final
 class ListenerControl(_message.Message):
@@ -252,8 +336,8 @@ class TalkerInput(_message.Message):
     START_FIELD_NUMBER: _builtins.int
     BARGE_IN_FIELD_NUMBER: _builtins.int
     @_builtins.property
-    def start(self) -> Global___TalkerContext:
-        """begin generation"""
+    def start(self) -> Global___GenerationStart:
+        """first message; one generation per RPC"""
 
     @_builtins.property
     def barge_in(self) -> Global___BargeInSignal:
@@ -262,7 +346,7 @@ class TalkerInput(_message.Message):
     def __init__(
         self,
         *,
-        start: Global___TalkerContext | None = ...,
+        start: Global___GenerationStart | None = ...,
         barge_in: Global___BargeInSignal | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["barge_in", b"barge_in", "payload", b"payload", "start", b"start"]  # noqa: Y015
@@ -279,76 +363,214 @@ Global___TalkerInput: _TypeAlias = TalkerInput  # noqa: Y015
 class BargeInSignal(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    CONVERSATION_ID_FIELD_NUMBER: _builtins.int
-    conversation_id: _builtins.str
+    SESSION_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
     def __init__(
         self,
         *,
-        conversation_id: _builtins.str = ...,
+        session: Global___SessionRef | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["conversation_id", b"conversation_id"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___BargeInSignal: _TypeAlias = BargeInSignal  # noqa: Y015
 
 @_typing.final
-class TalkerContext(_message.Message):
-    """TalkerContext 保持不变"""
+class PromptContext(_message.Message):
+    """Reusable per-call context. Persona remains a change-driven UpdatePersona RPC."""
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    CONVERSATION_ID_FIELD_NUMBER: _builtins.int
-    TURN_ID_FIELD_NUMBER: _builtins.int
-    USER_INPUT_FIELD_NUMBER: _builtins.int
     HISTORY_FIELD_NUMBER: _builtins.int
     MEMORY_CONTENTS_FIELD_NUMBER: _builtins.int
     TOOLS_FIELD_NUMBER: _builtins.int
-    ACTIVE_TASKS_JSON_FIELD_NUMBER: _builtins.int
-    TOOL_RESULT_CONTENT_FIELD_NUMBER: _builtins.int
-    TOOL_REQUEST_ID_FIELD_NUMBER: _builtins.int
-    TIMESTAMP_MS_FIELD_NUMBER: _builtins.int
-    REASONER_TASK_ID_FIELD_NUMBER: _builtins.int
-    REASONER_RESULT_CONTENT_FIELD_NUMBER: _builtins.int
+    ACTIVE_TASKS_FIELD_NUMBER: _builtins.int
     RETRIEVAL_RESULTS_FIELD_NUMBER: _builtins.int
-    conversation_id: _builtins.str
-    turn_id: _builtins.str
-    user_input: _builtins.str
     memory_contents: _builtins.str
-    active_tasks_json: _builtins.str
-    tool_result_content: _builtins.str
-    tool_request_id: _builtins.str
-    timestamp_ms: _builtins.int
-    reasoner_task_id: _builtins.str
-    reasoner_result_content: _builtins.str
     @_builtins.property
     def history(self) -> _containers.RepeatedCompositeFieldContainer[Global___ChatMessage]: ...
     @_builtins.property
     def tools(self) -> _containers.RepeatedCompositeFieldContainer[Global___ToolDefinition]: ...
     @_builtins.property
-    def retrieval_results(self) -> _containers.RepeatedCompositeFieldContainer[Global___RetrievalResult]:
-        """── NEW: RAG retrieval results ──"""
-
+    def active_tasks(self) -> _containers.RepeatedCompositeFieldContainer[Global___ActiveTask]: ...
+    @_builtins.property
+    def retrieval_results(self) -> _containers.RepeatedCompositeFieldContainer[Global___RetrievalResult]: ...
     def __init__(
         self,
         *,
-        conversation_id: _builtins.str = ...,
-        turn_id: _builtins.str = ...,
-        user_input: _builtins.str = ...,
         history: _abc.Iterable[Global___ChatMessage] | None = ...,
         memory_contents: _builtins.str = ...,
         tools: _abc.Iterable[Global___ToolDefinition] | None = ...,
-        active_tasks_json: _builtins.str = ...,
-        tool_result_content: _builtins.str = ...,
-        tool_request_id: _builtins.str = ...,
-        timestamp_ms: _builtins.int = ...,
-        reasoner_task_id: _builtins.str = ...,
-        reasoner_result_content: _builtins.str = ...,
+        active_tasks: _abc.Iterable[Global___ActiveTask] | None = ...,
         retrieval_results: _abc.Iterable[Global___RetrievalResult] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["active_tasks_json", b"active_tasks_json", "conversation_id", b"conversation_id", "history", b"history", "memory_contents", b"memory_contents", "reasoner_result_content", b"reasoner_result_content", "reasoner_task_id", b"reasoner_task_id", "retrieval_results", b"retrieval_results", "timestamp_ms", b"timestamp_ms", "tool_request_id", b"tool_request_id", "tool_result_content", b"tool_result_content", "tools", b"tools", "turn_id", b"turn_id", "user_input", b"user_input"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["active_tasks", b"active_tasks", "history", b"history", "memory_contents", b"memory_contents", "retrieval_results", b"retrieval_results", "tools", b"tools"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-Global___TalkerContext: _TypeAlias = TalkerContext  # noqa: Y015
+Global___PromptContext: _TypeAlias = PromptContext  # noqa: Y015
+
+@_typing.final
+class ActiveTask(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TASK_ID_FIELD_NUMBER: _builtins.int
+    DESCRIPTION_FIELD_NUMBER: _builtins.int
+    task_id: _builtins.str
+    description: _builtins.str
+    def __init__(
+        self,
+        *,
+        task_id: _builtins.str = ...,
+        description: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["description", b"description", "task_id", b"task_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ActiveTask: _TypeAlias = ActiveTask  # noqa: Y015
+
+@_typing.final
+class GenerationStart(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SESSION_FIELD_NUMBER: _builtins.int
+    GENERATION_ID_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_MS_FIELD_NUMBER: _builtins.int
+    PROMPT_CONTEXT_FIELD_NUMBER: _builtins.int
+    USER_INPUT_FIELD_NUMBER: _builtins.int
+    TOOL_RESULT_FIELD_NUMBER: _builtins.int
+    REASONER_RESULT_FIELD_NUMBER: _builtins.int
+    REASONER_PROGRESS_FIELD_NUMBER: _builtins.int
+    SILENCE_FIELD_NUMBER: _builtins.int
+    generation_id: _builtins.str
+    timestamp_ms: _builtins.int
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
+    @_builtins.property
+    def prompt_context(self) -> Global___PromptContext: ...
+    @_builtins.property
+    def user_input(self) -> Global___UserInput: ...
+    @_builtins.property
+    def tool_result(self) -> Global___ToolResult: ...
+    @_builtins.property
+    def reasoner_result(self) -> Global___ReasonerResult: ...
+    @_builtins.property
+    def reasoner_progress(self) -> Global___ReasonerProgress: ...
+    @_builtins.property
+    def silence(self) -> Global___SilenceTrigger: ...
+    def __init__(
+        self,
+        *,
+        session: Global___SessionRef | None = ...,
+        generation_id: _builtins.str = ...,
+        timestamp_ms: _builtins.int = ...,
+        prompt_context: Global___PromptContext | None = ...,
+        user_input: Global___UserInput | None = ...,
+        tool_result: Global___ToolResult | None = ...,
+        reasoner_result: Global___ReasonerResult | None = ...,
+        reasoner_progress: Global___ReasonerProgress | None = ...,
+        silence: Global___SilenceTrigger | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["prompt_context", b"prompt_context", "reasoner_progress", b"reasoner_progress", "reasoner_result", b"reasoner_result", "session", b"session", "silence", b"silence", "tool_result", b"tool_result", "trigger", b"trigger", "user_input", b"user_input"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["generation_id", b"generation_id", "prompt_context", b"prompt_context", "reasoner_progress", b"reasoner_progress", "reasoner_result", b"reasoner_result", "session", b"session", "silence", b"silence", "timestamp_ms", b"timestamp_ms", "tool_result", b"tool_result", "trigger", b"trigger", "user_input", b"user_input"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType_trigger: _TypeAlias = _typing.Literal["user_input", "tool_result", "reasoner_result", "reasoner_progress", "silence"]  # noqa: Y015
+    _WhichOneofArgType_trigger: _TypeAlias = _typing.Literal["trigger", b"trigger"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType_trigger) -> _WhichOneofReturnType_trigger | None: ...
+
+Global___GenerationStart: _TypeAlias = GenerationStart  # noqa: Y015
+
+@_typing.final
+class UserInput(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TEXT_FIELD_NUMBER: _builtins.int
+    text: _builtins.str
+    def __init__(
+        self,
+        *,
+        text: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["text", b"text"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UserInput: _TypeAlias = UserInput  # noqa: Y015
+
+@_typing.final
+class ToolResult(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    REQUEST_ID_FIELD_NUMBER: _builtins.int
+    CONTENT_FIELD_NUMBER: _builtins.int
+    request_id: _builtins.str
+    content: _builtins.str
+    def __init__(
+        self,
+        *,
+        request_id: _builtins.str = ...,
+        content: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["content", b"content", "request_id", b"request_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ToolResult: _TypeAlias = ToolResult  # noqa: Y015
+
+@_typing.final
+class ReasonerResult(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TASK_ID_FIELD_NUMBER: _builtins.int
+    SUMMARY_FIELD_NUMBER: _builtins.int
+    task_id: _builtins.str
+    summary: _builtins.str
+    def __init__(
+        self,
+        *,
+        task_id: _builtins.str = ...,
+        summary: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["summary", b"summary", "task_id", b"task_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReasonerResult: _TypeAlias = ReasonerResult  # noqa: Y015
+
+@_typing.final
+class ReasonerProgress(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TASK_ID_FIELD_NUMBER: _builtins.int
+    DESCRIPTION_FIELD_NUMBER: _builtins.int
+    task_id: _builtins.str
+    description: _builtins.str
+    def __init__(
+        self,
+        *,
+        task_id: _builtins.str = ...,
+        description: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["description", b"description", "task_id", b"task_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReasonerProgress: _TypeAlias = ReasonerProgress  # noqa: Y015
+
+@_typing.final
+class SilenceTrigger(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DURATION_MS_FIELD_NUMBER: _builtins.int
+    duration_ms: _builtins.int
+    def __init__(
+        self,
+        *,
+        duration_ms: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["duration_ms", b"duration_ms"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SilenceTrigger: _TypeAlias = SilenceTrigger  # noqa: Y015
 
 @_typing.final
 class RetrievalResult(_message.Message):
@@ -383,6 +605,7 @@ class TalkerOutput(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     SEQ_FIELD_NUMBER: _builtins.int
+    GENERATION_ID_FIELD_NUMBER: _builtins.int
     RESPONSE_STARTED_FIELD_NUMBER: _builtins.int
     SENTENCE_FIELD_NUMBER: _builtins.int
     EMOTION_FIELD_NUMBER: _builtins.int
@@ -391,6 +614,8 @@ class TalkerOutput(_message.Message):
     RESPONSE_COMPLETE_FIELD_NUMBER: _builtins.int
     BARGE_IN_ACK_FIELD_NUMBER: _builtins.int
     seq: _builtins.int
+    generation_id: _builtins.str
+    """Required on every output; echoes the GenerationStart accepted by this RPC."""
     @_builtins.property
     def response_started(self) -> Global___ResponseStarted: ...
     @_builtins.property
@@ -411,6 +636,7 @@ class TalkerOutput(_message.Message):
         self,
         *,
         seq: _builtins.int = ...,
+        generation_id: _builtins.str = ...,
         response_started: Global___ResponseStarted | None = ...,
         sentence: Global___SentenceEvent | None = ...,
         emotion: Global___EmotionEvent | None = ...,
@@ -421,7 +647,7 @@ class TalkerOutput(_message.Message):
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["barge_in_ack", b"barge_in_ack", "delegate_request", b"delegate_request", "emotion", b"emotion", "payload", b"payload", "response_complete", b"response_complete", "response_started", b"response_started", "sentence", b"sentence", "tool_request", b"tool_request"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["barge_in_ack", b"barge_in_ack", "delegate_request", b"delegate_request", "emotion", b"emotion", "payload", b"payload", "response_complete", b"response_complete", "response_started", b"response_started", "sentence", b"sentence", "seq", b"seq", "tool_request", b"tool_request"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["barge_in_ack", b"barge_in_ack", "delegate_request", b"delegate_request", "emotion", b"emotion", "generation_id", b"generation_id", "payload", b"payload", "response_complete", b"response_complete", "response_started", b"response_started", "sentence", b"sentence", "seq", b"seq", "tool_request", b"tool_request"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType_payload: _TypeAlias = _typing.Literal["response_started", "sentence", "emotion", "tool_request", "delegate_request", "response_complete", "barge_in_ack"]  # noqa: Y015
     _WhichOneofArgType_payload: _TypeAlias = _typing.Literal["payload", b"payload"]  # noqa: Y015
@@ -452,15 +678,9 @@ Global___BargeInAck: _TypeAlias = BargeInAck  # noqa: Y015
 class ResponseStarted(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    TURN_ID_FIELD_NUMBER: _builtins.int
-    turn_id: _builtins.str
     def __init__(
         self,
-        *,
-        turn_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["turn_id", b"turn_id"]  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ResponseStarted: _TypeAlias = ResponseStarted  # noqa: Y015
 
@@ -541,17 +761,14 @@ Global___DelegateRequest: _TypeAlias = DelegateRequest  # noqa: Y015
 class ResponseComplete(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    TURN_ID_FIELD_NUMBER: _builtins.int
     WAS_INTERRUPTED_FIELD_NUMBER: _builtins.int
-    turn_id: _builtins.str
     was_interrupted: _builtins.bool
     def __init__(
         self,
         *,
-        turn_id: _builtins.str = ...,
         was_interrupted: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["turn_id", b"turn_id", "was_interrupted", b"was_interrupted"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["was_interrupted", b"was_interrupted"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ResponseComplete: _TypeAlias = ResponseComplete  # noqa: Y015
@@ -560,20 +777,21 @@ Global___ResponseComplete: _TypeAlias = ResponseComplete  # noqa: Y015
 class PrefillRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
-    CONVERSATION_ID_FIELD_NUMBER: _builtins.int
-    CONTEXT_FIELD_NUMBER: _builtins.int
-    conversation_id: _builtins.str
+    SESSION_FIELD_NUMBER: _builtins.int
+    PROMPT_CONTEXT_FIELD_NUMBER: _builtins.int
     @_builtins.property
-    def context(self) -> Global___TalkerContext: ...
+    def session(self) -> Global___SessionRef: ...
+    @_builtins.property
+    def prompt_context(self) -> Global___PromptContext: ...
     def __init__(
         self,
         *,
-        conversation_id: _builtins.str = ...,
-        context: Global___TalkerContext | None = ...,
+        session: Global___SessionRef | None = ...,
+        prompt_context: Global___PromptContext | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["context", b"context"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["prompt_context", b"prompt_context", "session", b"session"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "conversation_id", b"conversation_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["prompt_context", b"prompt_context", "session", b"session"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PrefillRequest: _TypeAlias = PrefillRequest  # noqa: Y015
@@ -609,6 +827,29 @@ class PersonaConfig(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PersonaConfig: _TypeAlias = PersonaConfig  # noqa: Y015
+
+@_typing.final
+class UpdatePersonaRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SESSION_FIELD_NUMBER: _builtins.int
+    PERSONA_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
+    @_builtins.property
+    def persona(self) -> Global___PersonaConfig: ...
+    def __init__(
+        self,
+        *,
+        session: Global___SessionRef | None = ...,
+        persona: Global___PersonaConfig | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["persona", b"persona", "session", b"session"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["persona", b"persona", "session", b"session"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UpdatePersonaRequest: _TypeAlias = UpdatePersonaRequest  # noqa: Y015
 
 @_typing.final
 class PersonaAck(_message.Message):
@@ -672,18 +913,24 @@ class TaskRequest(_message.Message):
     TASK_ID_FIELD_NUMBER: _builtins.int
     DESCRIPTION_FIELD_NUMBER: _builtins.int
     METADATA_FIELD_NUMBER: _builtins.int
+    SESSION_FIELD_NUMBER: _builtins.int
     task_id: _builtins.str
     description: _builtins.str
     @_builtins.property
     def metadata(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]: ...
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
     def __init__(
         self,
         *,
         task_id: _builtins.str = ...,
         description: _builtins.str = ...,
         metadata: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
+        session: Global___SessionRef | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["description", b"description", "metadata", b"metadata", "task_id", b"task_id"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["description", b"description", "metadata", b"metadata", "session", b"session", "task_id", b"task_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TaskRequest: _TypeAlias = TaskRequest  # noqa: Y015
@@ -694,16 +941,22 @@ class TaskContext(_message.Message):
 
     TASK_ID_FIELD_NUMBER: _builtins.int
     CONTEXT_FIELD_NUMBER: _builtins.int
+    SESSION_FIELD_NUMBER: _builtins.int
     task_id: _builtins.str
     context: _builtins.str
     """additional context during execution"""
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
     def __init__(
         self,
         *,
         task_id: _builtins.str = ...,
         context: _builtins.str = ...,
+        session: Global___SessionRef | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "task_id", b"task_id"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "session", b"session", "task_id", b"task_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TaskContext: _TypeAlias = TaskContext  # noqa: Y015
@@ -839,9 +1092,12 @@ Global___ReasonerError: _TypeAlias = ReasonerError  # noqa: Y015
 class InterruptRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
+    SESSION_FIELD_NUMBER: _builtins.int
     CANCEL_FIELD_NUMBER: _builtins.int
     STOP_FIELD_NUMBER: _builtins.int
     SHUTDOWN_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
     @_builtins.property
     def cancel(self) -> Global___TaskCancel: ...
     @_builtins.property
@@ -851,13 +1107,14 @@ class InterruptRequest(_message.Message):
     def __init__(
         self,
         *,
+        session: Global___SessionRef | None = ...,
         cancel: Global___TaskCancel | None = ...,
         stop: Global___GlobalStop | None = ...,
         shutdown: Global___Shutdown | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["cancel", b"cancel", "shutdown", b"shutdown", "signal", b"signal", "stop", b"stop"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["cancel", b"cancel", "session", b"session", "shutdown", b"shutdown", "signal", b"signal", "stop", b"stop"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cancel", b"cancel", "shutdown", b"shutdown", "signal", b"signal", "stop", b"stop"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cancel", b"cancel", "session", b"session", "shutdown", b"shutdown", "signal", b"signal", "stop", b"stop"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType_signal: _TypeAlias = _typing.Literal["cancel", "stop", "shutdown"]  # noqa: Y015
     _WhichOneofArgType_signal: _TypeAlias = _typing.Literal["signal", b"signal"]  # noqa: Y015
@@ -915,9 +1172,18 @@ Global___InterruptAck: _TypeAlias = InterruptAck  # noqa: Y015
 class TelemetrySubscribe(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
+    SESSION_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
     def __init__(
         self,
+        *,
+        session: Global___SessionRef | None = ...,
     ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TelemetrySubscribe: _TypeAlias = TelemetrySubscribe  # noqa: Y015
 
@@ -947,6 +1213,29 @@ class TelemetryEvent(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TelemetryEvent: _TypeAlias = TelemetryEvent  # noqa: Y015
+
+@_typing.final
+class ControlRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SESSION_FIELD_NUMBER: _builtins.int
+    SIGNAL_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def session(self) -> Global___SessionRef: ...
+    @_builtins.property
+    def signal(self) -> Global___ControlSignal: ...
+    def __init__(
+        self,
+        *,
+        session: Global___SessionRef | None = ...,
+        signal: Global___ControlSignal | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session", "signal", b"signal"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["session", b"session", "signal", b"signal"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ControlRequest: _TypeAlias = ControlRequest  # noqa: Y015
 
 @_typing.final
 class ControlSignal(_message.Message):

@@ -29,7 +29,7 @@ export function TurnDetail({ turn, audioEvents }: { turn: Turn; audioEvents: Aud
     <div className="inspector">
       <div className="inspector-card">
         <div className="turn-detail-header">
-          <span className="turn-detail-id">{turn.turn_id}</span>
+          <span className="turn-detail-id">{turn.generation_id}</span>
           <span className="turn-detail-meta">
             {duration === null ? "in flight" : `${(duration / 1000).toFixed(2)}s`}
             {ttfs !== null && ` · TTFS ${ttfs}ms`}

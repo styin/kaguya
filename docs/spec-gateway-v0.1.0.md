@@ -4,15 +4,15 @@
 
 **Version:** 0.1.0
 
-**Updated:** 2026-09-18
+**Updated:** 2026-10-23
 
 **Audience:** Developers working on Gateway and adjacent service contracts
 
-**Status convention:** **Current** describes inspected source on
-`gateway-refactor`, including the approved R0 extraction after documentation
-commit `b4eecd4` (runtime baseline `633ec49`). **Target** describes accepted work
-that is not complete. **Deferred** identifies later scope. Source inspection
-does not establish passing runtime or end-to-end tests.
+**Status convention:** **Current** describes the inspected `sessions` branch,
+including R1a deployment/identity and the fixed-scope protocol cleanup. **Target**
+describes accepted work that is not complete. **Deferred** identifies later
+scope. The implementation plan records validation; source inspection alone does
+not establish runtime or end-to-end acceptance.
 
 The [implementation plan](implementation-plan-v0.1.0.md) owns progress,
 dependencies and acceptance gates (R0–R8). The
@@ -59,7 +59,7 @@ configuration; `app.rs` realizes it and injects the resulting capability handles
 persistence, or configuration-management APIs.
 
 Supervisor URL precedence is resolved by `SupervisorConfig::resolved_url()` in
-`config.rs`, called after loading or falling back to default configuration.
+`config.rs`, called after validated runtime-root/profile and Gateway settings selection.
 Client construction and connection/fallback handling remain in `app.rs`.
 
 The responsibilities of `app.rs` are to:
@@ -129,8 +129,8 @@ flowchart TD
 | Responsibility | Current implementation | Target / remaining work |
 | --- | --- | --- |
 | Endpoint I/O | WebSocket JSON text/control ingress, raw audio ingress forwarding, semantic metadata egress | Complete browser TTS egress and recovery in R7; OpenPod is deferred |
-| Session and history | R1a configuration-bound InstanceId/default SessionId, one active session, and an in-memory rolling message buffer | Durable history, replay and resume in R1c |
-| Context assembly | Structured user input, recent messages, memory, retrieval, tools, task summaries and result context | Aggregate size accounting and explicit oversize behavior in R8 |
+| Session and history | One validated fixed `SessionRef`, one instance/session per Gateway, and an in-memory rolling message buffer | Durable history, replay and resume in R1c; multiplexing deferred |
+| Context assembly | `GenerationStart` combines a reusable `PromptContext` with one typed trigger; active tasks are typed | Aggregate size accounting and explicit oversize behavior in R8 |
 | Memory retrieval/storage | Built-in `RagEngine` behind `RagCapability`; SQLite, BM25, optional vectors | Future providers remain behind the capability boundary |
 | Persona delivery | Load/watch SOUL.md and IDENTITY.md; synthesize memory from RAG; deliver via UpdatePersona | Preserve startup/reconnect behavior through R0/R1 |
 | Policy and approval | Local file-path checks and Supervisor backend limits; approval control is a placeholder | Unified policy resolution and correlated approvals in R2 |
@@ -191,11 +191,12 @@ from the input queues and handlers. Long-await responsiveness work remains open.
 capability; the details here describe the built-in implementation, not a
 requirement that all providers use SQLite.
 
-Storage is configured through `[rag] db_path` (currently `data/kaguya.db`,
-relative to Gateway's working directory). [RagStore](../gateway/src/rag/store.rs)
-creates:
+The active RAG database is `kaguya.db` inside the selected instance directory.
+`[rag] db_path` supplies an optional initialization/adoption source, resolved
+relative to the selected Gateway settings file; normal startup substitutes the
+instance-owned path. [RagStore](../gateway/src/rag/store.rs) creates:
 
-- `memories`: typed conversation/fact/preference/project content, source turn and creation timestamp;
+- `memories`: typed conversation/fact/preference/project content, originating user-generation reference and creation timestamp;
 - `memories_fts`: FTS5 index maintained by triggers, using `porter unicode61` (REF-009);
 - `embeddings`: optional vector data keyed by memory;
 - `user_profile` and `projects`: schema tables that the current ingestion/export path does not use.
@@ -224,15 +225,18 @@ are separate (REF-010); retrieval/export caps are optional. There is no universa
 `ChatMessage` values in memory and discards older entries. Despite the
 `max_recent_turns` setting name, selection/truncation counts messages, not
 complete user/assistant exchanges. There is no summary, durable transcript or
-restart reload. R1a now loads a stable default SessionId from the required
-instance manifest; protobuf `conversation_id` carries that ID.
+restart reload. R1a loads the persisted `default_session_id` from the required
+instance manifest. The field remains unchanged; the runtime pair is represented
+by validated `SessionRef` and the protocol no longer has a `conversation_id`
+alias. Startup does not mint replacement IDs.
 
 **Target (R1c):** Authoritative history supports a continuous conversation
 across connection/process restarts. Prompt-window
 selection must be separate from transcript retention. Session identity does not
 require a multi-chat UI. Storage format, retention and compaction remain open.
-R1a fixes the session/conversation compatibility mapping without adding durable
-history.
+R1a fixes identity and startup scope without adding durable history. Concurrent
+sessions, session catalogs, and shared-worker routing remain deferred; the
+current Gateway serves one selected instance/session.
 
 RAG memories remain derived knowledge, not a substitute for authoritative
 conversation history.
@@ -243,12 +247,13 @@ conversation history.
 Startup:
   load persona files and open the configured RAG store
   export memory markdown
-  Talker connection/recovery loop delivers PersonaConfig
+  Talker connection/recovery loop delivers scoped UpdatePersonaRequest
+  mark Talker ready only after persona/scope acceptance
 
 P1 user input when Talker is ready:
   retrieve relevant memories
   fetch recent history, tool definitions and active-task descriptions
-  assemble TalkerContext
+  assemble PromptContext plus a typed UserInput trigger in GenerationStart
   append user history and dispatch Converse
 
 Persona file change:
@@ -270,12 +275,14 @@ response history from RAG ingestion:
 - Only eligible `UserIntent` responses with a preceding user input invoke memory extraction; tool continuations, Reasoner narration/results and silence rounds do not create fresh user/assistant memory pairs.
 - Non-interrupted completion checks for changed memory, pushes updated persona when needed, and requests prefix prefill.
 - An interrupted response skips that normal completion path. A received `BargeInAck` contributes only its confirmed-spoken text.
-- Completion resets turn state, unmutes output and restarts the silence cascade.
+- Completion resets generation activity within `SessionState`, unmutes output and restarts the silence cascade.
 
 The user entry is appended during user-input handling, not as a new paired
 record after every response. R1/R8 must verify interruption and duplicate-event
 behavior rather than assuming the current in-memory flow provides durable
-delivery guarantees.
+delivery guarantees. `SessionState.last_user_generation_id` retains the most
+recent user-input generation for RAG source attribution; continuation and silence
+generations receive fresh IDs without replacing that reference.
 
 ### 4.5 Future Evolution and Limits
 
@@ -286,11 +293,17 @@ compatibility must be evaluated for whichever design is selected.
 
 R8 retains aggregate context-size accounting and clear oversize behavior as
 unfinished requirements. Optional per-field caps alone do not establish that a
-complete TalkerContext fits transport or model limits.
+complete prompt/generation request fits transport or model limits.
 
-## 5. Turn Lifecycle (Inline Barge-In on Converse Stream)
+## 5. Generation Lifecycle (Inline Barge-In on Converse Stream)
 
-The current interruption message is `TalkerInput.barge_in`, with
+Each `Converse` RPC begins with one `GenerationStart` containing the fixed
+`SessionRef`, a fresh `generation_id`, timestamp, prompt snapshot, and exactly
+one trigger. User input, tool continuation, Reasoner progress/result, and silence
+retain their existing dispatch boundaries. There is no separately introduced
+conversational `TurnId`.
+
+The interruption message is scoped `TalkerInput.barge_in`, with
 `TalkerOutput.barge_in_ack` carrying `spoken_text` and `unspoken_text`.
 There is no separate Prepare RPC or partial_response message in the current
 schema.
@@ -427,8 +440,10 @@ a measured guarantee.
 
 ## 10. Speculative Prefill Orchestration
 
-**Current:** Non-interrupted completion asks Talker to prefill the next context.
-Changed memory is pushed through UpdatePersona first. Talker's HTTP LLM client
+**Current:** Non-interrupted completion asks Talker to prefill a fresh
+`PromptContext` through `PrefillRequest { session, prompt_context }`. It contains
+no invented generation ID or trigger. Changed memory is pushed through scoped
+`UpdatePersonaRequest { session, persona }` first. Talker's HTTP LLM client
 uses the backend's prefill/cache options; benefit depends on backend support.
 A Reasoner completion dispatches result context, but does not by itself
 unconditionally refresh persona or run prefill before that response completes.
@@ -465,8 +480,8 @@ Console → Supervisor HTTP/SSE:
 
 The endpoint permits one active WebSocket client; a new connection replaces the
 previous one. It is a network transport, even when used on localhost.
-The Console currently has no durable session bootstrap or approval interaction;
-R1/R2/R7 introduce those contracts.
+Console receives a fixed `session_init` identity bootstrap, but has no durable
+transcript replay or approval interaction; those remain R1c/R2/R7 work.
 
 ### Deferred OpenPod
 
@@ -479,8 +494,10 @@ Console remains the current development interface.
 
 **Current metadata:** Gateway emits a `session_init` identity bootstrap plus
 sentence, emotion, response-started, response-complete and voice user-input
-events to Console. Tool/task detail, typing, presence and transcript replay
-remain incomplete.
+events to Console. Response-started, sentence, emotion, and response-complete
+events carry their originating `generation_id`; Console associates each with
+that generation rather than whichever response is most recently open. Tool/task
+detail, typing, presence and transcript replay remain incomplete.
 
 **Current audio:** Talker plays speech on its host. Gateway's
 [OutputManager](../gateway/src/core/output.rs) has audio mute/forward primitives
@@ -499,7 +516,7 @@ The current TalkerOutput oneof is defined in the canonical schema:
 
 | Payload | Gateway handling |
 | --- | --- |
-| ResponseStarted | Reset response accumulation and emit turn-start metadata |
+| ResponseStarted | Reset response accumulation and emit generation-start metadata |
 | SentenceEvent | Accumulate assistant text and forward sentence metadata |
 | EmotionEvent | Forward emotion metadata |
 | ToolRequest | Dispatch a known tool or record an unknown-tool error |
@@ -507,9 +524,17 @@ The current TalkerOutput oneof is defined in the canonical schema:
 | BargeInAck | Append nonempty spoken_text and unmute; unspoken_text is not appended |
 | ResponseComplete | Conditional history/RAG/persona/prefill work, reset state, restart silence and emit completion metadata |
 
-Messages have a sequence field; runtime ordering and interruption races still
-need acceptance coverage. Token streaming and audio processing remain inside
-the voice service. Raw speech audio is not a TalkerOutput protobuf payload.
+Messages have a per-stream sequence field and an outer `generation_id` on
+`TalkerOutput`. The Talker client checks every output against the generation
+that opened its stream before forwarding the generated protobuf into the shared
+queue. Missing or mismatched IDs are rejected and degrade connection readiness.
+The common envelope supplies provenance for every payload, including tool,
+delegation, and barge-in output; lifecycle payloads do not duplicate the ID.
+
+This adds provenance, not a new stale-generation policy. Existing shared response
+accumulation and cancellation behavior remain; late-event acceptance, runtime
+ordering, and interruption races still need explicit R1b/R8 work. Token streaming
+and audio processing remain inside the voice service. Raw speech audio is not a TalkerOutput protobuf payload.
 
 ## 14. Workspace, Policy and Execution Binding
 
@@ -554,14 +579,46 @@ This table summarizes ownership without duplicating schema bodies:
 | Supervisor HTTP/SSE | Gateway and Console proxy | Supervisor | Process, sandbox, status/log/telemetry APIs |
 | Console WebSocket | Browser Console | Gateway | JSON semantic messages and separate binary audio frames |
 
-Current service IPC uses TCP. Gateway sends Listener audio as
-`[u32 big-endian length][raw bytes]` on the separately configured audio
-connection. Listener accepts configured PCM input or decodes configured Opus;
-the browser currently sends PCM. Gateway never decodes these bytes.
+Current service IPC uses TCP. The protobuf scope is
+`SessionRef { InstanceId instance_id, SessionId session_id }`; each named ID
+message contains a `string value`. Both objects must be present. Validation
+requires canonical, non-nil, distinct UUIDs and equality with the receiver's
+startup scope. Scope is an assertion, not a routing key for multiplexing or
+proof of caller authentication. Custom `x-kaguya-instance-id` and
+`x-kaguya-session-id` metadata are no longer used; hosted authentication/tracing
+remain deferred.
+
+| RPC | Current association boundary |
+| --- | --- |
+| Listener `Stream` | Initial `ListenerInit.session`, validated before headers/events; controls follow |
+| Talker `Converse` | Initial `GenerationStart.session`/`generation_id`, validated before generation; inline `BargeInSignal.session` must agree |
+| Talker `PrefillCache` | `PrefillRequest.session` plus `PromptContext` |
+| Talker `UpdatePersona` | `UpdatePersonaRequest.session` plus cached `PersonaConfig` |
+| Reasoner `Delegate` | `TaskRequest.session`/`task_id`; context updates retain both; callback task IDs must agree |
+| Reasoner `Interrupt` | `InterruptRequest.session` and the selected signal; task cancel retains `task_id` |
+| Reasoner `Telemetry` | Scoped `TelemetrySubscribe`; schema exists, subscriber/service remain deferred |
+| Gateway `SendControl` | `ControlRequest.session` plus `ControlSignal`; validate before delivering to the separate P0 channel |
+
+Gateway queues the Listener/Converse initial message before awaiting response
+headers. Listener acceptance precedes opening the raw audio connection.
+Audio begins with the unchanged 39-byte prefix (`KAGUYA1`, binary InstanceId,
+binary SessionId), followed by `[u32 big-endian length][raw bytes]` records.
+Listener checks the prefix against its immutable startup scope. It accepts
+configured PCM input or decodes configured Opus; the browser currently sends
+PCM. Gateway never decodes these bytes.
+
+`PromptContext` holds history, memory content, tool definitions, typed active
+tasks and retrieval results. `GenerationStart.trigger` is a oneof of user input,
+tool result (`request_id`, content), Reasoner result (`task_id`, summary),
+Reasoner progress (`task_id`, description), or silence (`duration_ms`). This
+replaces the flat tool/Reasoner result aliases and JSON task list. Persona is
+still cached via UpdatePersona at startup/reconnect and on changes; it is not a
+per-generation `PersonaConfig` snapshot.
 
 Proto changes must regenerate Python stubs, rebuild Rust clients/servers, and
 pass buf checks. TypeScript Reasoner is planned to load the schema at runtime.
-Adding session/task/policy/binding fields is active work, not present wire state.
+The real Reasoner server, durable task/run state, authorization/policy contracts,
+and instance/session multiplexing remain future work.
 
 ## 16. Implementation
 
@@ -573,15 +630,31 @@ Adding session/task/policy/binding fields is active work, not present wire state
 | Persona files | tokio::fs plus notify watcher |
 | Built-in RAG | rusqlite with bundled SQLite/FTS5; optional HTTP embedder |
 | Configuration | Selected runtime root/profile chooses Gateway settings, explicit portable storage, instance-local manifest, and process topology; shared deployment selection precedes component assembly |
-| Runtime state | In-memory history, turn state, active Reasoner requests and connections; RAG SQLite persists independently |
+| Runtime state | Fixed `SessionRef`, in-memory history and `SessionState`, active Reasoner requests and connections; RAG SQLite persists independently |
 | Provider assembly | app.rs constructs components; main.rs initializes runtime/logging; pipeline::run handles the event loop |
 | Process/sandbox lifecycle | Supervisor; not Gateway |
 
 R1a's [deployment/instance contract](r1a-identity.md) defines selection
 precedence, path bases, print-only init/rekey handoff, validation, and redacted
 diagnostics. Gateway's `instance.rs` owns `InstanceIdentity`, `InstanceLease`,
-and instance-local persona/RAG data. Services use `InstanceSessionBinding`;
-callbacks carry originating context. No physical HostId is introduced.
+and instance-local persona/RAG data; it does not construct gRPC requests or
+audio headers. Gateway and Supervisor each use their generated
+`proto::SessionRef` internally, including its named ID messages. Component-local
+helpers construct and validate the reference at startup and request boundaries;
+the generated type itself does not guarantee valid IDs. Application assembly
+derives the scope once and requires it in production client constructors.
+`SessionState` and History receive the same representation. Supervisor stores
+it in binding state and allocation ownership records, while its existing
+methods enforce matching scope and its HTTP adapters retain scalar ID fields.
+The shared deployment resolver and Cargo package layout remain unchanged for R1d.
+
+Supervisor and Gateway resolve the selected manifest before runtime assembly.
+The launcher supplies validated IDs to voice; direct voice startup requires
+both environment selectors too. Voice validates them before loading inference
+dependencies or opening ports and shares an immutable `InstanceSessionBinding`
+across Talker, Listener gRPC, and audio ingress. No lazy first-caller binding or
+instance/session-level multiplexing is implemented. Callbacks carry originating
+context. No physical HostId is introduced.
 Configuration containing shell launch instructions is trusted executable
 input. R1d completes broader endpoint/environment/reader consistency and
 structured launch descriptors; validation currently covers the implemented

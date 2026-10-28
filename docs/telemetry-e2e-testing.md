@@ -32,12 +32,17 @@ An end-to-end telemetry test should prove four things:
 
 Useful correlation fields:
 
-- `conversation_id`
-- `request_id`
-- `tool`
-- `backend`
-- `handle`
-- `session`
+- `instance_id` / `session_id`: the configured pair; serialized as `instanceId` / `sessionId` in the HTTP telemetry envelope.
+- `generation_id`: the Talker generation, serialized as `generationId` when applicable.
+- `request_id`: the tool call, serialized as `requestId` when applicable.
+- `allocation_id`: the sandbox allocation, serialized as `allocationId` when applicable.
+- `tool`, `backend`, `handle`: operation-specific log/event fields.
+
+Gateway telemetry ingress requires its configured instance/session pair. Missing
+or mismatched ownership is rejected before event storage/aggregation. Supervisor's
+own process-resource events describe managed processes and need not identify a
+Talker generation. Numeric event IDs, `since` cursors, and `sample_id` counters
+remain separate from application identity.
 
 ## Raw telemetry API
 
@@ -68,10 +73,15 @@ Initial event kinds:
 
 ## Local smoke test
 
+Select an initialized local deployment first, following [the instance setup
+instructions](r1a-identity.md). Both terminals must use that same runtime file.
+The examples below use `config/kaguya.local.toml`.
+
 Start Supervisor:
 
 ```powershell
-cargo run --manifest-path supervisor/Cargo.toml
+$runtimeConfig = (Resolve-Path config/kaguya.local.toml).Path
+cargo run --manifest-path supervisor/Cargo.toml -- --runtime-config $runtimeConfig
 ```
 
 In another terminal, verify the log snapshot endpoint:
@@ -90,21 +100,34 @@ Then trigger a sandbox execution through the Supervisor control plane:
 
 ```powershell
 $base = "http://127.0.0.1:3001"
+$runtimeConfig = (Resolve-Path config/kaguya.local.toml).Path
+$deployment = cargo run --quiet --manifest-path gateway/Cargo.toml -- `
+  show-config --runtime-config $runtimeConfig | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw "Gateway deployment validation failed" }
+$instanceId = $deployment.instance.instance_id
+$sessionId = $deployment.instance.default_session_id
+$acquireBody = @{
+  instanceId = $instanceId
+  sessionId = $sessionId
+  allocationId = [guid]::NewGuid().ToString()
+} | ConvertTo-Json -Compress
 $acquired = Invoke-RestMethod "$base/api/sandbox/acquire" `
-  -Method POST `
-  -ContentType "application/json" `
-  -Body '{"sessionId":"telemetry-smoke"}'
+  -Method POST -ContentType "application/json" -Body $acquireBody
+if (-not $acquired.handle) { throw $acquired.error }
 
 $body = @{
+  instanceId = $instanceId
+  sessionId = $sessionId
+  requestId = [guid]::NewGuid().ToString()
   argsJson = '{"language":"python","code":"print(\"telemetry-smoke-ok\")"}'
 } | ConvertTo-Json -Compress
+$executed = Invoke-RestMethod "$base/api/sandbox/$($acquired.handle)/execute" `
+  -Method POST -ContentType "application/json" -Body $body
+$executed.content | ConvertFrom-Json
 
-Invoke-RestMethod "$base/api/sandbox/$($acquired.handle)/execute" `
-  -Method POST `
-  -ContentType "application/json" `
-  -Body $body
-
-Invoke-RestMethod "$base/api/sandbox/$($acquired.handle)" -Method DELETE
+$releaseBody = @{ instanceId = $instanceId; sessionId = $sessionId } | ConvertTo-Json -Compress
+Invoke-RestMethod "$base/api/sandbox/$($acquired.handle)" `
+  -Method DELETE -ContentType "application/json" -Body $releaseBody
 ```
 
 Expected result:
@@ -153,7 +176,8 @@ For a running app, use Supervisor as the process owner so Gateway stdout/stderr
 is captured:
 
 ```powershell
-cargo run --manifest-path supervisor/Cargo.toml
+$runtimeConfig = (Resolve-Path config/kaguya.local.toml).Path
+cargo run --manifest-path supervisor/Cargo.toml -- --runtime-config $runtimeConfig
 ```
 
 Then inspect:
@@ -165,8 +189,11 @@ curl.exe -N http://127.0.0.1:3001/api/logs/stream
 ```
 
 When a `sandbox_exec` tool request is triggered by Gateway, the log stream
-should show the same `conversation_id` and `request_id` at Gateway dispatch and
-the matching `handle`/`backend` at sandbox execution.
+should show the same `session_id` and `request_id` at Gateway dispatch and
+the matching `handle`/`backend` at sandbox execution. Raw telemetry adds the
+configured `instanceId`/`sessionId`, the execution's `requestId` and `allocationId`,
+and (for generation/RAG events) `generationId` where applicable. There is no
+separate conversation identity or duplicate session alias.
 
 The telemetry stream should also show:
 
@@ -178,6 +205,23 @@ talker.first_sentence
 sandbox.exec.completed
 process.resource.sample
 ```
+
+## Console generation correlation
+
+At WebSocket open, `session_init.data` supplies the scalar `instance_id` and
+`session_id` with no compatibility alias. `response_started` and
+`response_complete` identify `generation_id`. Sentence and emotion events also
+carry `data.generation_id`, projected from the outer `TalkerOutput.generation_id`
+after Gateway validates it against the originating Converse stream. Inner
+protobuf payloads do not repeat it. The Console associates those events with
+that generation, including delayed
+output, and does not append unknown/missing references to an unrelated response.
+
+For a manual Console check, start a second generation while output from the first
+is still queued. Sentence/emotion events must retain the first generation's ID.
+This checks provenance and display association; it does not establish a new
+stale-event rejection or cancellation policy. `/ws/debug` and generation snapshot
+inspection remain deferred.
 
 ## Automated checks
 

@@ -131,7 +131,12 @@ impl RuntimeConfig {
                 process.cwd = Some(resolve_path(&base_dir, cwd)?);
             }
             // Selection is authoritative even when process.env tries to replace
-            // it. Production discovery rejects an empty inherited profile.
+            // it, including case aliases on Windows. Production discovery
+            // rejects an empty inherited profile.
+            process.env.retain(|key, _| {
+                !key.eq_ignore_ascii_case("KAGUYA_RUNTIME_CONFIG")
+                    && !key.eq_ignore_ascii_case("KAGUYA_RUNTIME_PROFILE")
+            });
             process
                 .env
                 .insert("KAGUYA_RUNTIME_CONFIG".into(), runtime_path.into());
@@ -139,12 +144,32 @@ impl RuntimeConfig {
                 process
                     .env
                     .insert("KAGUYA_RUNTIME_PROFILE".into(), profile.clone());
-            } else {
-                process.env.remove("KAGUYA_RUNTIME_PROFILE");
             }
         }
         config.sandbox.workspace_root = resolve_path(&base_dir, &config.sandbox.workspace_root)?;
         Ok(ResolvedRuntimeConfig { config, base_dir })
+    }
+
+    /// Pin child startup scope after read-only manifest validation. These values
+    /// override both inherited environment and per-process overrides.
+    pub fn set_instance_session(
+        &mut self,
+        binding: &crate::proto::SessionRef,
+    ) -> anyhow::Result<()> {
+        let (instance_id, session_id) = crate::app::validate_session_ref(Some(binding))?;
+        for process in self.processes.values_mut() {
+            process.env.retain(|key, _| {
+                !key.eq_ignore_ascii_case("KAGUYA_INSTANCE_ID")
+                    && !key.eq_ignore_ascii_case("KAGUYA_SESSION_ID")
+            });
+            process
+                .env
+                .insert("KAGUYA_INSTANCE_ID".into(), instance_id.to_owned());
+            process
+                .env
+                .insert("KAGUYA_SESSION_ID".into(), session_id.to_owned());
+        }
+        Ok(())
     }
 
     pub fn gateway_grpc_endpoint(&self) -> Option<&str> {
@@ -492,6 +517,11 @@ mod tests {
             [profiles.standalone.processes.gateway.env]
             KAGUYA_RUNTIME_CONFIG = "wrong.toml"
             KAGUYA_RUNTIME_PROFILE = "wrong"
+            kaguya_runtime_config = "wrong-lowercase.toml"
+            Kaguya_Runtime_Config = "wrong-mixed-case.toml"
+            kaguya_runtime_profile = "wrong-lowercase"
+            Kaguya_Runtime_Profile = "wrong-mixed-case"
+            CUSTOM = "retained"
             "#,
         )
         .unwrap();
@@ -514,6 +544,36 @@ mod tests {
             gateway.resolved_env()["KAGUYA_RUNTIME_PROFILE"],
             "standalone"
         );
+        let child_env = gateway.resolved_env();
+        assert_eq!(child_env["CUSTOM"], "retained");
+        for name in ["KAGUYA_RUNTIME_CONFIG", "KAGUYA_RUNTIME_PROFILE"] {
+            assert_eq!(
+                child_env
+                    .keys()
+                    .filter(|key| key.eq_ignore_ascii_case(name))
+                    .count(),
+                1,
+                "a case alias must not override the selected {name} in a Windows child"
+            );
+        }
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd")
+                .args([
+                    "/D",
+                    "/C",
+                    "echo %KAGUYA_RUNTIME_CONFIG%&echo %KAGUYA_RUNTIME_PROFILE%",
+                ])
+                .envs(&child_env)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(
+                stdout.lines().collect::<Vec<_>>(),
+                vec![selection.runtime_config.to_str().unwrap(), "standalone"]
+            );
+        }
 
         std::fs::write(
             &config_path,
@@ -524,6 +584,8 @@ mod tests {
             portable_root = "instance data"
             [processes.gateway.env]
             KAGUYA_RUNTIME_PROFILE = "wrong"
+            kaguya_runtime_profile = "wrong-lowercase"
+            Kaguya_Runtime_Profile = "wrong-mixed-case"
             "#,
         )
         .unwrap();
@@ -531,7 +593,8 @@ mod tests {
         let resolved = RuntimeConfig::load_selected(&no_profile).unwrap();
         assert!(!resolved.config.processes["gateway"]
             .resolved_env()
-            .contains_key("KAGUYA_RUNTIME_PROFILE"));
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("KAGUYA_RUNTIME_PROFILE")));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -755,5 +818,59 @@ mod tests {
             );
             assert!(!error.contains("never-print-this"));
         }
+    }
+
+    #[test]
+    fn manifest_scope_overrides_process_values_and_windows_case_aliases() {
+        let mut config = RuntimeConfigFile::parse(
+            r#"
+            [processes.gateway]
+            command = "gateway"
+            [processes.gateway.env]
+            KAGUYA_INSTANCE_ID = "wrong"
+            kaguya_session_id = "wrong-case"
+            CUSTOM = "retained"
+            [processes.voice_stack]
+            command = "voice"
+            [processes.voice_stack.env]
+            kaguya_instance_id = "wrong-case"
+            KAGUYA_SESSION_ID = "wrong"
+        "#,
+            None,
+        )
+        .unwrap();
+        let binding = crate::proto::SessionRef {
+            instance_id: Some(crate::proto::InstanceId {
+                value: uuid::Uuid::new_v4().to_string(),
+            }),
+            session_id: Some(crate::proto::SessionId {
+                value: uuid::Uuid::new_v4().to_string(),
+            }),
+        };
+        let (instance_id, session_id) = crate::app::validate_session_ref(Some(&binding)).unwrap();
+        config.set_instance_session(&binding).unwrap();
+        for process in config.processes.values() {
+            let env = process.resolved_env();
+            assert_eq!(env["KAGUYA_INSTANCE_ID"], instance_id);
+            assert_eq!(env["KAGUYA_SESSION_ID"], session_id);
+            assert!(!env.contains_key("kaguya_instance_id"));
+            assert!(!env.contains_key("kaguya_session_id"));
+        }
+        assert_eq!(
+            config.processes["gateway"].resolved_env()["CUSTOM"],
+            "retained"
+        );
+        let before = config.clone();
+        let invalid = crate::proto::SessionRef {
+            instance_id: Some(crate::proto::InstanceId {
+                value: "invalid".into(),
+            }),
+            ..binding
+        };
+        assert!(config.set_instance_session(&invalid).is_err());
+        assert_eq!(
+            config, before,
+            "invalid bootstrap cannot partially overwrite child scope"
+        );
     }
 }

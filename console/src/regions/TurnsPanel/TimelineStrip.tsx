@@ -79,9 +79,9 @@ export function TimelineStrip({
                         startMs={t.started_at}
                         endMs={t.complete_at ?? now}
                         now={now}
-                        selected={selectedKey === `assistant:${t.turn_id}`}
-                        label={t.turn_id.slice(0, 8)}
-                        onClick={() => onSelect(`assistant:${t.turn_id}`)}
+                        selected={selectedKey === `assistant:${t.generation_id}`}
+                        label={t.generation_id.slice(0, 8)}
+                        onClick={() => onSelect(`assistant:${t.generation_id}`)}
                       />
                     ) : null,
                   )}

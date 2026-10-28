@@ -11,11 +11,10 @@ name: buf.build/kaguya/kaguya
 lint:
   use: [STANDARD]
   except:
-    # Our RPC request/response messages use semantic domain names (TalkerContext,
-    # TalkerOutput, ListenerEvent, PersonaConfig, etc.) rather than the mechanical
-    # FooRequest/FooResponse convention. These names are canonical — codified in
-    # implementation-plan-v0.1.0.md §3 and referenced throughout the codebase.
-    # No message is shared across RPCs, so the accidental-reuse risk is moot.
+    # Streaming messages and responses use semantic domain names (TalkerInput,
+    # TalkerOutput, ListenerInput, ListenerOutput, PersonaAck, etc.) rather than
+    # the mechanical FooRequest/FooResponse convention. The schema is the
+    # authority for message names and request scope.
     - RPC_REQUEST_STANDARD_NAME
     - RPC_RESPONSE_STANDARD_NAME
 breaking:

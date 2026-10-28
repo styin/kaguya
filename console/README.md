@@ -10,7 +10,7 @@ Protocol surface this UI binds to is defined in `docs/spec-endpoint-v0.1.0.md` (
 cd console
 npm install     # first time
 npm run dev -- --runtime-config ../config/kaguya.local.toml --profile app
-npm test        # selection and launch-plan checks; no services started
+npm test        # selection, launch-plan and generation-projection checks; no services started
 ```
 
 The Vite dev server proxies `/ws` and `/health` to `127.0.0.1:8080` (Gateway). It starts the Rust `kaguya-supervisor` binary without auto-starting app processes, then proxies `/api/*` to the Supervisor HTTP/SSE API at `127.0.0.1:3001`. Runtime process and capability definitions live in `config/kaguya.runtime.toml`.
@@ -29,6 +29,12 @@ cards. The UI chooses launch ownership, without silently switching profiles:
 
 All children receive the same absolute runtime root/profile after process-level
 environment overrides, and process cwd resolves from that root's directory.
+Before creating children, Console asks Gateway's read-only `show-config` command
+to validate this exact root/profile and obtain its instance/session pair. It
+supplies the validated `KAGUYA_INSTANCE_ID` / `KAGUYA_SESSION_ID` after all child
+environment overrides. Missing or invalid identity fails startup. The preflight
+uses fixed arguments without a shell and compares canonical paths through the
+platform path API, including ordinary/verbatim Windows drive and UNC forms.
 Missing profiles, required process entries, commands, or cwd fail explicitly.
 The Console projection supports the documented single-line TOML selection and
 launch subset and rejects unsupported multiline/array-of-table syntax. Full
@@ -84,6 +90,12 @@ Direction is browser-relative (`in` = browser RECEIVES, `out` = browser SENDS). 
 
 Derived shapes — turn lists, streaming-turn lookups, message counters, TTFS, and audio byte totals — are pure selectors over these logs (`selectTurns`, `selectStreamingTurn`, etc.). No mirror message state or per-turn counters sit alongside them.
 
+The existing UI calls its rows "turns", but their wire identity is
+`generation_id`: one Talker dispatch. Sentence and emotion events carry that
+same ID and update only its matching assistant row. Missing or unknown IDs do
+not attach content to an unrelated open generation. Session bootstrap uses
+`instance_id` and `session_id` without a `conversation_id` alias.
+
 **Inference policy.** Anything that can be accurately and computationally derived from the log is derived (turn durations, first-sentence latencies, ingress/egress counters, streaming state). Anything that the gateway knows but doesn't send (tool calls or reasoner steps) is *not* faked — the regions where those would render are left empty (see "Future work" below).
 
 ## Modules
@@ -97,7 +109,7 @@ Derived shapes — turn lists, streaming-turn lookups, message counters, TTFS, a
 | TopBar — WS uptime | `regions/TopBar/TopBar.tsx` | `wsOpenedAt` observation | wired |
 | TopBar — msg counters (↑/↓) | `regions/TopBar/TopBar.tsx` | `selectWsInCount` / `selectWsOutCount` | wired |
 | TopBar — Shutdown button | `regions/TopBar/TopBar.tsx` | `POST /api/app/shutdown` via Supervisor | wired |
-| TopBar — session id | — | needs `session_init` egress event | **skeleton (omitted)** |
+| TopBar — session id | `regions/TopBar/TopBar.tsx` | authoritative `session_init` egress event | wired |
 | LeftRail — Mic strip (meter) | `regions/LeftRail/AudioStrip.tsx`, `audio/capture.ts`, `audio/meter.ts` | MediaStream → AnalyserNode | wired |
 | LeftRail — TTS strip (meter) | `regions/LeftRail/AudioStrip.tsx`, `audio/playback.ts`, `audio/meter.ts` | Playback worklet → AnalyserNode — front-end side ready, **but** no TTS audio reaches the browser today ([#36](https://github.com/styin/kaguya/issues/36)) | **bug: no audio source** |
 | LeftRail — Open-mic toggle | `regions/LeftRail/LeftRail.tsx` | `startCapture` lifecycle | wired |
@@ -126,7 +138,7 @@ Derived shapes — turn lists, streaming-turn lookups, message counters, TTFS, a
 For each **skeleton** row above, the underlying protocol expansion required. Pickable in any order.
 
 - [ ] **TTS audio path: talker → gateway → browser.** Today RealtimeTTS in `talker/voice/speaker.py` plays audio directly on the talker host's audio device — bytes never leave the Python process. `gateway/src/output.rs` has `OutputManager::send_audio()` and the WS-binary fanout in `gateway/src/endpoint.rs` is already wired, but nothing ever calls `send_audio()` because there's no source. Fix: (1) tap RealtimeTTS's `on_audio_chunk` callback (or wrap KokoroEngine) to copy synthesized PCM to an `asyncio.Queue`; (2) expose those bytes on a new TCP socket (e.g. `speaker_audio_port = 50057`), mirroring the mic-input direction on `:50056`; (3) add a Rust client in `gateway/src/listener.rs` (sibling of the existing audio forwarder) that connects, reads length-prefixed frames, and calls `output.send_audio(bytes)`. Once that lands the LeftRail TTS strip animates, TTFS resolves to real ms, and per-turn audio KB starts counting — no front-end changes needed. Tracked as [#36](https://github.com/styin/kaguya/issues/36).
-- [x] **`session_init` identity bootstrap.** Gateway emits the configured `instance_id` and `session_id` at WS-open; `conversation_id` remains the wire-compatible alias for `session_id`. TopBar shows the session chip. Transcript replay and durable session timing remain R1c/R7 work.
+- [x] **`session_init` identity bootstrap.** Gateway emits the configured `instance_id` and `session_id` at WS-open. TopBar shows the session chip. Transcript replay and durable session timing remain R1c/R7 work.
 - [ ] **`tool_call` egress event.** Emit from `gateway/src/main.rs` `ToolRequest` arm with `{ request_id, tool_name, args_json? }`. Timeline Tool lane plots a block at that ts; Inspector turn-detail surfaces a Tools section.
 - [ ] **`tool_result` egress event.** Emit when the P3 `ToolResult` arm processes a result. Same lane / section close out the block.
 - [ ] **`delegate_started` / `delegate_completed` egress events.** Emit from `DelegateRequest` and the reasoner-completed paths.
@@ -140,7 +152,7 @@ For each **skeleton** row above, the underlying protocol expansion required. Pic
 - [ ] **LogsPanel UX — resizable panel + buffer-cap control.** Drag handle on the top edge of the logs region with localStorage-persisted height (replaces today's fixed 240px expanded state). Settings affordance to bump `config.logBufferCap` at runtime — today it's a 5000-entry constant; long sessions silently drop older entries even though the counter is honest about the buffer-relative count.
 - [ ] **Talker structured logs visible in LogsPanel.** Symptom on the console side: the `talker` source filter shows almost nothing — only bare `print()` and the recording spinner survive. Root cause is in `talker/main.py`: `RealtimeSTT` / `RealtimeTTS` import side effects clobber the root logger's `basicConfig`. Fix is `logging.basicConfig(force=True, ...)` *after* those heavy imports inside `main()`. Backend change, console-visible benefit.
 - [ ] **Opus encoding on the audio path.** Today the mic upload is raw int16 PCM at 16 kHz over the WS (~256 kbps). Opus-encoding in `audio/capture.ts`'s worklet (with a matching decoder in `talker/voice/listener.py` — codec already gated by `audio_input_codec`) drops bandwidth ~10×. Symmetric work on the TTS download once [#36](https://github.com/styin/kaguya/issues/36) lands the audio path: encode in `talker/voice/speaker.py`, decode in `audio/playback.ts`'s worklet.
-- [ ] **Inspector debug surfaces + `/ws/debug` channel.** Gateway adds a Cargo-feature-gated `/ws/debug` egress carrying instrumentation events — Input Stream P0–P5 dispatches, raw `TalkerContext` per turn, raw `TalkerOutput` payload variants. Console adds a Debug tab in the right inspector that subscribes to that channel and renders structured viewers. Combined entry because the wire side and the UI side ship together.
+- [ ] **Inspector debug surfaces + `/ws/debug` channel.** Gateway adds a Cargo-feature-gated `/ws/debug` egress carrying instrumentation events — Input Stream P0–P5 dispatches, raw `GenerationStart` per generation, raw `TalkerOutput` payload variants. Console adds a Debug tab in the right inspector that subscribes to that channel and renders structured viewers. Combined entry because the wire side and the UI side ship together.
 
 ## Tree
 

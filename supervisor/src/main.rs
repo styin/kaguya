@@ -1,8 +1,8 @@
 use kaguya_supervisor::{
-    app::{InstanceSessionBinding, SupervisorApp},
+    app::{validate_session_ref, SupervisorApp},
     config::RuntimeConfig,
     deployment::{validate_manifest_location, Cli, DeploymentSelection, Operation},
-    server,
+    proto, server,
 };
 
 #[derive(serde::Deserialize)]
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("init-instance and rekey-instance are Gateway commands");
     }
     let selection = DeploymentSelection::discover(cli.options)?;
-    let resolved = RuntimeConfig::load_selected(&selection)?;
+    let mut resolved = RuntimeConfig::load_selected(&selection)?;
     validate_gateway_settings(&selection)?;
     let binding = validate_instance(&selection, cli.for_init)?;
     let addr: std::net::SocketAddr = resolved.config.supervisor_addr.parse()?;
@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let binding = binding
         .ok_or_else(|| anyhow::anyhow!("normal startup requires an initialized instance"))?;
+    resolved.config.set_instance_session(&binding)?;
     // Bind the control plane before launching Gateway. Gateway initializes its
     // SandboxClient during boot and must never race the Supervisor listener.
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -103,7 +104,7 @@ fn validate_gateway_settings(selection: &DeploymentSelection) -> anyhow::Result<
 fn validate_instance(
     selection: &DeploymentSelection,
     for_init: bool,
-) -> anyhow::Result<Option<InstanceSessionBinding>> {
+) -> anyhow::Result<Option<proto::SessionRef>> {
     let Some(manifest_path) = selection.manifest.as_deref() else {
         if for_init {
             return Ok(None);
@@ -131,12 +132,16 @@ fn validate_instance(
             manifest.schema_version
         );
     }
-    let binding = InstanceSessionBinding {
-        instance_id: manifest.instance_id,
-        session_id: manifest.default_session_id,
+    let binding = proto::SessionRef {
+        instance_id: Some(proto::InstanceId {
+            value: manifest.instance_id,
+        }),
+        session_id: Some(proto::SessionId {
+            value: manifest.default_session_id,
+        }),
     };
-    binding.validate()?;
-    let instance_dir = validate_manifest_location(manifest_path, &binding.instance_id)?;
+    let (instance_id, _) = validate_session_ref(Some(&binding))?;
+    let instance_dir = validate_manifest_location(manifest_path, instance_id)?;
     for name in ["SOUL.md", "IDENTITY.md"] {
         let path = instance_dir.join(name);
         if !path.is_file() {
@@ -262,7 +267,7 @@ mod tests {
         let binding = validate_instance(&fixture.selection, false)
             .unwrap()
             .unwrap();
-        assert_eq!(binding.instance_id, instance_id);
+        assert_eq!(validate_session_ref(Some(&binding)).unwrap().0, instance_id);
         let dir = fixture
             .selection
             .manifest

@@ -6,6 +6,13 @@
 **Audience:** Developers building and testing the Kaguya voice pipeline
 **Replaces:** M6 placeholder in `implementation-plan-v0.1.0.md`
 
+**Implementation status:** This document retains the full Console vision and deferred
+milestones below. Section 4.1 records the current hot-path wire format after the
+fixed-scope protocol cleanup. `/ws/debug`, its conceptual event types, and the
+associated inspector/persistence work remain proposals; this cleanup does not
+implement them. See [the Console README](../console/README.md) and
+[the implementation plan](implementation-plan-v0.1.0.md) for current delivery status.
+
 ---
 
 ## 1. Purpose
@@ -16,7 +23,7 @@ The Dev Console is a browser-based single-page application for developing and de
 - Text input fallback (type instead of talk)
 - Service lifecycle management (start/stop/restart Gateway, Talker, llama.cpp)
 - Real-time log viewing with configurable levels
-- Internal state observability (Input Stream events, TalkerContext, TalkerOutput)
+- Internal state observability (Input Stream events, GenerationStart, TalkerOutput)
 - Log persistence to disk
 
 The Dev Console is a **Phase 1 development tool**. It may be retained as a debug tool in Phase 2 (OpenPod) or retired. No production user-facing logic lives here.
@@ -49,7 +56,7 @@ The Dev Console is a **Phase 1 development tool**. It may be retained as a debug
 | Endpoint     | Purpose                                        | Traffic Profile         |
 | ------------ | ---------------------------------------------- | ----------------------- |
 | `/ws`        | Hot path: audio binary frames, text commands, control signals, conversation metadata | High-frequency (50fps audio) |
-| `/ws/debug`  | Cold path: log stream, Input Stream events, TalkerContext snapshots, TalkerOutput events, process health | Low-frequency (event-driven) |
+| `/ws/debug`  | Cold path: log stream, Input Stream events, GenerationStart snapshots, TalkerOutput events, process health | Low-frequency (event-driven) |
 
 **Rationale:** Separating debug telemetry from the hot path ensures observability cannot degrade audio latency. The debug channel adds zero overhead when no client is connected (sender is `Option<mpsc::Sender>` — events are only cloned when a debug client exists).
 
@@ -65,7 +72,7 @@ dev-console = []
 When enabled:
 - The `/ws/debug` WebSocket endpoint is compiled in and served alongside `/ws`.
 - The main event loop clones events to an optional `debug_tx: Option<mpsc::Sender<DebugEvent>>` as they flow through `tokio::select!`.
-- `TalkerContext` is serialized to JSON and forwarded to the debug channel before dispatch.
+- `GenerationStart` is serialized to JSON and forwarded to the debug channel before dispatch.
 - `TalkerOutput` messages are forwarded to the debug channel as they arrive.
 - Gateway log output (tracing spans) is tee'd to the debug channel via a custom `tracing_subscriber::Layer`.
 
@@ -119,25 +126,46 @@ The dev console supports **exactly one connected browser client** at a time. The
 
 **Gateway → Client (egress):**
 
+JSON metadata uses an `event_type` discriminator and a nested `data` object.
+
 | Frame Type | Format | Source |
 | ---------- | ------ | ------ |
 | Binary | Raw PCM bytes (TTS audio) | Talker TTS output |
-| Text/JSON | `{"type": "sentence", "text": "..."}` | TalkerOutput::SentenceEvent |
-| Text/JSON | `{"type": "emotion", "emotion": "joy"}` | TalkerOutput::EmotionEvent |
-| Text/JSON | `{"type": "response_started", "turn_id": "..."}` | TalkerOutput::ResponseStarted |
-| Text/JSON | `{"type": "response_complete", "turn_id": "...", "interrupted": false}` | TalkerOutput::ResponseComplete |
+| Text/JSON | `{"event_type":"session_init","data":{"instance_id":"...","session_id":"..."}}` | Gateway's configured session reference, sent at WS-open |
+| Text/JSON | `{"event_type":"sentence","data":{"generation_id":"...","text":"..."}}` | Talker sentence plus validated output-envelope generation |
+| Text/JSON | `{"event_type":"emotion","data":{"generation_id":"...","emotion":"joy"}}` | Talker emotion plus validated output-envelope generation |
+| Text/JSON | `{"event_type":"response_started","data":{"generation_id":"..."}}` | TalkerOutput::ResponseStarted |
+| Text/JSON | `{"event_type":"response_complete","data":{"generation_id":"...","interrupted":false}}` | TalkerOutput::ResponseComplete |
+| Text/JSON | `{"event_type":"user_input","data":{"text":"..."}}` | Voice transcript echo; typed prompts are recorded locally |
 
-### 4.2 Debug Path: `/ws/debug` (new, feature-gated)
+`session_init` contains only the canonical `instance_id` and `session_id`
+association; it has no compatibility alias. The manifest's `default_session_id`
+remains the persisted startup selection. One Gateway serves one configured
+instance/session pair; browser ingress implicitly belongs to that pair and does
+not select a session or introduce multiplexing.
 
-All messages are JSON. Direction is Gateway → Client only (read-only telemetry).
+Each Converse RPC carries one `GenerationStart`. Its `session` is the protobuf
+`SessionRef` containing the distinct `InstanceId` and `SessionId` objects. Gateway
+checks every `TalkerOutput.generation_id` against the generation that opened the
+stream and queues the protobuf directly. The WebSocket adapter projects that
+validated envelope field into `data`; individual payloads do not duplicate it.
+The Console uses it to attach output to the originating assistant generation,
+including delayed output, rather than whichever response is most recently open.
+Unknown or missing generation references do not mutate another projection.
+
+
+### 4.2 Debug Path: `/ws/debug` (proposed, feature-gated)
+
+The following conceptual messages remain deferred. All are JSON; event direction
+is Gateway → Client (read-only telemetry).
 
 ```typescript
 // Union type for all debug messages
 type DebugMessage =
   | { type: "log"; level: "DEBUG" | "INFO" | "WARN" | "ERROR"; target: string; message: string; timestamp: string }
   | { type: "input_event"; priority: "P0" | "P1" | "P2" | "P3" | "P4" | "P5"; event: string; detail: object; timestamp: string }
-  | { type: "talker_context"; turn_id: string; context: object; timestamp: string }
-  | { type: "talker_output"; seq: number; payload_type: string; payload: object; timestamp: string }
+  | { type: "generation_start"; generation_id: string; start: object; timestamp: string }
+  | { type: "talker_output"; generation_id: string; seq: number; payload_type: string; payload: object; timestamp: string }
   | { type: "process_health"; processes: ProcessStatus[]; timestamp: string }
   | { type: "state_snapshot"; history_len: number; active_tasks: number; silence_timer: string | null; timestamp: string }
 
@@ -195,7 +223,7 @@ Single-page layout. Three horizontal regions, top to bottom:
 │  CONVERSATION              │  INSPECTOR          │
 │                            │                     │
 │  [User]: What time is it?  │  ▸ Input Stream     │
-│  [Kaguya]: It's 3:42 PM.  │  ▸ TalkerContext     │
+│  [Kaguya]: It's 3:42 PM.  │  ▸ GenerationStart   │
 │  [Emotion: neutral]        │  ▸ TalkerOutput     │
 │                            │  ▸ Process Health    │
 │                            │                     │
@@ -230,7 +258,7 @@ Single-page layout. Three horizontal regions, top to bottom:
 Collapsible sections showing real-time internal state from `/ws/debug`:
 
 - **Input Stream:** Live feed of events entering the priority queue. Each event shows: priority level (P0-P5), event type, timestamp, and a one-line summary. Color-coded by priority.
-- **TalkerContext:** The most recent context package sent to the Talker, rendered as a collapsible JSON tree. Shows: user_input, history length, memory_contents (truncated), tool list, active tasks.
+- **GenerationStart:** The most recent generation request, rendered as a collapsible JSON tree. Shows: `session`, `generation_id`, typed `trigger`, and `prompt_context` (history length, truncated memory contents, tools, active tasks, retrieval results). Persona remains a separate `UpdatePersona` operation.
 - **TalkerOutput:** The most recent TalkerOutput stream rendered event-by-event: ResponseStarted, SentenceEvent, EmotionEvent, ToolRequest, DelegateRequest, ResponseComplete. Each with seq number and timestamp.
 - **Process Health:** Current status of each managed process. Updated on a poll interval (every 5s from Gateway).
 
@@ -375,8 +403,8 @@ All changes are in `gateway/src/endpoint.rs` (and new `gateway/src/endpoint/debu
 pub enum DebugEvent {
     Log { level: String, target: String, message: String },
     InputEvent { priority: u8, event_type: String, detail: serde_json::Value },
-    TalkerContext { turn_id: String, context: serde_json::Value },
-    TalkerOutput { seq: u32, payload_type: String, payload: serde_json::Value },
+    GenerationStart { generation_id: String, start: serde_json::Value },
+    TalkerOutput { generation_id: String, seq: u32, payload_type: String, payload: serde_json::Value },
     ProcessHealth { processes: Vec<ProcessStatus> },
     StateSnapshot { history_len: usize, active_tasks: usize, silence_timer: Option<String> },
 }
@@ -532,11 +560,11 @@ No new port needed — `/ws/debug` is an additional route on the same axum serve
 ### E4 — Debug Channel + Inspector
 
 - [ ] **Gateway:** Add `#[cfg(feature = "dev-console")]` gated `/ws/debug` endpoint.
-- [ ] **Gateway:** Add `debug_tx` channel. Clone Input Stream events, TalkerContext, TalkerOutput to it.
+- [ ] **Gateway:** Add `debug_tx` channel. Clone Input Stream events, GenerationStart, TalkerOutput to it.
 - [ ] **Gateway:** Add custom tracing Layer to forward logs to `debug_tx`.
 - [ ] **UI:** Implement `/ws/debug` connection manager (`ws/debug.ts`).
-- [ ] **UI:** Inspector panel: Input Stream feed, TalkerContext viewer, TalkerOutput viewer, Process Health.
-- [ ] **Done when:** Can see Input Stream events flow in real-time, inspect TalkerContext JSON, watch TalkerOutput sequence.
+- [ ] **UI:** Inspector panel: Input Stream feed, GenerationStart viewer, TalkerOutput viewer, Process Health.
+- [ ] **Done when:** Can see Input Stream events flow in real-time, inspect GenerationStart JSON, watch TalkerOutput sequence.
 
 ### E5 — Log Panel + Persistence
 
@@ -629,7 +657,7 @@ Everything in sections 4.2, 5.3, 9, and milestones E4–E5's debug-introspection
 - `/ws/debug` separate channel — just use `/ws` for everything. Split later if needed.
 - Cargo feature flag `dev-console` — use a runtime config toggle or just always-on during dev.
 - Custom `tracing_subscriber::Layer` — supervisor captures stdout, that's the log source.
-- Inspector panel (Input Stream events, TalkerContext viewer, TalkerOutput viewer) — defer entirely.
+- Inspector panel (Input Stream events, GenerationStart viewer, TalkerOutput viewer) — defer entirely.
 - State snapshots over WebSocket.
 - `DebugEvent` enum and Gateway-side debug instrumentation.
 
@@ -729,7 +757,7 @@ These are already stubbed via `EndpointState.audio_out_rx` and `EndpointState.me
 
 v0 graduates to the full spec (sections 1–14) when:
 
-1. You find yourself wanting to inspect Input Stream events or TalkerContext during debugging — triggers E4.
+1. You find yourself wanting to inspect Input Stream events or GenerationStart during debugging — triggers E4.
 2. Localhost audio bandwidth becomes a concern — triggers Opus encoding (EQ1).
 3. The single `/ws` channel shows measurable latency from debug traffic — triggers `/ws/debug` split.
 

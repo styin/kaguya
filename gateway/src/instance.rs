@@ -10,8 +10,37 @@ use uuid::Uuid;
 
 use crate::config::GatewayConfig;
 use crate::deployment::{validate_manifest_location, DeploymentSelection};
+use crate::proto::{self, SessionRef};
 
 const SCHEMA_VERSION: u32 = 1;
+
+/// Validate generated request/runtime scope and borrow its scalar boundary IDs.
+pub fn validate_session_ref(session: Option<&SessionRef>) -> Result<(&str, &str)> {
+    let session = session.context("session reference is required")?;
+    let instance = session
+        .instance_id
+        .as_ref()
+        .context("instance_id is required")?
+        .value
+        .as_str();
+    let selected = session
+        .session_id
+        .as_ref()
+        .context("session_id is required")?
+        .value
+        .as_str();
+    for (field, value) in [("instance_id", instance), ("session_id", selected)] {
+        let id = Uuid::parse_str(value)
+            .map_err(|_| anyhow::anyhow!("{field} must be a canonical non-nil UUID"))?;
+        if id.is_nil() || id.to_string() != value {
+            bail!("{field} must be a canonical non-nil UUID");
+        }
+    }
+    if instance == selected {
+        bail!("instance_id and session_id must differ");
+    }
+    Ok((instance, selected))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,35 +68,18 @@ pub struct InstanceLease {
 }
 
 impl InstanceIdentity {
-    pub fn grpc_request<T>(&self, payload: T) -> tonic::Request<T> {
-        let mut request = tonic::Request::new(payload);
-        request.metadata_mut().insert(
-            "x-kaguya-instance-id",
-            self.instance_id.parse().expect("validated instance UUID"),
-        );
-        request.metadata_mut().insert(
-            "x-kaguya-session-id",
-            self.default_session_id
-                .parse()
-                .expect("validated session UUID"),
-        );
-        request
-    }
-
-    pub fn audio_header(&self) -> [u8; 39] {
-        let mut header = [0u8; 39];
-        header[..7].copy_from_slice(b"KAGUYA1");
-        header[7..23].copy_from_slice(
-            Uuid::parse_str(&self.instance_id)
-                .expect("validated instance UUID")
-                .as_bytes(),
-        );
-        header[23..39].copy_from_slice(
-            Uuid::parse_str(&self.default_session_id)
-                .expect("validated session UUID")
-                .as_bytes(),
-        );
-        header
+    /// Project the persisted manifest onto the validated runtime association.
+    pub fn session_ref(&self) -> Result<SessionRef> {
+        let session = SessionRef {
+            instance_id: Some(proto::InstanceId {
+                value: self.instance_id.clone(),
+            }),
+            session_id: Some(proto::SessionId {
+                value: self.default_session_id.clone(),
+            }),
+        };
+        validate_session_ref(Some(&session))?;
+        Ok(session)
     }
 
     fn new() -> Self {
@@ -82,15 +94,7 @@ impl InstanceIdentity {
         if self.schema_version != SCHEMA_VERSION {
             bail!("unsupported instance manifest schema version");
         }
-        for value in [&self.instance_id, &self.default_session_id] {
-            let id = Uuid::parse_str(value).context("invalid instance/session UUID")?;
-            if id.is_nil() || id.to_string() != *value {
-                bail!("instance/session IDs must be non-nil canonical UUIDs");
-            }
-        }
-        if self.instance_id == self.default_session_id {
-            bail!("instance_id and default_session_id must differ");
-        }
+        self.session_ref()?;
         Ok(())
     }
 }
@@ -294,6 +298,48 @@ pub fn rekey_instance(selection: &DeploymentSelection) -> Result<(InstanceIdenti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_session_reference_validates_required_canonical_distinct_ids() {
+        let identity = InstanceIdentity {
+            schema_version: SCHEMA_VERSION,
+            instance_id: "01234567-89ab-4cde-8fab-0123456789ab".into(),
+            default_session_id: "fedcba98-7654-4321-8fed-cba987654321".into(),
+        };
+        let session = identity.session_ref().unwrap();
+        assert_eq!(
+            validate_session_ref(Some(&session)).unwrap(),
+            (
+                identity.instance_id.as_str(),
+                identity.default_session_id.as_str()
+            )
+        );
+        assert!(validate_session_ref(None).is_err());
+        assert!(validate_session_ref(Some(&SessionRef::default())).is_err());
+        let mut missing = session.clone();
+        missing.instance_id = None;
+        assert!(validate_session_ref(Some(&missing)).is_err());
+        missing = session.clone();
+        missing.session_id = None;
+        assert!(validate_session_ref(Some(&missing)).is_err());
+        for invalid in [
+            "",
+            "not-a-uuid",
+            "00000000-0000-0000-0000-000000000000",
+            "01234567-89AB-4CDE-8FAB-0123456789AB",
+            "0123456789ab4cde8fab0123456789ab",
+        ] {
+            let mut wrong_instance = session.clone();
+            wrong_instance.instance_id.as_mut().unwrap().value = invalid.into();
+            assert!(validate_session_ref(Some(&wrong_instance)).is_err());
+            let mut wrong_session = session.clone();
+            wrong_session.session_id.as_mut().unwrap().value = invalid.into();
+            assert!(validate_session_ref(Some(&wrong_session)).is_err());
+        }
+        let mut same_ids = session;
+        same_ids.session_id.as_mut().unwrap().value = identity.instance_id;
+        assert!(validate_session_ref(Some(&same_ids)).is_err());
+    }
 
     fn deployment(root: &Path, manifest_reference: Option<&str>) -> DeploymentSelection {
         let manifest = manifest_reference

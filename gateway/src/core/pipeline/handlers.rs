@@ -1,6 +1,6 @@
 //! Pipeline handlers — pure decision functions for each event variant.
 //!
-//! Each handler takes `&mut TurnState` plus pre-fetched data and returns
+//! Each handler takes `&mut SessionState` plus pre-fetched data and returns
 //! `Vec<PipelineAction>`. The orchestrator in `run.rs` pre-fetches
 //! async data (history, tools, retrieval), calls the handler, then
 //! passes the returned actions to the executor.
@@ -13,28 +13,37 @@ use crate::context;
 use crate::proto;
 use crate::types::{ActiveTask, DispatchKind};
 
-use super::types::{PipelineAction, TurnState};
+use super::types::{PipelineAction, SessionState};
 
 /// Reset the response buffer and notify clients. Called on `ResponseStarted`.
-pub fn handle_response_started(state: &mut TurnState, turn_id: &str) -> Vec<PipelineAction> {
+pub fn handle_response_started(
+    state: &mut SessionState,
+    generation_id: &str,
+) -> Vec<PipelineAction> {
     state.current_response.clear();
     vec![PipelineAction::SendResponseStarted {
-        turn_id: turn_id.to_string(),
+        generation_id: generation_id.to_string(),
     }]
 }
 
 /// Accumulate sentence text and forward to output. Called on `Sentence`.
-pub fn handle_sentence(state: &mut TurnState, text: &str) -> Vec<PipelineAction> {
+pub fn handle_sentence(
+    state: &mut SessionState,
+    generation_id: &str,
+    text: &str,
+) -> Vec<PipelineAction> {
     state.current_response.push_str(text);
     state.current_response.push(' ');
     vec![PipelineAction::SendSentence {
+        generation_id: generation_id.to_string(),
         text: text.to_string(),
     }]
 }
 
 /// Forward emotion tag to output. Called on `Emotion`.
-pub fn handle_emotion(emotion: &str) -> Vec<PipelineAction> {
+pub fn handle_emotion(generation_id: &str, emotion: &str) -> Vec<PipelineAction> {
     vec![PipelineAction::SendEmotion {
+        generation_id: generation_id.to_string(),
         emotion: emotion.to_string(),
     }]
 }
@@ -93,10 +102,10 @@ pub fn handle_barge_in_ack(spoken_text: &str) -> Vec<PipelineAction> {
 /// Finalize a Talker response. On non-interrupted completions: appends
 /// assistant history, conditionally persists a RAG memory (only for
 /// `UserIntent` rounds), updates persona, and prefills cache. Always
-/// resets turn state and restarts silence timers.
+/// resets generation state and restarts silence timers.
 pub fn handle_response_complete(
-    state: &mut TurnState,
-    turn_id: &str,
+    state: &mut SessionState,
+    generation_id: &str,
     was_interrupted: bool,
     last_user_input: Option<String>,
 ) -> Vec<PipelineAction> {
@@ -118,7 +127,7 @@ pub fn handle_response_complete(
                     actions.push(PipelineAction::EvaluateAndStoreMemory {
                         user_input: ui,
                         assistant_response: text,
-                        turn_id: state.last_turn_id.clone(),
+                        generation_id: state.last_user_generation_id.clone(),
                     });
                 }
             }
@@ -128,7 +137,7 @@ pub fn handle_response_complete(
         actions.push(PipelineAction::PrefillCache);
     }
 
-    // Reset turn state regardless of interruption.
+    // Reset generation state regardless of interruption.
     state.cancel_active_silence();
     actions.push(PipelineAction::StartSilenceTimers);
     actions.push(PipelineAction::UnmuteOutput);
@@ -137,7 +146,7 @@ pub fn handle_response_complete(
     state.current_response.clear();
 
     actions.push(PipelineAction::SendResponseComplete {
-        turn_id: turn_id.to_string(),
+        generation_id: generation_id.to_string(),
         was_interrupted,
     });
 
@@ -148,7 +157,7 @@ pub fn handle_response_complete(
 /// Echoes voice input and cancels silence regardless of Talker readiness.
 /// Appends history, builds context, and dispatches only when Talker is ready.
 pub fn handle_user_intent(
-    state: &mut TurnState,
+    state: &mut SessionState,
     text: &str,
     is_voice: bool,
     talker_ready: bool,
@@ -177,12 +186,12 @@ pub fn handle_user_intent(
         text: text.to_string(),
     });
 
-    let turn_id = Uuid::new_v4().to_string();
-    state.last_turn_id = turn_id.clone();
+    let generation_id = Uuid::new_v4().to_string();
+    state.last_user_generation_id = generation_id.clone();
 
     let ctx = context::assemble_from_data(
-        &state.conversation_id,
-        &turn_id,
+        &state.scope,
+        &generation_id,
         text,
         history,
         &state.last_memory_md,
@@ -203,14 +212,14 @@ pub fn handle_user_intent(
 }
 
 /// P2: Barge-in on speech start — cancel silence, interrupt Talker, mute output.
-pub fn handle_vad_speech_start(state: &mut TurnState) -> Vec<PipelineAction> {
+pub fn handle_vad_speech_start(state: &mut SessionState) -> Vec<PipelineAction> {
     state.cancel_active_silence();
     vec![PipelineAction::BargeIn, PipelineAction::MuteOutput]
 }
 
 /// P3: Record a tool result in history and dispatch a continuation to Talker.
 pub fn handle_tool_result(
-    state: &mut TurnState,
+    state: &mut SessionState,
     request_id: &str,
     tool_name: &str,
     content: &str,
@@ -226,10 +235,10 @@ pub fn handle_tool_result(
         content: content.to_string(),
     });
 
-    let turn_id = Uuid::new_v4().to_string();
+    let generation_id = Uuid::new_v4().to_string();
     let ctx = context::with_tool_result_from_data(
-        &state.conversation_id,
-        &turn_id,
+        &state.scope,
+        &generation_id,
         request_id,
         content,
         history,
@@ -255,7 +264,8 @@ pub fn handle_tool_result(
 /// P3: Narrate a reasoner step to the user. Suppressed if the narration
 /// filter rejects it or a generation is already active.
 pub fn handle_reasoner_step(
-    state: &mut TurnState,
+    state: &mut SessionState,
+    task_id: &str,
     description: &str,
     should_narrate: bool,
     talker_ready: bool,
@@ -269,10 +279,11 @@ pub fn handle_reasoner_step(
         return vec![];
     }
 
-    let turn_id = Uuid::new_v4().to_string();
+    let generation_id = Uuid::new_v4().to_string();
     let ctx = context::for_narration_from_data(
-        &state.conversation_id,
-        &turn_id,
+        &state.scope,
+        &generation_id,
+        task_id,
         description,
         history,
         &state.last_memory_md,
@@ -292,7 +303,7 @@ pub fn handle_reasoner_step(
 
 /// P3: Record a completed reasoner summary and dispatch continuation to Talker.
 pub fn handle_reasoner_completed(
-    state: &mut TurnState,
+    state: &mut SessionState,
     task_id: &str,
     summary: &str,
     talker_ready: bool,
@@ -307,10 +318,10 @@ pub fn handle_reasoner_completed(
         content: summary.to_string(),
     });
 
-    let turn_id = Uuid::new_v4().to_string();
+    let generation_id = Uuid::new_v4().to_string();
     let ctx = context::with_reasoner_result_from_data(
-        &state.conversation_id,
-        &turn_id,
+        &state.scope,
+        &generation_id,
         task_id,
         summary,
         history,
@@ -338,7 +349,7 @@ pub fn handle_reasoner_completed(
 /// P4: Proactive re-engagement after silence. Gated by config and
 /// suppressed when a generation is already active.
 pub fn handle_silence(
-    state: &mut TurnState,
+    state: &mut SessionState,
     duration: Duration,
     silence_enabled: bool,
     talker_ready: bool,
@@ -353,10 +364,10 @@ pub fn handle_silence(
         return vec![];
     }
 
-    let turn_id = Uuid::new_v4().to_string();
+    let generation_id = Uuid::new_v4().to_string();
     let ctx = context::for_silence_from_data(
-        &state.conversation_id,
-        &turn_id,
+        &state.scope,
+        &generation_id,
         duration,
         history,
         &state.last_memory_md,
@@ -379,8 +390,18 @@ pub fn handle_silence(
 mod tests {
     use super::*;
 
-    fn fresh_state() -> TurnState {
-        TurnState::new("conv-test".into(), "# Memory".into())
+    fn fresh_state() -> SessionState {
+        SessionState::new(
+            proto::SessionRef {
+                instance_id: Some(proto::InstanceId {
+                    value: "00000000-0000-4000-8000-000000000001".into(),
+                }),
+                session_id: Some(proto::SessionId {
+                    value: "00000000-0000-4000-8000-000000000002".into(),
+                }),
+            },
+            "# Memory".into(),
+        )
     }
 
     // ── TalkerOutput handlers ──────────────────────────────────────
@@ -396,7 +417,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![PipelineAction::SendResponseStarted {
-                turn_id: "turn-1".into()
+                generation_id: "turn-1".into()
             }]
         );
     }
@@ -405,13 +426,14 @@ mod tests {
     fn sentence_accumulates_in_response_buffer() {
         let mut state = fresh_state();
 
-        handle_sentence(&mut state, "Hello");
-        let actions = handle_sentence(&mut state, "world");
+        handle_sentence(&mut state, "generation-1", "Hello");
+        let actions = handle_sentence(&mut state, "generation-1", "world");
 
         assert_eq!(state.current_response, "Hello world ");
         assert_eq!(
             actions,
             vec![PipelineAction::SendSentence {
+                generation_id: "generation-1".into(),
                 text: "world".into()
             }]
         );
@@ -419,10 +441,11 @@ mod tests {
 
     #[test]
     fn emotion_returns_send_emotion() {
-        let actions = handle_emotion("happy");
+        let actions = handle_emotion("generation-1", "happy");
         assert_eq!(
             actions,
             vec![PipelineAction::SendEmotion {
+                generation_id: "generation-1".into(),
                 emotion: "happy".into()
             }]
         );
@@ -494,7 +517,7 @@ mod tests {
         let mut state = fresh_state();
         state.current_response = "The answer is 42. ".into();
         state.current_dispatch_kind = Some(DispatchKind::UserIntent);
-        state.last_turn_id = "turn-abc".into();
+        state.last_user_generation_id = "turn-abc".into();
 
         let actions = handle_response_complete(
             &mut state,
@@ -551,13 +574,13 @@ mod tests {
         // Still resets silence and sends complete.
         assert!(actions.contains(&PipelineAction::StartSilenceTimers));
         assert!(actions.contains(&PipelineAction::SendResponseComplete {
-            turn_id: "turn-int".into(),
+            generation_id: "turn-int".into(),
             was_interrupted: true,
         }));
     }
 
     #[test]
-    fn response_complete_resets_turn_state() {
+    fn response_complete_resets_generation_state() {
         let mut state = fresh_state();
         state.current_response = "text ".into();
         state.current_dispatch_kind = Some(DispatchKind::UserIntent);
@@ -777,6 +800,7 @@ mod tests {
 
         let actions = handle_reasoner_step(
             &mut state,
+            "task-1",
             "analyzing data",
             true, // should_narrate
             true, // talker_ready
@@ -798,6 +822,7 @@ mod tests {
 
         let actions = handle_reasoner_step(
             &mut state,
+            "task-1",
             "step 2",
             false, // filtered out
             true,
@@ -812,7 +837,7 @@ mod tests {
         let mut state = fresh_state();
         state.active_gen = Some(tokio_util::sync::CancellationToken::new());
 
-        let actions = handle_reasoner_step(&mut state, "step 3", true, true, vec![]);
+        let actions = handle_reasoner_step(&mut state, "task-1", "step 3", true, true, vec![]);
 
         assert!(actions.is_empty());
     }
@@ -928,7 +953,7 @@ mod tests {
         let mut state = fresh_state();
         state.current_response = "   ".into(); // whitespace only
         state.current_dispatch_kind = Some(DispatchKind::UserIntent);
-        state.last_turn_id = "turn-empty".into();
+        state.last_user_generation_id = "turn-empty".into();
 
         let actions = handle_response_complete(
             &mut state,
@@ -999,7 +1024,7 @@ mod tests {
         let mut state = fresh_state();
         state.current_response = "response text ".into();
         state.current_dispatch_kind = Some(DispatchKind::UserIntent);
-        state.last_turn_id = "turn-ord".into();
+        state.last_user_generation_id = "turn-ord".into();
 
         let actions =
             handle_response_complete(&mut state, "turn-ord", false, Some("user msg".into()));
@@ -1133,7 +1158,14 @@ mod tests {
     fn reasoner_step_clears_dispatch_kind_when_not_ready() {
         let mut state = fresh_state();
 
-        let actions = handle_reasoner_step(&mut state, "thinking about it", true, false, vec![]);
+        let actions = handle_reasoner_step(
+            &mut state,
+            "task-1",
+            "thinking about it",
+            true,
+            false,
+            vec![],
+        );
 
         assert!(actions.is_empty());
         assert!(state.current_dispatch_kind.is_none());

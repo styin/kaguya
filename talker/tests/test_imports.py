@@ -119,12 +119,12 @@ def test_proto_stubs_importable():
 
     # Talker: bidi Converse — TalkerInput.start | barge_in, TalkerOutput.barge_in_ack
     assert kaguya_pb2.TalkerInput() is not None
-    assert kaguya_pb2.TalkerContext() is not None
+    assert kaguya_pb2.GenerationStart() is not None
     assert kaguya_pb2.TalkerOutput() is not None
     assert kaguya_pb2.BargeInSignal() is not None
     assert kaguya_pb2.BargeInAck() is not None
 
-    # RAG retrieval results carried in TalkerContext
+    # RAG retrieval results carried in GenerationStart
     assert kaguya_pb2.RetrievalResult() is not None
 
     # Reasoner: Delegate(stream DelegateInput) → DelegateOutput; Interrupt(InterruptRequest)

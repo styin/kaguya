@@ -13,7 +13,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::app::{InstanceSessionBinding, SupervisorApp};
+use crate::app::SupervisorApp;
+use crate::proto;
 use crate::telemetry::IncomingTelemetryEvent;
 
 #[derive(Debug, Deserialize)]
@@ -63,12 +64,39 @@ pub fn router(app: SupervisorApp) -> Router {
         .with_state(app)
 }
 
+// HTTP keeps its existing flat camelCase contract. Internal owners and gRPC
+// control use the generated protobuf object directly.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BindSessionRequest {
+    instance_id: String,
+    session_id: String,
+}
+
+fn http_session_ref(instance_id: &str, session_id: &str) -> proto::SessionRef {
+    proto::SessionRef {
+        instance_id: Some(proto::InstanceId {
+            value: instance_id.to_owned(),
+        }),
+        session_id: Some(proto::SessionId {
+            value: session_id.to_owned(),
+        }),
+    }
+}
+
 async fn bind_instance_session(
     State(app): State<SupervisorApp>,
-    Json(binding): Json<InstanceSessionBinding>,
+    Json(request): Json<BindSessionRequest>,
 ) -> impl IntoResponse {
+    let binding = http_session_ref(&request.instance_id, &request.session_id);
     match app.bind_instance_session(binding).await {
-        Ok(binding) => (axum::http::StatusCode::OK, Json(serde_json::json!(binding))),
+        Ok(_) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "instanceId": request.instance_id,
+                "sessionId": request.session_id,
+            })),
+        ),
         Err(error) => (
             axum::http::StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": error.to_string() })),
@@ -145,10 +173,7 @@ async fn sandbox_acquire(
     State(app): State<SupervisorApp>,
     Json(request): Json<SandboxAcquireRequest>,
 ) -> Json<SandboxAcquireResponse> {
-    let binding = InstanceSessionBinding {
-        instance_id: request.instance_id,
-        session_id: request.session_id,
-    };
+    let binding = http_session_ref(&request.instance_id, &request.session_id);
     match app.acquire_sandbox(&binding, &request.allocation_id).await {
         Ok(handle) => Json(SandboxAcquireResponse {
             handle: Some(handle),
@@ -180,10 +205,7 @@ async fn sandbox_execute(
     Path(handle): Path<String>,
     Json(request): Json<SandboxExecuteRequest>,
 ) -> Json<SandboxExecuteResponse> {
-    let binding = InstanceSessionBinding {
-        instance_id: request.instance_id,
-        session_id: request.session_id,
-    };
+    let binding = http_session_ref(&request.instance_id, &request.session_id);
     Json(SandboxExecuteResponse {
         content: app
             .execute_in_sandbox(&binding, &handle, &request.request_id, &request.args_json)
@@ -203,10 +225,7 @@ async fn sandbox_release(
     Path(handle): Path<String>,
     Json(request): Json<SandboxReleaseRequest>,
 ) -> Json<ActionResult> {
-    let binding = InstanceSessionBinding {
-        instance_id: request.instance_id,
-        session_id: request.session_id,
-    };
+    let binding = http_session_ref(&request.instance_id, &request.session_id);
     Json(action_result(app.release_sandbox(&binding, &handle).await))
 }
 
@@ -253,10 +272,7 @@ async fn telemetry_ingest(
 ) -> Result<Json<crate::telemetry::TelemetryEvent>, (axum::http::StatusCode, Json<serde_json::Value>)>
 {
     let binding = match (&request.instance_id, &request.session_id) {
-        (Some(instance_id), Some(session_id)) => InstanceSessionBinding {
-            instance_id: instance_id.clone(),
-            session_id: session_id.clone(),
-        },
+        (Some(instance_id), Some(session_id)) => http_session_ref(instance_id, session_id),
         _ => {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
@@ -266,12 +282,7 @@ async fn telemetry_ingest(
             ))
         }
     };
-    if request
-        .conversation_id
-        .as_ref()
-        .is_some_and(|id| id != &binding.session_id)
-        || app.require_instance_session(&binding).await.is_err()
-    {
+    if app.require_instance_session(&binding).await.is_err() {
         return Err((
             axum::http::StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "telemetry instance/session correlation mismatch"})),
@@ -383,6 +394,21 @@ mod tests {
         let session_id = uuid::Uuid::new_v4().to_string();
         let allocation_id = uuid::Uuid::new_v4().to_string();
         let binding = serde_json::json!({"instanceId": instance_id, "sessionId": session_id});
+        let invalid_bind = client
+            .post(format!("{base}/api/owner/bind"))
+            .json(&serde_json::json!({"instanceId": "invalid", "sessionId": session_id}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid_bind.status(), axum::http::StatusCode::CONFLICT);
+        let nested_bind = client
+            .post(format!("{base}/api/owner/bind"))
+            .json(&serde_json::json!({"instanceId": {"value": instance_id}, "sessionId": {"value": session_id}}))
+            .send().await.unwrap();
+        assert_eq!(
+            nested_bind.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
         let bound = client
             .post(format!("{base}/api/owner/bind"))
             .json(&binding)
@@ -390,6 +416,11 @@ mod tests {
             .await
             .unwrap();
         assert!(bound.status().is_success());
+        assert_eq!(
+            bound.json::<serde_json::Value>().await.unwrap(),
+            binding,
+            "HTTP binding response stays flat camelCase despite generated internal IDs"
+        );
         let other_instance = uuid::Uuid::new_v4().to_string();
         let rejected_bind = client
             .post(format!("{base}/api/owner/bind"))
@@ -537,8 +568,7 @@ mod tests {
                 "kind": "rag.retrieve.completed",
                 "instanceId": instance_id,
                 "sessionId": session_id,
-                "conversationId": session_id,
-                "turnId": "turn",
+                "generationId": "generation",
                 "fields": {
                     "duration_ms": 9,
                     "fused_hits": 2,
@@ -553,6 +583,10 @@ mod tests {
             .unwrap();
         assert_eq!(event["kind"], "rag.retrieve.completed");
         assert_eq!(event["instanceId"], instance_id);
+        assert_eq!(event["sessionId"], session_id);
+        assert_eq!(event["generationId"], "generation");
+        assert!(event.get("conversationId").is_none());
+        assert!(event.get("turnId").is_none());
         assert_eq!(event["id"], 1);
 
         let events: serde_json::Value = client

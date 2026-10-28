@@ -1,27 +1,40 @@
 syntax = "proto3";
 package kaguya.v1;
 
+// Distinct ID types keep instance and session roles explicit in generated APIs.
+// Receivers still validate canonical, non-nil UUIDs and the accepted pair.
+message InstanceId {
+  string value = 1;
+}
+message SessionId {
+  string value = 1;
+}
+message SessionRef {
+  InstanceId instance_id = 1;
+  SessionId session_id = 2;
+}
+
 // ─────────────────────────────────────────────
 // SHARED TYPES
 // ─────────────────────────────────────────────
 
 enum Role {
   ROLE_UNSPECIFIED = 0;
-  ROLE_SYSTEM      = 1;
-  ROLE_USER        = 2;
-  ROLE_ASSISTANT   = 3;
-  ROLE_TOOL        = 4;
+  ROLE_SYSTEM = 1;
+  ROLE_USER = 2;
+  ROLE_ASSISTANT = 3;
+  ROLE_TOOL = 4;
 }
 
 message ChatMessage {
-  Role   role         = 1;
-  string content      = 2;
-  string name         = 3;
-  int64  timestamp_ms = 4;
+  Role role = 1;
+  string content = 2;
+  string name = 3;
+  int64 timestamp_ms = 4;
 }
 
 message ToolDefinition {
-  string name        = 1;
+  string name = 1;
   string description = 2;
   string args_schema = 3;
 }
@@ -43,20 +56,21 @@ service ListenerService {
 }
 
 message ListenerInput {
-  // Field 1 (was `AudioChunk audio`) is reserved. The audio variant was
-  // removed because the Listener server never read it — audio flows over
-  // the raw TCP socket. Do not reuse tag 1 in case the audio path ever
-  // moves back in-band.
-  reserved 1;
-  reserved "audio";
+  // Initialize the stream before controls; audio uses the separate raw socket.
   oneof payload {
-    ListenerControl  control = 2;
+    ListenerInit init = 1;
+    ListenerControl control = 2;
   }
+}
+
+// First message on every Listener stream, before controls or session events.
+message ListenerInit {
+  SessionRef session = 1;
 }
 
 message ListenerControl {
   oneof signal {
-    ListenerReset reset = 1;  // clear VAD state on new session
+    ListenerReset reset = 1; // clear VAD state on new session
   }
 }
 message ListenerReset {}
@@ -64,21 +78,27 @@ message ListenerReset {}
 message ListenerOutput {
   int64 timestamp_ms = 1;
   oneof event {
-    VadSpeechStart    vad_speech_start   = 2;
-    VadSpeechEnd      vad_speech_end     = 3;
+    VadSpeechStart vad_speech_start = 2;
+    VadSpeechEnd vad_speech_end = 3;
     PartialTranscript partial_transcript = 4;
-    FinalTranscript   final_transcript   = 5;
+    FinalTranscript final_transcript = 5;
   }
 }
 
-message VadSpeechStart    {}
-message VadSpeechEnd      { float silence_duration_ms = 1; }
-message PartialTranscript { string text = 1; }
-message FinalTranscript   { string text = 1; float confidence = 2; }
+message VadSpeechStart {}
+message VadSpeechEnd {
+  float silence_duration_ms = 1;
+}
+message PartialTranscript {
+  string text = 1;
+}
+message FinalTranscript {
+  string text = 1;
+  float confidence = 2;
+}
 
 // TALKER SERVICE — Bidi ProcessPrompt + unary helpers
 // Gateway = client, Talker = server
-
 
 service TalkerService {
   // Bidi: Gateway sends context + inline barge-in; Talker streams output
@@ -86,100 +106,135 @@ service TalkerService {
 
   // Between-turn operations (unary, no need for bidi)
   rpc PrefillCache(PrefillRequest) returns (PrefillAck);
-  rpc UpdatePersona(PersonaConfig) returns (PersonaAck);
+  rpc UpdatePersona(UpdatePersonaRequest) returns (PersonaAck);
 }
 
 message TalkerInput {
   oneof payload {
-    TalkerContext    start    = 1;  // begin generation
-    BargeInSignal    barge_in = 2;  // interrupt mid-stream (was separate Prepare RPC)
+    GenerationStart start = 1; // first message; one generation per RPC
+    BargeInSignal barge_in = 2; // interrupt mid-stream (was separate Prepare RPC)
   }
 }
 
 message BargeInSignal {
-  string conversation_id = 1;
+  SessionRef session = 1;
 }
 
-// TalkerContext 保持不变
-message TalkerContext {
-  string   conversation_id          = 1;
-  string   turn_id                  = 2;
-  string   user_input               = 3;
-  repeated ChatMessage history      = 4;
-  string   memory_contents          = 5;
-  repeated ToolDefinition tools     = 6;
-  string   active_tasks_json        = 7;
-  string   tool_result_content      = 8;
-  string   tool_request_id          = 9;
-  int64    timestamp_ms             = 10;
-  string   reasoner_task_id         = 11;
-  string   reasoner_result_content  = 12;
-  // ── NEW: RAG retrieval results ──
-  repeated RetrievalResult retrieval_results = 13;
+// Reusable per-call context. Persona remains a change-driven UpdatePersona RPC.
+message PromptContext {
+  repeated ChatMessage history = 1;
+  string memory_contents = 2;
+  repeated ToolDefinition tools = 3;
+  repeated ActiveTask active_tasks = 4;
+  repeated RetrievalResult retrieval_results = 5;
+}
+
+message ActiveTask {
+  string task_id = 1;
+  string description = 2;
+}
+
+message GenerationStart {
+  SessionRef session = 1;
+  string generation_id = 2;
+  int64 timestamp_ms = 3;
+  PromptContext prompt_context = 4;
+  oneof trigger {
+    UserInput user_input = 5;
+    ToolResult tool_result = 6;
+    ReasonerResult reasoner_result = 7;
+    ReasonerProgress reasoner_progress = 8;
+    SilenceTrigger silence = 9;
+  }
+}
+message UserInput {
+  string text = 1;
+}
+message ToolResult {
+  string request_id = 1;
+  string content = 2;
+}
+message ReasonerResult {
+  string task_id = 1;
+  string summary = 2;
+}
+message ReasonerProgress {
+  string task_id = 1;
+  string description = 2;
+}
+message SilenceTrigger {
+  uint64 duration_ms = 1;
 }
 
 // NEW: RAG 检索结果，注入到 context 中
 message RetrievalResult {
-  string id       = 1;
-  string content  = 2;
-  string source   = 3;  // "bm25" | "vector" | "lsp" | "structured"
-  float  score    = 4;
+  string id = 1;
+  string content = 2;
+  string source = 3; // "bm25" | "vector" | "lsp" | "structured"
+  float score = 4;
 }
 
 message TalkerOutput {
   uint32 seq = 1;
+  // Required on every output; echoes the GenerationStart accepted by this RPC.
+  string generation_id = 2;
   oneof payload {
-    ResponseStarted  response_started  = 2;
-    SentenceEvent    sentence          = 3;
-    EmotionEvent     emotion           = 4;
-    ToolRequest      tool_request      = 5;
-    DelegateRequest  delegate_request  = 6;
-    ResponseComplete response_complete = 7;
-    BargeInAck       barge_in_ack      = 8;  // NEW: inline response to barge-in
+    ResponseStarted response_started = 3;
+    SentenceEvent sentence = 4;
+    EmotionEvent emotion = 5;
+    ToolRequest tool_request = 6;
+    DelegateRequest delegate_request = 7;
+    ResponseComplete response_complete = 8;
+    BargeInAck barge_in_ack = 9; // NEW: inline response to barge-in
   }
 }
 
 message BargeInAck {
-  string spoken_text   = 1;
+  string spoken_text = 1;
   string unspoken_text = 2;
 }
 
-message ResponseStarted  { string turn_id = 1; }
-message SentenceEvent    { string text = 1; }
-message EmotionEvent     { string emotion = 1; }
+message ResponseStarted {}
+message SentenceEvent {
+  string text = 1;
+}
+message EmotionEvent {
+  string emotion = 1;
+}
 
 message ToolRequest {
   string request_id = 1;
-  string tool_name  = 2;
-  string args_json  = 3;
+  string tool_name = 2;
+  string args_json = 3;
 }
 
 message DelegateRequest {
-  string task_id     = 1;
+  string task_id = 1;
   string description = 2;
 }
 
 message ResponseComplete {
-  string turn_id         = 1;
-  bool   was_interrupted = 2;
+  bool was_interrupted = 1;
 }
 
 message PrefillRequest {
-  string conversation_id = 1;
-  TalkerContext context  = 2;
+  SessionRef session = 1;
+  PromptContext prompt_context = 2;
 }
 message PrefillAck {}
 
 message PersonaConfig {
-  string soul_md     = 1;
+  string soul_md = 1;
   string identity_md = 2;
-  string memory_md   = 3;
+  string memory_md = 3;
+}
+message UpdatePersonaRequest {
+  SessionRef session = 1;
+  PersonaConfig persona = 2;
 }
 message PersonaAck {}
 
-
 // REASONER SERVICE — Multi-stream design
-
 
 service ReasonerService {
   // Bidi per-task: Gateway sends task + context updates, Reasoner streams events
@@ -194,58 +249,76 @@ service ReasonerService {
 
 message DelegateInput {
   oneof payload {
-    TaskRequest   start_task     = 1;
-    TaskContext    context_update = 2;  // NEW: send updated context mid-task
+    TaskRequest start_task = 1;
+    TaskContext context_update = 2; // NEW: send updated context mid-task
   }
 }
 
 message TaskRequest {
-  string task_id     = 1;
+  string task_id = 1;
   string description = 2;
   map<string, string> metadata = 3;
+  SessionRef session = 4;
 }
 
 message TaskContext {
-  string task_id   = 1;
-  string context   = 2;  // additional context during execution
+  string task_id = 1;
+  string context = 2; // additional context during execution
+  SessionRef session = 3;
 }
 
 message DelegateOutput {
-  string task_id      = 1;
-  int64  timestamp_ms = 2;
+  string task_id = 1;
+  int64 timestamp_ms = 2;
   oneof event {
-    ReasonerStarted          started   = 3;
-    ReasonerIntermediateStep step      = 4;
-    ReasonerOutput           output    = 5;
-    ReasonerCompleted        completed = 6;
-    ReasonerError            error     = 7;
+    ReasonerStarted started = 3;
+    ReasonerIntermediateStep step = 4;
+    ReasonerOutput output = 5;
+    ReasonerCompleted completed = 6;
+    ReasonerError error = 7;
   }
 }
 
-message ReasonerStarted          { string framework = 1; }
-message ReasonerIntermediateStep { string description = 1; }
-message ReasonerOutput           { string content = 1; }
-message ReasonerCompleted        { string summary = 1; }
-message ReasonerError            { string message = 1; int32 code = 2; }
+message ReasonerStarted {
+  string framework = 1;
+}
+message ReasonerIntermediateStep {
+  string description = 1;
+}
+message ReasonerOutput {
+  string content = 1;
+}
+message ReasonerCompleted {
+  string summary = 1;
+}
+message ReasonerError {
+  string message = 1;
+  int32 code = 2;
+}
 
 message InterruptRequest {
+  SessionRef session = 4;
   oneof signal {
-    TaskCancel  cancel   = 1;
-    GlobalStop  stop     = 2;
-    Shutdown    shutdown = 3;
+    TaskCancel cancel = 1;
+    GlobalStop stop = 2;
+    Shutdown shutdown = 3;
   }
 }
-message TaskCancel { string task_id = 1; }
+message TaskCancel {
+  string task_id = 1;
+}
 message GlobalStop {}
-message Shutdown   {}
+message Shutdown {}
 message InterruptAck {}
 
-message TelemetrySubscribe {}
+message TelemetrySubscribe {
+  SessionRef session = 1;
+}
 message TelemetryEvent {
-  string source      = 1;  // "openclaw" | "claude_code"
-  string event_type  = 2;
-  string data        = 3;  // JSON
-  int64  timestamp_ms = 4;
+  string source = 1; // "openclaw" | "claude_code"
+  string event_type = 2;
+  string data = 3; // JSON
+  int64 timestamp_ms = 4;
 }
 
 // ─────────────────────────────────────────────
@@ -253,17 +326,24 @@ message TelemetryEvent {
 // ─────────────────────────────────────────────
 
 service RouterControlService {
-  rpc SendControl(ControlSignal) returns (ControlAck);
+  rpc SendControl(ControlRequest) returns (ControlAck);
+}
+
+message ControlRequest {
+  SessionRef session = 1;
+  ControlSignal signal = 2;
 }
 
 message ControlSignal {
   oneof signal {
-    StopSignal     stop     = 1;
+    StopSignal stop = 1;
     ApprovalSignal approval = 2;
     ShutdownSignal shutdown = 3;
   }
 }
-message StopSignal     {}
-message ApprovalSignal { string context = 1; }
+message StopSignal {}
+message ApprovalSignal {
+  string context = 1;
+}
 message ShutdownSignal {}
 message ControlAck {}

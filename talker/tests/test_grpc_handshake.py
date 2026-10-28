@@ -1,252 +1,238 @@
-"""Regression tests for the bidi gRPC handshake.
+"""Stream readiness follows validation of the prequeued first message.
 
-The Listener.Stream and Talker.Converse handlers must send initial response
-metadata BEFORE awaiting on their internal queues. grpcio-aio defers the
-HTTP/2 HEADERS frame until the first `yield` if metadata isn't sent
-explicitly, which would deadlock the client's `stub.Stream(...)` /
-`stub.Converse(...)` call: it can't send the first message because the
-server's handshake never completed.
-
-Removing the `await context.send_initial_metadata(())` lines from the
-handlers will cause both tests below to hit their 2s timeout and fail.
+Clients enqueue init/start before waiting for response headers. The server must
+then flush those headers before waiting on ASR/inference, and invalid or duplicate
+initialization must terminate promptly rather than leaving a background task hung.
 """
 
 import asyncio
+import uuid
 from unittest.mock import MagicMock
 
 import grpc
 import pytest
 
-from proto import kaguya_pb2_grpc  # type: ignore[import]
+from config import TalkerConfig
+from proto import kaguya_pb2, kaguya_pb2_grpc
+from server import TalkerServiceServicer
+from voice.listener import ListenerServiceImpl
 
-HANDSHAKE_TIMEOUT_S = 2.0
 
-
-async def _start_server(servicer_factory) -> tuple[grpc.aio.Server, int]:
-    """Spin up an in-process gRPC server on an ephemeral loopback port."""
+async def _start_server(register):
     server = grpc.aio.server()
-    servicer_factory(server)
+    register(server)
     port = server.add_insecure_port("127.0.0.1:0")
     await server.start()
     return server, port
 
 
+async def _listener_inputs(session):
+    yield kaguya_pb2.ListenerInput(init=kaguya_pb2.ListenerInit(session=session))
+
+
+def _generation(session):
+    return kaguya_pb2.GenerationStart(
+        session=session,
+        generation_id="generation-1",
+        prompt_context=kaguya_pb2.PromptContext(),
+        user_input=kaguya_pb2.UserInput(text="Hello"),
+    )
+
+
+async def _blocked_completion(*args):
+    await asyncio.Event().wait()
+    if False:
+        yield ""
+
+
 @pytest.mark.asyncio
-async def test_listener_stream_handshake_completes_without_messages():
-    """Stream() must respond with initial metadata before any ASR event.
+async def test_listener_headers_follow_valid_init_without_waiting_for_asr(
+    binding, session_ref
+):
+    servicer = ListenerServiceImpl(asyncio.Queue(), binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = kaguya_pb2_grpc.ListenerServiceStub(channel).Stream(
+                _listener_inputs(session_ref)
+            )
+            assert await asyncio.wait_for(call.initial_metadata(), 2) is not None
+            call.cancel()
+    finally:
+        await server.stop(grace=0.5)
 
-    Without `send_initial_metadata` at the top of Stream(), this test would
-    hang on `call.initial_metadata()` because the server's handler is blocked
-    on an empty event queue.
-    """
-    from voice.listener import ListenerServiceImpl
 
-    event_queue: asyncio.Queue = asyncio.Queue()
-    servicer = ListenerServiceImpl(event_queue)
+@pytest.mark.asyncio
+async def test_talker_headers_follow_valid_start_without_waiting_for_inference(
+    binding, session_ref
+):
+    servicer = TalkerServiceServicer(TalkerConfig(), MagicMock(), binding)
+    servicer._llm.stream_completion = _blocked_completion
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
 
-    def register(server: grpc.aio.Server) -> None:
-        kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(servicer, server)
+            async def inputs():
+                yield kaguya_pb2.TalkerInput(start=_generation(session_ref))
 
-    server, port = await _start_server(register)
+            call = kaguya_pb2_grpc.TalkerServiceStub(channel).Converse(inputs())
+            assert await asyncio.wait_for(call.initial_metadata(), 2) is not None
+            call.cancel()
+    finally:
+        await servicer.close()
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+async def test_valid_listener_replacement_receives_all_future_events(
+    binding, session_ref
+):
+    queue = asyncio.Queue()
+    servicer = ListenerServiceImpl(queue, binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
     try:
         async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
             stub = kaguya_pb2_grpc.ListenerServiceStub(channel)
-
-            # Empty client stream — never sends any input messages.
-            async def empty_inputs():
-                if False:  # pragma: no cover — never yields
-                    yield
-
-            call = stub.Stream(empty_inputs())
-            metadata = await asyncio.wait_for(
-                call.initial_metadata(), timeout=HANDSHAKE_TIMEOUT_S
-            )
-            assert metadata is not None
-            call.cancel()
-    finally:
-        await server.stop(grace=0.5)
-
-
-@pytest.mark.asyncio
-async def test_talker_converse_handshake_completes_without_messages():
-    """Converse() must respond with initial metadata before any TalkerInput.
-
-    Same pattern as the listener test — the gateway opens the bidi stream and
-    only sends `TalkerInput.start` after the handshake completes. If the
-    handler awaits on the input iterator before flushing headers, the gateway
-    can't send the start message → deadlock.
-    """
-    from config import TalkerConfig
-    from server import TalkerServiceServicer
-
-    config = TalkerConfig()
-    speaker = MagicMock()  # Converse handshake never touches the speaker
-    servicer = TalkerServiceServicer(config, speaker)
-
-    def register(server: grpc.aio.Server) -> None:
-        kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(servicer, server)
-
-    server, port = await _start_server(register)
-    try:
-        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = kaguya_pb2_grpc.TalkerServiceStub(channel)
-
-            async def empty_inputs():
-                if False:  # pragma: no cover
-                    yield
-
-            call = stub.Converse(empty_inputs())
-            metadata = await asyncio.wait_for(
-                call.initial_metadata(), timeout=HANDSHAKE_TIMEOUT_S
-            )
-            assert metadata is not None
-            call.cancel()
-    finally:
-        await server.stop(grace=0.5)
-
-
-# ── P0-6: ListenerServiceImpl.Stream — replace prior connection ──
-#
-# `_event_queue.get()` is point-to-point: when two `Stream` handlers
-# concurrently await it, an enqueued event goes to ONE of them, not both.
-# Symptom in real use: Gateway crash + reconnect leaves the stale handler
-# competing with the live one for ASR events; ~half the words show up in
-# the live Gateway, the rest go to a dead connection.
-#
-# Pattern B fix: a new Stream connection terminates the prior one and
-# takes ownership of the queue. These tests pin that contract.
-
-
-@pytest.mark.asyncio
-async def test_second_stream_terminates_first():
-    """Opening a second Stream while the first is live causes the first
-    to be terminated. The second receives subsequent events; the first
-    sees its inbound iterator close cleanly (no more events delivered)."""
-    from proto import kaguya_pb2  # type: ignore[import]
-    from voice.listener import ListenerServiceImpl
-
-    event_queue: asyncio.Queue = asyncio.Queue()
-    servicer = ListenerServiceImpl(event_queue)
-
-    def register(server: grpc.aio.Server) -> None:
-        kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(servicer, server)
-
-    server, port = await _start_server(register)
-    try:
-        async with (
-            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_a,
-            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_b,
-        ):
-            stub_a = kaguya_pb2_grpc.ListenerServiceStub(ch_a)
-            stub_b = kaguya_pb2_grpc.ListenerServiceStub(ch_b)
-
-            async def empty_inputs():
-                if False:  # pragma: no cover
-                    yield
-
-            # Open client A and finish handshake.
-            call_a = stub_a.Stream(empty_inputs())
-            await asyncio.wait_for(call_a.initial_metadata(), timeout=2.0)
-
-            # Open client B — this should terminate A.
-            call_b = stub_b.Stream(empty_inputs())
-            await asyncio.wait_for(call_b.initial_metadata(), timeout=2.0)
-
-            # Give the server a tick to process the takeover.
-            await asyncio.sleep(0.1)
-
-            # Now enqueue an event. With Pattern B, only B should see it;
-            # A's stream should be closed.
-            event_queue.put_nowait(
-                kaguya_pb2.ListenerOutput(
-                    timestamp_ms=1,
-                    final_transcript=kaguya_pb2.FinalTranscript(
-                        text="hello", confidence=0.9
-                    ),
-                )
-            )
-
-            # B receives the event.
-            received_b = await asyncio.wait_for(call_b.read(), timeout=2.0)
-            assert received_b is not None and received_b != grpc.aio.EOF, (
-                "client B must receive events after A is replaced"
-            )
-            assert received_b.final_transcript.text == "hello"
-
-            # A's stream should be terminated. `call_a.read()` should return
-            # EOF (or grpc closes), not block forever.
-            try:
-                a_next = await asyncio.wait_for(call_a.read(), timeout=2.0)
-                # If we got something, it must be EOF — not a real event.
-                assert a_next == grpc.aio.EOF or a_next is None, (
-                    f"client A must be terminated; instead read: {a_next}"
-                )
-            except (TimeoutError, grpc.aio.AioRpcError):
-                pytest.fail("client A must be cleanly terminated, not left hanging")
-
-            call_b.cancel()
-    finally:
-        await server.stop(grace=0.5)
-
-
-@pytest.mark.asyncio
-async def test_replaced_stream_event_goes_to_live_client_only():
-    """Stronger version of the above: enqueue events between A's open and
-    B's open. After B replaces A, only B should receive the post-replace
-    events — not split between them."""
-    from proto import kaguya_pb2  # type: ignore[import]
-    from voice.listener import ListenerServiceImpl
-
-    event_queue: asyncio.Queue = asyncio.Queue()
-    servicer = ListenerServiceImpl(event_queue)
-
-    def register(server: grpc.aio.Server) -> None:
-        kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(servicer, server)
-
-    server, port = await _start_server(register)
-    try:
-        async with (
-            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_a,
-            grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch_b,
-        ):
-            stub_a = kaguya_pb2_grpc.ListenerServiceStub(ch_a)
-            stub_b = kaguya_pb2_grpc.ListenerServiceStub(ch_b)
-
-            async def empty_inputs():
-                if False:  # pragma: no cover
-                    yield
-
-            call_a = stub_a.Stream(empty_inputs())
-            await asyncio.wait_for(call_a.initial_metadata(), timeout=2.0)
-
-            # Open B, which should take over.
-            call_b = stub_b.Stream(empty_inputs())
-            await asyncio.wait_for(call_b.initial_metadata(), timeout=2.0)
-            await asyncio.sleep(0.1)
-
-            # Enqueue 3 events. Old code: load-balanced 1-2 to A and 1-2 to
-            # B, depending on scheduler. New code: all 3 to B.
+            first = stub.Stream(_listener_inputs(session_ref))
+            await asyncio.wait_for(first.initial_metadata(), 2)
+            replacement = stub.Stream(_listener_inputs(session_ref))
+            await asyncio.wait_for(replacement.initial_metadata(), 2)
+            assert await asyncio.wait_for(first.read(), 2) == grpc.aio.EOF
             for i in range(3):
-                event_queue.put_nowait(
+                queue.put_nowait(
                     kaguya_pb2.ListenerOutput(
-                        timestamp_ms=i,
                         partial_transcript=kaguya_pb2.PartialTranscript(
                             text=f"event-{i}"
-                        ),
+                        )
                     )
                 )
-
-            received_by_b = []
+            observed = []
             for _ in range(3):
-                ev = await asyncio.wait_for(call_b.read(), timeout=2.0)
-                if ev == grpc.aio.EOF or ev is None:
-                    break
-                received_by_b.append(ev.partial_transcript.text)
-
-            assert received_by_b == ["event-0", "event-1", "event-2"], (
-                f"client B must receive ALL post-replacement events; got {received_by_b}"
-            )
-
-            call_b.cancel()
+                observed.append(
+                    (
+                        await asyncio.wait_for(replacement.read(), 2)
+                    ).partial_transcript.text
+                )
+            assert observed == ["event-0", "event-1", "event-2"]
+            replacement.cancel()
     finally:
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+async def test_invalid_listener_does_not_take_over_live_connection(
+    binding, session_ref, session_ref_factory
+):
+    queue = asyncio.Queue()
+    servicer = ListenerServiceImpl(queue, binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = kaguya_pb2_grpc.ListenerServiceStub(channel)
+            live = stub.Stream(_listener_inputs(session_ref))
+            await asyncio.wait_for(live.initial_metadata(), 2)
+            wrong = session_ref_factory(session_id=str(uuid.uuid4()))
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await stub.Stream(_listener_inputs(wrong), timeout=2).read()
+            assert error.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+            queue.put_nowait(
+                kaguya_pb2.ListenerOutput(
+                    partial_transcript=kaguya_pb2.PartialTranscript(text="still live")
+                )
+            )
+            assert (
+                await asyncio.wait_for(live.read(), 2)
+            ).partial_transcript.text == "still live"
+            live.cancel()
+    finally:
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["empty", "control-first", "duplicate-init"])
+async def test_listener_rejects_missing_misordered_or_duplicate_init(
+    binding, session_ref, mode
+):
+    servicer = ListenerServiceImpl(asyncio.Queue(), binding)
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_ListenerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+
+    async def inputs():
+        if mode == "control-first":
+            yield kaguya_pb2.ListenerInput(
+                control=kaguya_pb2.ListenerControl(reset=kaguya_pb2.ListenerReset())
+            )
+        elif mode == "duplicate-init":
+            async for item in _listener_inputs(session_ref):
+                yield item
+                yield item
+
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = kaguya_pb2_grpc.ListenerServiceStub(channel).Stream(
+                inputs(), timeout=2
+            )
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await call.read()
+            assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    finally:
+        await server.stop(grace=0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["empty", "barge-in-first", "duplicate-start"])
+async def test_talker_rejects_missing_misordered_or_duplicate_start(
+    binding, session_ref, mode
+):
+    speaker = MagicMock()
+    servicer = TalkerServiceServicer(TalkerConfig(), speaker, binding)
+    servicer._llm.stream_completion = _blocked_completion
+    server, port = await _start_server(
+        lambda server: kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(
+            servicer, server
+        )
+    )
+
+    async def inputs():
+        if mode == "barge-in-first":
+            yield kaguya_pb2.TalkerInput(
+                barge_in=kaguya_pb2.BargeInSignal(session=session_ref)
+            )
+        elif mode == "duplicate-start":
+            yield kaguya_pb2.TalkerInput(start=_generation(session_ref))
+            yield kaguya_pb2.TalkerInput(start=_generation(session_ref))
+
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = kaguya_pb2_grpc.TalkerServiceStub(channel).Converse(
+                inputs(), timeout=2
+            )
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                async for _ in call:
+                    pass
+            assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+            if mode != "duplicate-start":
+                speaker.reset.assert_not_called()
+            speaker.stop.assert_not_called()
+    finally:
+        await servicer.close()
         await server.stop(grace=0.5)

@@ -40,42 +40,42 @@ impl OutputManager {
         }
     }
 
-    pub async fn send_sentence(&self, text: &str) {
+    pub async fn send_sentence(&self, generation_id: &str, text: &str) {
         let _ = self
             .metadata_tx
             .send(MetadataEvent {
                 event_type: "sentence".into(),
-                data: serde_json::json!({ "text": text }),
+                data: serde_json::json!({ "generation_id": generation_id, "text": text }),
             })
             .await;
     }
 
-    pub async fn send_emotion(&self, emotion: &str) {
+    pub async fn send_emotion(&self, generation_id: &str, emotion: &str) {
         let _ = self
             .metadata_tx
             .send(MetadataEvent {
                 event_type: "emotion".into(),
-                data: serde_json::json!({ "emotion": emotion }),
+                data: serde_json::json!({ "generation_id": generation_id, "emotion": emotion }),
             })
             .await;
     }
 
-    pub async fn send_response_started(&self, turn_id: &str) {
+    pub async fn send_response_started(&self, generation_id: &str) {
         let _ = self
             .metadata_tx
             .send(MetadataEvent {
                 event_type: "response_started".into(),
-                data: serde_json::json!({ "turn_id": turn_id }),
+                data: serde_json::json!({ "generation_id": generation_id }),
             })
             .await;
     }
 
-    pub async fn send_response_complete(&self, turn_id: &str, interrupted: bool) {
+    pub async fn send_response_complete(&self, generation_id: &str, interrupted: bool) {
         let _ = self
             .metadata_tx
             .send(MetadataEvent {
                 event_type: "response_complete".into(),
-                data: serde_json::json!({ "turn_id": turn_id, "interrupted": interrupted }),
+                data: serde_json::json!({ "generation_id": generation_id, "interrupted": interrupted }),
             })
             .await;
     }

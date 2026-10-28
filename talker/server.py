@@ -1,7 +1,7 @@
 """server.py — TalkerServiceServicer: bidi Converse + unary helpers.
 
-Gateway opens a Converse bidi stream per turn:
-  Gateway → Talker: TalkerInput.start (TalkerContext) | TalkerInput.barge_in
+Gateway opens a Converse bidi stream per generation:
+  Gateway → Talker: TalkerInput.start (GenerationStart) | TalkerInput.barge_in
   Talker → Gateway: TalkerOutput stream (sentences, emotions, tools, etc.)
 """
 
@@ -17,7 +17,7 @@ import grpc
 from binding import InstanceSessionBinding
 from config import TalkerConfig
 from inference.llm_client import LLMClient
-from inference.prompt_formatter import assemble_prompt
+from inference.prompt_formatter import assemble_generation_prompt, assemble_prompt
 from inference.sentence_detector import SentenceDetector
 from inference.soul_container import (
     IdentityConfig,
@@ -44,7 +44,7 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         self,
         config: TalkerConfig,
         speaker: Speaker,
-        binding: InstanceSessionBinding | None = None,
+        binding: InstanceSessionBinding,
     ) -> None:
         self._config = config
         self._llm = LLMClient(config)
@@ -62,102 +62,103 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         request_iterator,
         context: grpc.aio.ServicerContext,
     ) -> AsyncGenerator[kaguya_pb2.TalkerOutput, None]:
-        session_id = (
-            await self._binding.bind_or_validate(context) if self._binding else None
-        )
-        # Flush response headers immediately. Without this, grpcio-aio defers
-        # the HTTP/2 HEADERS frame until the first `yield`, which only happens
-        # after `start` arrives and a sentence is generated. The Gateway's
-        # `client.converse(...).await` would otherwise block indefinitely on
-        # the handshake before it can send the initial TalkerInput.start.
+        # The client prequeues start before opening the stream. Read and
+        # validate it before headers: a completed handshake means its fixed
+        # scope and generation trigger have been accepted.
+        request_iterator = aiter(request_iterator)
+        try:
+            first = await anext(request_iterator)
+        except StopAsyncIteration:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Converse requires GenerationStart first",
+            )
+            return
+        if first.WhichOneof("payload") != "start":
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Converse requires GenerationStart first",
+            )
+        await self._binding.require(first.start.session, context)
+        await _validate_generation_start(first.start, context)
         await context.send_initial_metadata(())
 
-        output_queue: asyncio.Queue[kaguya_pb2.TalkerOutput | None] = asyncio.Queue()
+        output_queue: asyncio.Queue[kaguya_pb2.TalkerOutput | Exception] = (
+            asyncio.Queue()
+        )
         cancel_event = asyncio.Event()
-        generation_task: asyncio.Task | None = None
+        self._speaker.reset()
+        generation_task = asyncio.create_task(
+            self._run_generation(first.start, output_queue, cancel_event)
+        )
 
         async def read_inputs():
-            nonlocal generation_task
-            async for msg in request_iterator:
-                which = msg.WhichOneof("payload")
-                if which == "start":
-                    if (
-                        session_id is not None
-                        and msg.start.conversation_id != session_id
-                    ):
+            try:
+                async for msg in request_iterator:
+                    if msg.WhichOneof("payload") != "barge_in":
                         await context.abort(
-                            grpc.StatusCode.FAILED_PRECONDITION,
-                            "TalkerContext session mismatch",
+                            grpc.StatusCode.INVALID_ARGUMENT,
+                            "Converse permits exactly one GenerationStart",
                         )
-                    cancel_event.clear()
-                    self._speaker.reset()
-                    generation_task = asyncio.create_task(
-                        self._run_generation(msg.start, output_queue, cancel_event)
-                    )
-                elif which == "barge_in":
-                    if (
-                        session_id is not None
-                        and msg.barge_in.conversation_id != session_id
-                    ):
-                        await context.abort(
-                            grpc.StatusCode.FAILED_PRECONDITION,
-                            "barge-in session mismatch",
-                        )
-                    logger.debug("← BargeIn received")
+                    await self._binding.require(msg.barge_in.session, context)
+                    logger.debug("<- BargeIn received")
                     cancel_event.set()
                     spoken, unspoken = self._speaker.stop()
                     await output_queue.put(
                         kaguya_pb2.TalkerOutput(
                             seq=0,
+                            generation_id=first.start.generation_id,
                             barge_in_ack=kaguya_pb2.BargeInAck(
                                 spoken_text=spoken,
                                 unspoken_text=unspoken,
                             ),
                         )
                     )
+            except Exception as exc:  # noqa: BLE001 - forwarded to the stream handler
+                # Propagate validation/transport failures to the yielding
+                # coroutine even when inference has produced no output yet.
+                await output_queue.put(exc)
 
         input_task = asyncio.create_task(read_inputs())
-
         try:
             while True:
                 item = await output_queue.get()
-                if item is None:
-                    break
+                if isinstance(item, Exception):
+                    raise item
                 yield item
-                # Break on terminal event to avoid deadlock
-                # (Talker returns → server closes stream → Gateway detects Ok(None))
                 if item.HasField("response_complete"):
                     return
         except asyncio.CancelledError:
             cancel_event.set()
         finally:
             input_task.cancel()
-            if generation_task and not generation_task.done():
+            if not generation_task.done():
                 generation_task.cancel()
+            await asyncio.gather(input_task, generation_task, return_exceptions=True)
 
     async def _run_generation(
         self,
-        ctx: kaguya_pb2.TalkerContext,
+        ctx: kaguya_pb2.GenerationStart,
         output_queue: asyncio.Queue,
         cancel_event: asyncio.Event,
     ) -> None:
         seq = 0
         sentence_count = 0
-        turn_id = ctx.turn_id
+        generation_id = ctx.generation_id
         was_interrupted = False
 
         seq += 1
         await output_queue.put(
             kaguya_pb2.TalkerOutput(
                 seq=seq,
-                response_started=kaguya_pb2.ResponseStarted(turn_id=turn_id),
+                generation_id=generation_id,
+                response_started=kaguya_pb2.ResponseStarted(),
             )
         )
 
-        prompt = assemble_prompt(ctx, self._persona)
-        detector = SentenceDetector()
-
         try:
+            prompt = assemble_generation_prompt(ctx, self._persona)
+            detector = SentenceDetector()
             async for token in self._llm.stream_completion(prompt, cancel_event):
                 if cancel_event.is_set():
                     was_interrupted = True
@@ -167,7 +168,7 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                 if sentence is not None:
                     sentence_count += 1
                     for out in _emit_sentence(
-                        sentence, self._identity, self._speaker, seq
+                        sentence, self._identity, self._speaker, seq, generation_id
                     ):
                         seq = out.seq
                         await output_queue.put(out)
@@ -181,7 +182,7 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                 remainder = detector.flush()
                 if remainder and sentence_count < self._config.max_response_sentences:
                     for out in _emit_sentence(
-                        remainder, self._identity, self._speaker, seq
+                        remainder, self._identity, self._speaker, seq, generation_id
                     ):
                         seq = out.seq
                         await output_queue.put(out)
@@ -197,41 +198,44 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         await output_queue.put(
             kaguya_pb2.TalkerOutput(
                 seq=seq,
+                generation_id=generation_id,
                 response_complete=kaguya_pb2.ResponseComplete(
-                    turn_id=turn_id,
                     was_interrupted=was_interrupted,
                 ),
             )
         )
 
     # ──────────────────────────────────────────
-    # PrefillCache + UpdatePersona — unchanged unary RPCs
+    # PrefillCache + UpdatePersona — scoped unary helpers
     # ──────────────────────────────────────────
 
     async def PrefillCache(self, request, context):
-        if self._binding:
-            session_id = await self._binding.bind_or_validate(context)
-            if (
-                request.conversation_id != session_id
-                or request.context.conversation_id != session_id
-            ):
-                await context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION, "prefill session mismatch"
-                )
-        prompt = assemble_prompt(request.context, self._persona)
+        await self._binding.require(request.session, context)
+        if not request.HasField("prompt_context"):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "PrefillCache requires prompt_context"
+            )
+        await _validate_prompt_context(request.prompt_context, context)
+        prompt = assemble_prompt(request.prompt_context, self._persona)
         await self._llm.prefill(prompt)
         return kaguya_pb2.PrefillAck()
 
     async def UpdatePersona(self, request, context):
-        if self._binding:
-            await self._binding.bind_or_validate(context)
-        self._persona = request
-        self._identity = parse_identity_config(request.identity_md or "")
+        await self._binding.require(request.session, context)
+        if not request.HasField("persona"):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "UpdatePersona requires persona"
+            )
+        persona = kaguya_pb2.PersonaConfig()
+        persona.CopyFrom(request.persona)
+        identity = parse_identity_config(persona.identity_md or "")
+        self._persona = persona
+        self._identity = identity
         logger.info(
             "Persona updated (soul=%d, identity=%d, memory=%d bytes)",
-            len(request.soul_md),
-            len(request.identity_md),
-            len(request.memory_md),
+            len(persona.soul_md),
+            len(persona.identity_md),
+            len(persona.memory_md),
         )
         return kaguya_pb2.PersonaAck()
 
@@ -239,11 +243,48 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
         await self._llm.close()
 
 
+async def _validate_prompt_context(prompt, context) -> None:
+    if any(not task.task_id.strip() for task in prompt.active_tasks):
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "active task requires task_id"
+        )
+
+
+async def _validate_generation_start(start, context) -> None:
+    if not start.generation_id.strip():
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "GenerationStart requires generation_id"
+        )
+    if not start.HasField("prompt_context"):
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "GenerationStart requires prompt_context"
+        )
+    await _validate_prompt_context(start.prompt_context, context)
+    which = start.WhichOneof("trigger")
+    if which is None:
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "GenerationStart requires a trigger"
+        )
+    if which == "tool_result" and not start.tool_result.request_id.strip():
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "tool result requires request_id"
+        )
+    if which == "reasoner_result" and not start.reasoner_result.task_id.strip():
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "Reasoner result requires task_id"
+        )
+    if which == "reasoner_progress" and not start.reasoner_progress.task_id.strip():
+        await context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT, "Reasoner progress requires task_id"
+        )
+
+
 def _emit_sentence(
     sentence: str,
     identity: IdentityConfig,
     speaker: Speaker,
     seq: int,
+    generation_id: str,
 ) -> Generator[kaguya_pb2.TalkerOutput, None, None]:
     result: SoulContainerResult = soul_process(sentence, identity)
     if result.spoken_text:
@@ -251,17 +292,23 @@ def _emit_sentence(
     seq += 1
     yield kaguya_pb2.TalkerOutput(
         seq=seq,
+        generation_id=generation_id,
         sentence=kaguya_pb2.SentenceEvent(text=result.spoken_text),
     )
     for emotion in result.emotions:
         seq += 1
         yield kaguya_pb2.TalkerOutput(
             seq=seq,
+            generation_id=generation_id,
             emotion=kaguya_pb2.EmotionEvent(emotion=emotion),
         )
     for tool_req in result.tool_requests:
         seq += 1
-        yield kaguya_pb2.TalkerOutput(seq=seq, tool_request=tool_req)
+        yield kaguya_pb2.TalkerOutput(
+            seq=seq, generation_id=generation_id, tool_request=tool_req
+        )
     for delegate_req in result.delegate_requests:
         seq += 1
-        yield kaguya_pb2.TalkerOutput(seq=seq, delegate_request=delegate_req)
+        yield kaguya_pb2.TalkerOutput(
+            seq=seq, generation_id=generation_id, delegate_request=delegate_req
+        )

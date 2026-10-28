@@ -1,68 +1,78 @@
-"""Single instance/session binding for the shared voice process.
+"""Immutable expected scope for the dedicated voice process.
 
-The first valid RPC binds the process to its instance/session metadata. Talker,
-Listener gRPC, and raw audio ingress share this guard because the process has one
-persona, speaker, and Listener queue. Later RPCs validate the existing binding;
-accepting a different pair requires explicit resource multiplexing.
+The launcher supplies this pair before any service starts. Talker, Listener gRPC,
+and raw audio ingress share the same value; a request can assert the configured
+scope but cannot claim or rebind the process.
 """
 
-import asyncio
 import uuid
+from dataclasses import dataclass
 
 import grpc
 
-INSTANCE_HEADER = "x-kaguya-instance-id"
-SESSION_HEADER = "x-kaguya-session-id"
 AUDIO_MAGIC = b"KAGUYA1"
 
 
-class InstanceSessionBinding:
-    def __init__(self) -> None:
-        self._binding: tuple[str, str] | None = None
-        self._lock = asyncio.Lock()
+def validate_identifiers(
+    instance_id: str | None, session_id: str | None
+) -> tuple[str, str]:
+    """Require canonical, non-nil, distinct UUIDs; never generate replacements."""
+    try:
+        if not instance_id or not session_id:
+            raise ValueError("missing identifiers")
+        instance = uuid.UUID(instance_id)
+        session = uuid.UUID(session_id)
+        if (
+            instance.int == 0
+            or session.int == 0
+            or instance == session
+            or str(instance) != instance_id
+            or str(session) != session_id
+        ):
+            raise ValueError("invalid identifiers")
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError(
+            "KAGUYA_INSTANCE_ID and KAGUYA_SESSION_ID must be canonical, "
+            "non-nil, distinct UUIDs"
+        ) from exc
+    return instance_id, session_id
 
-    async def bind_or_validate(self, context: grpc.aio.ServicerContext) -> str:
-        """Bind the first valid pair or require the current pair; return its session."""
-        metadata = dict(context.invocation_metadata())
-        instance_id = str(metadata.get(INSTANCE_HEADER, ""))
-        session_id = str(metadata.get(SESSION_HEADER, ""))
+
+@dataclass(frozen=True)
+class InstanceSessionBinding:
+    instance_id: str
+    session_id: str
+
+    def __post_init__(self) -> None:
+        validate_identifiers(self.instance_id, self.session_id)
+
+    async def require(self, session, context: grpc.aio.ServicerContext) -> None:
+        """Validate a protobuf assertion without changing the expected pair."""
         try:
-            instance = uuid.UUID(instance_id)
-            session = uuid.UUID(session_id)
-            if (
-                not instance_id
-                or not session_id
-                or instance.int == 0
-                or session.int == 0
-                or instance == session
-                or str(instance) != instance_id
-                or str(session) != session_id
+            if not session.HasField("instance_id") or not session.HasField(
+                "session_id"
             ):
-                raise ValueError("invalid instance/session identifiers")
-        except (ValueError, AttributeError):
+                raise ValueError("SessionRef requires both ID objects")
+            requested = validate_identifiers(
+                session.instance_id.value, session.session_id.value
+            )
+        except (ValueError, AttributeError, TypeError):
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "missing or invalid instance/session metadata",
+                "missing or invalid SessionRef",
             )
-
-        requested = (instance_id, session_id)
-        async with self._lock:
-            if self._binding is None:
-                self._binding = requested
-            elif self._binding != requested:
-                await context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "voice process is bound to a different instance/session",
-                )
-        return session_id
+            return
+        if requested != (self.instance_id, self.session_id):
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "SessionRef does not match the configured voice scope",
+            )
 
     def matches_audio_header(self, header: bytes) -> bool:
         if len(header) != len(AUDIO_MAGIC) + 32 or not header.startswith(AUDIO_MAGIC):
-            return False
-        if self._binding is None:
             return False
         instance = str(
             uuid.UUID(bytes=header[len(AUDIO_MAGIC) : len(AUDIO_MAGIC) + 16])
         )
         session = str(uuid.UUID(bytes=header[len(AUDIO_MAGIC) + 16 :]))
-        return (instance, session) == self._binding
+        return (instance, session) == (self.instance_id, self.session_id)

@@ -83,45 +83,45 @@ def test_concurrent_emit_stress():
 
 
 # ──────────────────────────────────────────
-# Stale tick loop: turn_id prevents old loops from emitting
+# Stale tick loop: utterance_epoch prevents old loops from emitting
 # ──────────────────────────────────────────
 
 
-def test_turn_id_increments_on_speech_start():
+def test_utterance_epoch_increments_on_speech_start():
     td = _make_detector()
-    assert td.turn_id == 0
+    assert td.utterance_epoch == 0
     td.on_speech_start()
-    assert td.turn_id == 1
+    assert td.utterance_epoch == 1
     td.on_speech_start()
-    assert td.turn_id == 2
+    assert td.utterance_epoch == 2
 
 
-def test_stale_tick_loop_exits_on_turn_id_mismatch():
+def test_stale_tick_loop_exits_on_utterance_epoch_mismatch():
     """Simulate what the listener's _silence_tick_loop does:
-    check turn_id before calling on_silence_tick."""
+    check utterance_epoch before calling on_silence_tick."""
     td = _make_detector()
 
     # Utterance 1
     td.on_speech_start()
-    turn_id_at_vad_stop = td.turn_id  # 1
+    utterance_epoch_at_vad_stop = td.utterance_epoch  # 1
     td._buffer = "Hello."
     td.on_vad_stop()
 
     # Utterance 2 starts before tick fires
-    td.on_speech_start()  # turn_id → 2
+    td.on_speech_start()  # utterance_epoch → 2
 
-    # The tick loop from utterance 1 checks turn_id
-    assert td.turn_id != turn_id_at_vad_stop
+    # The tick loop from utterance 1 checks utterance_epoch
+    assert td.utterance_epoch != utterance_epoch_at_vad_stop
     # In the real listener, this causes the tick loop to return without calling
     # on_silence_tick. Let's verify on_silence_tick would also be safe:
     td._vad_stop_ts = time.monotonic() - 1.0
     td._buffer = "New text."
     td.on_silence_tick()
     # This WOULD emit for the new utterance — but the tick loop never gets here
-    # because it exits on turn_id mismatch first. Still, verify the turn_id
+    # because it exits on utterance_epoch mismatch first. Still, verify the utterance_epoch
     # check is the correct guard:
-    assert turn_id_at_vad_stop == 1
-    assert td.turn_id == 2
+    assert utterance_epoch_at_vad_stop == 1
+    assert td.utterance_epoch == 2
 
 
 def test_rapid_vad_cycling_no_stale_state():

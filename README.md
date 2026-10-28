@@ -222,10 +222,20 @@ For managed startup:
 cargo run --manifest-path supervisor/Cargo.toml -- --runtime-config config/kaguya.local.toml
 ```
 
-For direct debugging, run in separate terminals:
+For direct debugging, first supply the voice terminal with the pair validated
+from that same selected deployment. For example, in PowerShell from the repository root:
+
+```powershell
+$deployment = cargo run --quiet --manifest-path gateway/Cargo.toml -- show-config --runtime-config config/kaguya.local.toml | ConvertFrom-Json
+$env:KAGUYA_INSTANCE_ID = $deployment.instance.instance_id
+$env:KAGUYA_SESSION_ID = $deployment.instance.default_session_id
+```
+
+Missing or invalid IDs stop voice startup. Supervisor and Console launchers
+supply these variables automatically. Then run in separate terminals:
 
 ```sh
-# Talker
+# Talker (in the terminal configured above)
 cd talker && uv run python main.py
 
 # Gateway (from repository root)
