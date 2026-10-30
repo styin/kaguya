@@ -4,15 +4,19 @@ export type ControlMessage = { type: "control"; command: "stop" | "shutdown" };
 export type IngressMessage = TextMessage | ControlMessage;
 
 // Egress: Gateway → browser
-export type SentenceEvent = { event_type: "sentence"; data: { text: string } };
-export type EmotionEvent = { event_type: "emotion"; data: { emotion: string } };
+export type SessionInitEvent = {
+  event_type: "session_init";
+  data: { instance_id: string; session_id: string };
+};
+export type SentenceEvent = { event_type: "sentence"; data: { generation_id: string; text: string } };
+export type EmotionEvent = { event_type: "emotion"; data: { generation_id: string; emotion: string } };
 export type ResponseStartedEvent = {
   event_type: "response_started";
-  data: { turn_id: string };
+  data: { generation_id: string };
 };
 export type ResponseCompleteEvent = {
   event_type: "response_complete";
-  data: { turn_id: string; interrupted: boolean };
+  data: { generation_id: string; interrupted: boolean };
 };
 // Echo of voice transcripts so the UI can render them as user messages.
 // Typed prompts are added locally by the input form and are NOT echoed.
@@ -22,6 +26,7 @@ export type UserInputEvent = {
 };
 
 export type EgressMessage =
+  | SessionInitEvent
   | SentenceEvent
   | EmotionEvent
   | ResponseStartedEvent
@@ -31,20 +36,15 @@ export type EgressMessage =
 // ─── Event log envelope ──────────────────────────────────────────────
 //
 // Direction is named relative to the browser (where this code runs):
-//   `ws_in`    / `audio_in`  — browser RECEIVES
-//   `ws_out`   / `audio_out` — browser SENDS
+//   `ws_in`  — browser RECEIVES
+//   `ws_out` — browser SENDS
 //
 // Semantic UI state derives from the WS event log via pure selectors in `store.ts`.
-// Audio byte counts live in a separate ring so they cannot evict turn events.
-// Audio frames carry only byte counts, never PCM payloads.
+// Microphone audio bypasses the event log.
 
 export type WsEvent =
   | { kind: "ws_in";     ts: number; msg: EgressMessage }
   | { kind: "ws_out";    ts: number; msg: IngressMessage };
-
-export type AudioEvent =
-  | { kind: "audio_in";  ts: number; bytes: number }
-  | { kind: "audio_out"; ts: number; bytes: number };
 
 // ─── Turn projection (derived) ───────────────────────────────────────
 //
@@ -57,7 +57,7 @@ export type Sentence = { text: string; ts: number };
 
 export type AssistantTurn = {
   kind: "assistant";
-  turn_id: string;
+  generation_id: string;
   started_at: number;
   complete_at: number | null;
   interrupted: boolean;
@@ -119,6 +119,8 @@ export interface RuntimeLifecycleSnapshot {
 }
 
 export interface RuntimeStatusSnapshot {
+  instance_id: string;
+  session_id: string;
   lifecycle: RuntimeLifecycleSnapshot;
 }
 

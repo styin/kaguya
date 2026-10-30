@@ -1,10 +1,10 @@
 import { useSyncExternalStore } from "react";
 import { config } from "./config";
 import type {
-  AudioEvent,
   AssistantTurn,
   EgressMessage,
   IngressMessage,
+  SessionInitEvent,
   Turn,
   WsEvent,
 } from "./types";
@@ -14,9 +14,9 @@ import type { WsStatus } from "./ws";
 
 export interface AppState {
   events: WsEvent[];
-  audioEvents: AudioEvent[];
   wsStatus: WsStatus;
   wsOpenedAt: number | null;
+  sessionIdentity: SessionInitEvent["data"] | null;
 
   selTurn: string | null;
   logsCollapsed: boolean;
@@ -28,9 +28,9 @@ export interface AppState {
 
 const initial: AppState = {
   events: [],
-  audioEvents: [],
   wsStatus: "disconnected",
   wsOpenedAt: null,
+  sessionIdentity: null,
   selTurn: null,
   logsCollapsed: false,
   searchQuery: "",
@@ -83,33 +83,27 @@ function pushEvent(ev: WsEvent): void {
   setState({ events: pushRing(state.events, ev) });
 }
 
-function pushAudioEvent(ev: AudioEvent): void {
-  setState({ audioEvents: pushRing(state.audioEvents, ev) });
-}
-
 export const actions = {
   recordWsIn(msg: EgressMessage): void {
-    pushEvent({ kind: "ws_in", ts: Date.now(), msg });
+    const event: WsEvent = { kind: "ws_in", ts: Date.now(), msg };
+    setState({
+      events: pushRing(state.events, event),
+      ...(msg.event_type === "session_init" ? { sessionIdentity: msg.data } : {}),
+    });
   },
   recordWsOut(msg: IngressMessage): void {
     pushEvent({ kind: "ws_out", ts: Date.now(), msg });
-  },
-  recordAudioIn(bytes: number): void {
-    pushAudioEvent({ kind: "audio_in", ts: Date.now(), bytes });
-  },
-  recordAudioOut(bytes: number): void {
-    pushAudioEvent({ kind: "audio_out", ts: Date.now(), bytes });
   },
   setWsStatus(status: WsStatus): void {
     if (status === "connected" && state.wsOpenedAt === null) {
       setState({ wsStatus: status, wsOpenedAt: Date.now() });
     } else if (status === "disconnected") {
-      setState({ wsStatus: status, wsOpenedAt: null });
+      setState({ wsStatus: status, wsOpenedAt: null, sessionIdentity: null });
     } else {
       setState({ wsStatus: status });
     }
   },
-  setSelTurn(turn_id: string | null): void { setState({ selTurn: turn_id }); },
+  setSelTurn(generation_id: string | null): void { setState({ selTurn: generation_id }); },
   setLogsCollapsed(v: boolean): void { setState({ logsCollapsed: v }); },
   setSearchQuery(q: string): void { setState({ searchQuery: q }); },
   setLogSrc(src: AppState["logSrc"]): void { setState({ logSrc: src }); },
@@ -134,29 +128,29 @@ export function selectTurns(events: WsEvent[]): Turn[] {
         case "response_started": {
           const t: AssistantTurn = {
             kind: "assistant",
-            turn_id: m.data.turn_id,
+            generation_id: m.data.generation_id,
             started_at: ev.ts,
             complete_at: null,
             interrupted: false,
             sentences: [],
           };
-          assistantById.set(m.data.turn_id, t);
+          assistantById.set(m.data.generation_id, t);
           turns.push(t);
           break;
         }
         case "sentence": {
-          // Append to the most recently opened, still-streaming turn.
-          const open = lastOpenAssistant(turns);
+          // Preserve the validated output-envelope generation, including delayed output.
+          const open = assistantById.get(m.data.generation_id);
           if (open) open.sentences.push({ text: m.data.text, ts: ev.ts });
           break;
         }
         case "emotion": {
-          const open = lastOpenAssistant(turns);
+          const open = assistantById.get(m.data.generation_id);
           if (open) open.emotion = m.data.emotion;
           break;
         }
         case "response_complete": {
-          const t = assistantById.get(m.data.turn_id);
+          const t = assistantById.get(m.data.generation_id);
           if (t) {
             t.complete_at = ev.ts;
             t.interrupted = m.data.interrupted;
@@ -176,13 +170,7 @@ export function selectTurns(events: WsEvent[]): Turn[] {
   return turns;
 }
 
-function lastOpenAssistant(turns: Turn[]): AssistantTurn | null {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i];
-    if (t.kind === "assistant" && t.complete_at === null) return t;
-  }
-  return null;
-}
+
 
 export function selectStreamingTurn(turns: Turn[]): AssistantTurn | null {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -196,54 +184,10 @@ export function turnDurationMs(t: AssistantTurn): number | null {
   return t.complete_at === null ? null : t.complete_at - t.started_at;
 }
 
-/**
- * "Time to first sound" — `started_at` to the first `audio_in` event
- * whose `ts` falls inside the turn. This matches the conventional TTFS
- * meaning ("when does the user actually hear something") rather than
- * the sentence-event latency used previously, which fired on text-side
- * sentence boundaries before TTS had finished rendering.
- */
-export function firstAudioLatencyMs(
-  audioEvents: AudioEvent[],
-  t: AssistantTurn,
-): number | null {
-  const end = t.complete_at ?? Number.POSITIVE_INFINITY;
-  for (const ev of audioEvents) {
-    if (ev.kind === "audio_in" && ev.ts >= t.started_at && ev.ts < end) {
-      return ev.ts - t.started_at;
-    }
-  }
-  return null;
-}
-
 export function selectWsInCount(events: WsEvent[]): number {
   return events.reduce((n, e) => n + (e.kind === "ws_in" ? 1 : 0), 0);
 }
 
 export function selectWsOutCount(events: WsEvent[]): number {
   return events.reduce((n, e) => n + (e.kind === "ws_out" ? 1 : 0), 0);
-}
-
-export function selectAudioInBytes(audioEvents: AudioEvent[]): number {
-  return audioEvents.reduce((n, e) => n + (e.kind === "audio_in" ? e.bytes : 0), 0);
-}
-
-export function selectAudioOutBytes(audioEvents: AudioEvent[]): number {
-  return audioEvents.reduce((n, e) => n + (e.kind === "audio_out" ? e.bytes : 0), 0);
-}
-
-/**
- * Bytes of TTS audio received during a given assistant turn — sum of
- * `audio_in` event byte counts with `ts ∈ [started_at, complete_at ?? +∞)`.
- * Derived purely from the audio event ring; no per-turn counter sits alongside it.
- */
-export function audioInBytesForTurn(audioEvents: AudioEvent[], t: AssistantTurn): number {
-  const end = t.complete_at ?? Number.POSITIVE_INFINITY;
-  let total = 0;
-  for (const ev of audioEvents) {
-    if (ev.kind === "audio_in" && ev.ts >= t.started_at && ev.ts < end) {
-      total += ev.bytes;
-    }
-  }
-  return total;
 }

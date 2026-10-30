@@ -9,10 +9,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::core::types::InputEvent;
 use crate::lifecycle::TaskSpawner;
 use crate::proto;
 use crate::sandbox::SandboxClient;
-use crate::types::InputEvent;
 
 struct ToolMeta {
     name: String,
@@ -99,7 +99,6 @@ impl ToolRegistry {
 
     pub fn dispatch(
         &self,
-        conversation_id: String,
         request_id: String,
         tool_name: String,
         args_json: String,
@@ -107,12 +106,11 @@ impl ToolRegistry {
     ) {
         // ── Sandbox route ──
         // `sandbox_exec` runs through a Supervisor-owned provider handle.
-        // Files persist across calls in the conversation; the normal P3
+        // Files persist across calls in the active allocation; the normal P3
         // ToolResult path remains unchanged.
         if tool_name == "sandbox_exec" {
             let sandbox = self.sandbox.clone();
             info!(
-                conversation_id = %conversation_id,
                 request_id = %request_id,
                 tool = "sandbox_exec",
                 "dispatching sandbox tool"
@@ -120,7 +118,7 @@ impl ToolRegistry {
             self.tasks
                 .spawn(format!("tool_dispatch:{tool_name}"), async move {
                     let content = match sandbox {
-                        Some(sb) => sb.exec_from_json(&conversation_id, &args_json).await,
+                        Some(sb) => sb.exec_from_json(&request_id, &args_json).await,
                         None => sandbox_error_json("sandbox disabled"),
                     };
                     let _ = p3_tx
@@ -136,7 +134,6 @@ impl ToolRegistry {
 
         // ── Filesystem tools ──
         info!(
-            conversation_id = %conversation_id,
             request_id = %request_id,
             tool = %tool_name,
             "dispatching local tool"
@@ -150,7 +147,6 @@ impl ToolRegistry {
                     "read_file" => exec_read_file(&root, &args_json).await,
                     "write_file" => exec_write_file(&root, &args_json).await,
                     // DISABLED: see tool registration above
-                    // "run_command"  => exec_run_command(&root, &args_json).await,
                     other => Err(format!("unknown tool: {other}")),
                 };
 
@@ -242,11 +238,11 @@ async fn exec_read_file(root: &Path, args: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     let trunc = if content.len() > 8192 {
-        format!(
-            "{}...[truncated, {} bytes]",
-            &content[..8192],
-            content.len()
-        )
+        let mut end = 8192;
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...[truncated, {} bytes]", &content[..end], content.len())
     } else {
         content
     };
@@ -271,45 +267,6 @@ async fn exec_write_file(root: &Path, args: &str) -> Result<String, String> {
     )
 }
 
-// Legacy direct-shell implementation retained for comparison only. It is not
-// registered; all model-authored code must use the Supervisor-owned provider.
-#[allow(dead_code)]
-async fn exec_run_command(root: &Path, args: &str) -> Result<String, String> {
-    let cmd = parse_arg(args, "cmd")?;
-    let blocked = [
-        "rm -rf /",
-        "format c:",
-        "mkfs",
-        "dd if=",
-        ":(){",
-        "shutdown",
-        "reboot",
-    ];
-    for b in &blocked {
-        if cmd.contains(b) {
-            return Err(format!("blocked: {b}"));
-        }
-    }
-    let output = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-        .args(if cfg!(windows) {
-            vec!["/C", &cmd]
-        } else {
-            vec!["-c", &cmd]
-        })
-        .current_dir(root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(serde_json::json!({
-        "exit_code": output.status.code().unwrap_or(-1),
-        "stdout": &stdout[..stdout.len().min(4096)],
-        "stderr": &stderr[..stderr.len().min(2048)],
-    })
-    .to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -320,18 +277,56 @@ mod tests {
 
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
+    use crate::session_scope::SessionScope;
+
+    /// The Supervisor crate compiles its own copy of the shared scope type.
+    fn supervisor_scope(scope: SessionScope) -> kaguya_supervisor::session_scope::SessionScope {
+        kaguya_supervisor::session_scope::SessionScope::parse(
+            &scope.instance_id().to_string(),
+            &scope.session_id().to_string(),
+        )
+        .unwrap()
+    }
+
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn read_file_truncates_utf8_at_a_character_boundary() {
+        let root = std::env::temp_dir().join(format!("kaguya-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("unicode.txt"), "界".repeat(3000)).unwrap();
+        let result = exec_read_file(&root, r#"{"path":"unicode.txt"}"#)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let content = result["content"].as_str().unwrap();
+        assert!(content.starts_with(&"界".repeat(2730)));
+        assert!(content.ends_with("...[truncated, 9000 bytes]"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn sandbox_tool_dispatch_completes_full_supervisor_chain() {
-        let supervisor = SupervisorApp::new(ResolvedRuntimeConfig {
-            config: RuntimeConfig {
-                profile: Some("test".into()),
-                supervisor_addr: "127.0.0.1:0".into(),
-                sandbox: SandboxConfig::default(),
-                processes: BTreeMap::new(),
+        let scope = test_scope();
+        let supervisor = SupervisorApp::new(
+            ResolvedRuntimeConfig {
+                config: RuntimeConfig {
+                    profile: Some("test".into()),
+                    supervisor_addr: "127.0.0.1:0".into(),
+                    sandbox: SandboxConfig::default(),
+                    processes: BTreeMap::new(),
+                },
+                base_dir: ".".into(),
             },
-            base_dir: ".".into(),
-        });
+            supervisor_scope(scope),
+        )
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
@@ -339,7 +334,7 @@ mod tests {
         });
 
         let sandbox = Arc::new(
-            SandboxClient::connect(format!("http://{addr}"))
+            SandboxClient::connect(format!("http://{addr}"), scope)
                 .await
                 .unwrap(),
         );
@@ -352,7 +347,6 @@ mod tests {
         let (result_tx, mut result_rx) = mpsc::channel(1);
 
         tools.dispatch(
-            "full-chain-conversation".into(),
             "full-chain-request".into(),
             "sandbox_exec".into(),
             r#"{"language":"python","code":"print(21 * 2)"}"#.into(),
@@ -364,6 +358,7 @@ mod tests {
             request_id,
             tool_name,
             content,
+            ..
         } = result
         else {
             panic!("expected ToolResult");
@@ -389,7 +384,6 @@ mod tests {
         let (result_tx, mut result_rx) = mpsc::channel(1);
 
         tools.dispatch(
-            "conversation".into(),
             "request".into(),
             "sandbox_exec".into(),
             r#"{"language":"python","code":"print(1)"}"#.into(),

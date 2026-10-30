@@ -38,7 +38,7 @@ impl History {
         self.push(proto::Role::Tool, result, tool_name).await;
     }
 
-    /// 获取最近 N 轮 — 直接作为 TalkerContext.history，零转换
+    /// Return the configured recent message window for prompt snapshots.
     pub async fn recent(&self) -> Vec<proto::ChatMessage> {
         let t = self.turns.read().await;
         let start = t.len().saturating_sub(self.max_recent);

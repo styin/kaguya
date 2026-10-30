@@ -15,6 +15,7 @@
 //! - [`lifecycle`] — Task supervision, connection readiness, and reconnect policies.
 //! - [`services`] — Inbound gRPC/WebSocket servers the Gateway exposes.
 //! - [`config`] — Gateway-local and runtime topology configuration.
+//! - [`instance`] — Durable instance identity, data paths, and lifecycle.
 //! - [`rag`] — Retrieval-augmented generation (embedding, retrieval, memory store).
 //! - [`sandbox`] — Client for the Supervisor-owned `sandbox_exec` provider.
 //! - [`tools`] — Tool registry and dispatch for the Talker's tool-use protocol.
@@ -22,10 +23,14 @@
 pub mod app;
 pub mod capabilities;
 pub mod config;
-pub mod error;
+#[path = "../../shared/deployment.rs"]
+pub mod deployment;
+pub mod instance;
 pub mod lifecycle;
 pub mod rag;
 pub mod sandbox;
+#[path = "../../shared/session_scope.rs"]
+pub mod session_scope;
 pub mod telemetry;
 pub mod tools;
 
@@ -57,14 +62,6 @@ pub mod services {
     #[cfg(feature = "dev-console")]
     pub mod endpoint;
 }
-
-pub use clients::{audio_sink, listener, probe, reasoner, talker};
-pub use core::{
-    context, history, input_stream, narration, output, persona, pipeline, silence, types,
-};
-pub use services::control;
-#[cfg(feature = "dev-console")]
-pub use services::endpoint;
 
 pub mod proto {
     tonic::include_proto!("kaguya.v1");

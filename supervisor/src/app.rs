@@ -29,6 +29,7 @@ use crate::process::{
     ManagedProcessSnapshot, ManagedProcessStatus,
 };
 use crate::sandbox::{SandboxManager, SandboxProvider};
+use crate::session_scope::SessionScope;
 use crate::telemetry::TelemetryHub;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -37,6 +38,7 @@ const MONITOR_INTERVAL: Duration = Duration::from_millis(250);
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const RESTART_BASE_DELAY: Duration = Duration::from_millis(500);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(5);
+const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 static RESOURCE_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Top-level process orchestrator.
@@ -52,6 +54,7 @@ pub struct SupervisorApp {
     http: reqwest::Client,
     sandbox: SandboxProvider,
     telemetry: TelemetryHub,
+    scope: SessionScope,
 }
 
 struct SupervisorInner {
@@ -154,7 +157,13 @@ pub struct GatewayConnectionStatus {
 }
 
 impl SupervisorApp {
-    pub fn new(resolved: ResolvedRuntimeConfig) -> Self {
+    /// `scope` is the instance/session pair from the selected manifest.
+    pub fn new(resolved: ResolvedRuntimeConfig, scope: SessionScope) -> anyhow::Result<Self> {
+        let manager = SandboxManager::from_config(&resolved.config.sandbox)?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(STATUS_REQUEST_TIMEOUT)
+            .build()?;
         let logs = LogStore::new();
         let telemetry = TelemetryHub::new();
         let (log_tx, mut log_rx) = mpsc::unbounded_channel::<ManagedProcessLogLine>();
@@ -187,18 +196,9 @@ impl SupervisorApp {
                 )
             })
             .collect();
-        let sandbox = match SandboxManager::from_config(
-            &resolved.config.sandbox,
-            resolved.config.sandbox.workspace_root.clone(),
-        ) {
-            Ok(manager) => SandboxProvider::new(manager).with_telemetry(telemetry.clone()),
-            Err(error) => {
-                tracing::warn!(%error, "sandbox provider initialization failed; disabling provider");
-                SandboxProvider::disabled().with_telemetry(telemetry.clone())
-            }
-        };
+        let sandbox = SandboxProvider::new(manager).with_telemetry(telemetry.clone(), scope);
 
-        Self {
+        Ok(Self {
             inner: std::sync::Arc::new(Mutex::new(SupervisorInner {
                 config: resolved.config,
                 processes,
@@ -206,10 +206,23 @@ impl SupervisorApp {
             })),
             logs,
             log_tx,
-            http: reqwest::Client::new(),
+            http,
             sandbox,
             telemetry,
+            scope,
+        })
+    }
+
+    pub fn scope(&self) -> SessionScope {
+        self.scope
+    }
+
+    /// Check a request's instance/session pair at the HTTP boundary.
+    pub fn require_scope(&self, instance_id: &str, session_id: &str) -> anyhow::Result<()> {
+        if SessionScope::parse(instance_id, session_id)? != self.scope {
+            anyhow::bail!("Supervisor serves a different instance/session");
         }
+        Ok(())
     }
 
     pub fn logs(&self) -> LogStore {
@@ -292,12 +305,17 @@ impl SupervisorApp {
         self.sandbox.prewarm().await;
     }
 
-    pub async fn acquire_sandbox(&self, session: &str) -> anyhow::Result<String> {
-        self.sandbox.acquire(session).await
+    pub async fn acquire_sandbox(&self, allocation_id: &str) -> anyhow::Result<String> {
+        self.sandbox.acquire(allocation_id).await
     }
 
-    pub async fn execute_in_sandbox(&self, handle: &str, args_json: &str) -> String {
-        self.sandbox.execute(handle, args_json).await
+    pub async fn execute_in_sandbox(
+        &self,
+        handle: &str,
+        request_id: &str,
+        args_json: &str,
+    ) -> String {
+        self.sandbox.execute(handle, request_id, args_json).await
     }
 
     pub async fn release_sandbox(&self, handle: &str) -> anyhow::Result<()> {
@@ -306,9 +324,9 @@ impl SupervisorApp {
 
     pub async fn start_process(&self, name: &str) -> anyhow::Result<()> {
         // A crashed Gateway cannot release its opaque handles. Clear stale
-        // conversation resources before every initial start or restart.
+        // session resources before every initial start or restart.
         if name == "gateway" {
-            self.sandbox.cleanup_sessions().await;
+            self.sandbox.cleanup_allocations().await;
         }
         let mut inner = self.inner.lock().await;
         inner.restart_disabled = false;
@@ -560,7 +578,8 @@ impl SupervisorApp {
             return;
         };
 
-        match gateway::request_gateway_shutdown(&endpoint, GATEWAY_DRAIN_TIMEOUT).await {
+        match gateway::request_gateway_shutdown(&endpoint, self.scope, GATEWAY_DRAIN_TIMEOUT).await
+        {
             Ok(()) => self.logs.push(
                 "gateway",
                 "stdout",
@@ -602,17 +621,11 @@ impl SupervisorApp {
             inner
                 .processes
                 .get("gateway")
-                .and_then(|state| {
-                    state
-                        .spec
-                        .endpoints
-                        .get("websocket")
-                        .or_else(|| state.spec.endpoints.get("http"))
-                })
+                .and_then(|state| state.spec.endpoints.get("websocket"))
                 .cloned()
         }?;
 
-        let url = format!("{}/capabilities/status", endpoint.trim_end_matches('/'));
+        let url = format!("{}/runtime/status", endpoint.trim_end_matches('/'));
         let response = self.http.get(url).send().await.ok()?;
         if !response.status().is_success() {
             return None;
@@ -873,6 +886,29 @@ mod tests {
         Arc,
     };
 
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            "01234567-89ab-4cde-8fab-0123456789ab",
+            "fedcba98-7654-4321-8fed-cba987654321",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_scope_must_match_the_served_scope() {
+        let app = test_app_with_processes(BTreeMap::new());
+        let scope = app.scope();
+        let (instance, session) = (
+            scope.instance_id().to_string(),
+            scope.session_id().to_string(),
+        );
+        assert!(app.require_scope(&instance, &session).is_ok());
+        assert!(app
+            .require_scope(&instance, &uuid::Uuid::new_v4().to_string())
+            .is_err());
+        assert!(app.require_scope("invalid", &session).is_err());
+    }
+
     fn test_spec(command: String, restart: RestartPolicy) -> ProcessSpec {
         ProcessSpec {
             enabled: true,
@@ -886,6 +922,7 @@ mod tests {
             env: BTreeMap::new(),
             bind: BTreeMap::new(),
             provides: vec![],
+            capabilities: BTreeMap::new(),
             depends_on: vec![],
             endpoints: BTreeMap::new(),
             health_url: None,
@@ -902,18 +939,47 @@ mod tests {
     }
 
     fn test_app_with_processes(processes: BTreeMap<String, ProcessSpec>) -> SupervisorApp {
-        SupervisorApp::new(ResolvedRuntimeConfig {
-            config: RuntimeConfig {
-                profile: Some("test".to_string()),
-                supervisor_addr: "127.0.0.1:0".to_string(),
-                sandbox: SandboxConfig {
-                    enabled: false,
-                    ..SandboxConfig::default()
+        SupervisorApp::new(
+            ResolvedRuntimeConfig {
+                config: RuntimeConfig {
+                    profile: Some("test".to_string()),
+                    supervisor_addr: "127.0.0.1:0".to_string(),
+                    sandbox: SandboxConfig {
+                        enabled: false,
+                        ..SandboxConfig::default()
+                    },
+                    processes,
                 },
-                processes,
+                base_dir: ".".into(),
             },
-            base_dir: ".".into(),
-        })
+            test_scope(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gateway_status_returns_when_endpoint_stalls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _hold = socket;
+            std::future::pending::<()>().await;
+        });
+        let mut spec = test_spec(String::new(), RestartPolicy::Never);
+        spec.endpoints
+            .insert("websocket".into(), format!("http://{address}"));
+        let app = test_app_with_processes(BTreeMap::from([("gateway".into(), spec)]));
+
+        let result = tokio::time::timeout(
+            STATUS_REQUEST_TIMEOUT + Duration::from_secs(2),
+            app.fetch_gateway_status(),
+        )
+        .await;
+        server.abort();
+        assert!(result
+            .expect("Gateway status must have a bounded request timeout")
+            .is_none());
     }
 
     #[tokio::test]

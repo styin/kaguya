@@ -2,11 +2,11 @@
 
 **Version:** 0.1.0
 
-**Updated:** 2026-09-18
+**Updated:** 2026-10-30
 
 **Scope:** Existing voice-stack baseline, Gateway refactor, and the next application systems
 
-**Progress evidence:** Original baseline inspection used `633ec49`. The approved R0 extraction is now applied on `gateway-refactor` after documentation commit `b4eecd4`; its Windows build/test evidence is recorded below. Other stages have not received fresh runtime acceptance.
+**Progress evidence:** R1a instance/deployment closure and the fixed-scope protocol cleanup are implemented on `sessions` with focused Windows validation. The R1a review follow-up (single in-process scope, process-boundary checks only, per-user instance locks, `init-instance --dry-run`, `fork-instance`) has Linux validation (§2.3); supported-host/deployment acceptance remains open. The selected R1b generation/session/utterance renames are implemented; the complete naming inventory and acceptance remain open. R1c and the accepted R1d follow-up remain unimplemented.
 
 ## 0. How to Use This Plan
 
@@ -25,9 +25,8 @@ policy, task, workspace, and execution foundations.
 The [protobuf schema](../proto/kaguya/v1/kaguya.proto) is authoritative for current
 wire messages. [Gateway §1.1](spec-gateway-v0.1.0.md#11-configuration-driven-application-composition)
 records the accepted composition-root design. The Gateway spec now separates
-current behavior from accepted targets and remaining gaps. Older Endpoint spec
-sections still need the R7 reconciliation; their old process diagrams and
-directory tree must not override the ownership boundaries below or be read as current progress.
+current behavior from accepted targets and remaining gaps. The [Endpoint spec](spec-endpoint-v0.1.0.md) describes the current Console
+contract and identifies the deferred R7 surfaces.
 
 ## 1. Ownership and Extension Boundaries
 
@@ -44,8 +43,8 @@ directory tree must not override the ownership boundaries below or be read as cu
 
 Preserve these constraints throughout the work:
 
-- Keep one continuous Kaguya conversation possible across reconnects and restarts. Session identity does not require introducing a multi-chat product.
-- Keep session, turn, tool request, application task, backend session, workspace, and execution-handle identities distinct.
+- Bind a durable `InstanceId` to service configuration and select one default `SessionId` for its continuous conversation. Keep the identities distinct; ordinary configuration edits and process restarts preserve both. Additional sessions remain future work.
+- Keep instance, session, generation, conversational turn, tool request, application task, Reasoner run, backend session, workspace, and sandbox-allocation identities distinct. Cancellation tokens are control objects, not durable identities.
 - Keep authoritative history separate from derived RAG memories.
 - Keep logical workspace association separate from cwd, checkout materialization, access policy, runtime allocation, and file deletion.
 - Keep provider identity, capability identity, and process identity separate. One process/provider may supply several capabilities.
@@ -61,21 +60,21 @@ passed all acceptance tests. Remaining work is assigned to the active stages.
 
 | Historical area | Source status | Remaining work |
 | --- | --- | --- |
-| M0 — Scaffolding/proto | Rust/Python/TypeScript scaffolding, canonical schema, generators and CI exist | Contract updates and fresh checks as each new system lands |
-| M1 — Gateway | Priority queues, pipeline, in-memory history, persona, RAG, clients, timers and reconnect exist | R0–R5; durable history and identity are absent |
+| M0 — Scaffolding/proto | Rust/Python components, Console, canonical schema, generators and CI exist | Contract updates and fresh checks as each new system lands |
+| M1 — Gateway | Pipeline, in-memory history, persona/RAG, clients, and R1a durable instance/session identity exist | Durable transcript/recovery remains R1c; policy/task/workspace/binding remains R2–R5 |
 | M2 — Listener | Raw audio ingress, PCM/Opus handling, STT and turn detection exist | R7/R8 voice-path and cross-platform validation |
 | M3 — Talker | Converse, inline barge-in, prompt formatting, LLM client, sentence/tag processing and local TTS exist | R7 browser TTS egress; R8 behavioral validation |
 | M4 — Toolkit | Rust Gateway registry/filesystem tools and Supervisor `sandbox_exec` exist | R2/R4/R5 policy and workspace binding; future tool inventory remains open |
-| M5 — Reasoner | Package configuration and Gateway client exist; no `reasoner/src/` implementation | R6, after R1–R5 |
+| M5 — Reasoner | Gateway client and protocol contract exist; Reasoner service is unimplemented | R6, after R1–R5 |
 | M6 — Endpoint/Console | React/Vite Console, Gateway WebSocket endpoint, process controls and log streaming exist | R7 domain views, recovery, audio completion and UI validation |
 | M7 — Integration | Focused unit/contract tests and CI jobs exist | R8 system acceptance; no new end-to-end results claimed here |
 | Supervisor additions | Process orchestration, sandbox backends, HTTP/SSE logs and telemetry exist | R5 binding/recovery integration and R7 observability |
 
 ### 2.1 Confirmed Implementation
 
-- [x] Canonical protobuf schema and buf lint/breaking workflow exist. Python stubs are committed and generated by `talker/scripts/gen_proto.py`; Rust stubs are generated into build output by each crate's `build.rs` using vendored protoc. Reasoner scaffolding declares runtime proto loading. Sources: [schema](../proto/kaguya/v1/kaguya.proto), [Makefile](../Makefile), [proto CI](../.github/workflows/proto-lint.yml).
+- [x] Canonical protobuf schema and buf lint/format workflow exist. Python stubs are committed and generated by `talker/scripts/gen_proto.py`; Rust stubs are generated into build output by each crate's `build.rs` using vendored protoc. Sources: [schema](../proto/kaguya/v1/kaguya.proto), [Makefile](../Makefile), [proto CI](../.github/workflows/proto-lint.yml).
 - [x] Gateway has P1–P5 queues plus separate P0 control, pure pipeline handlers and an action executor. Sources: [input stream](../gateway/src/core/input_stream.rs), [pipeline](../gateway/src/core/pipeline/).
-- [x] In-memory `History`, turn state, context assembly, persona loading/watching and silence timers exist. Only SOUL.md and IDENTITY.md are watched. Sources: [core](../gateway/src/core/), [startup](../gateway/src/app.rs).
+- [x] In-memory `History`, session state, context assembly, persona loading/watching and silence timers exist. Only SOUL.md and IDENTITY.md are watched. Sources: [core](../gateway/src/core/), [startup](../gateway/src/app.rs).
 - [x] SQLite/BM25 RAG, optional embeddings, memory export and `RagCapability` injection exist. Current extraction is gated by user-intent/non-interrupted response handling. Sources: [RAG](../gateway/src/rag/), [capability](../gateway/src/capabilities/rag.rs), [handlers](../gateway/src/core/pipeline/handlers.rs).
 - [x] Gateway connects to Listener and Talker servers, and has a Reasoner client. Gateway serves RouterControlService and, with `dev-console`, the endpoint. Sources: [clients](../gateway/src/clients/), [services](../gateway/src/services/), [voice service startup](../talker/main.py).
 - [x] Gateway task supervision, connection readiness, reconnect and shutdown primitives exist. Source: [lifecycle](../gateway/src/lifecycle/).
@@ -83,33 +82,73 @@ passed all acceptance tests. Remaining work is assigned to the active stages.
 - [x] Supervisor sandbox acquire/execute/release and native, Docker, Bubblewrap and feature-gated Windows Job Object backends exist. Their isolation guarantees differ. Sources: [sandbox](../supervisor/src/sandbox/), [contract tests](../supervisor/tests/sandbox_backend_contract.rs).
 - [x] Gateway registers `list_files`, `read_file`, `write_file`, and conditionally `sandbox_exec`. File tools use Gateway's configured root; sandbox execution uses Supervisor scratch/container storage, not yet a shared logical-workspace binding. Sources: [tools](../gateway/src/tools.rs), [sandbox client](../gateway/src/sandbox/mod.rs).
 - [x] Listener implements STT/VAD integration, thread-safe turn detection and a raw length-prefixed TCP audio server; Talker implements Converse, PrefillCache, UpdatePersona, inline BargeInAck and local TTS. Sources: [voice](../talker/voice/), [inference](../talker/inference/), [server](../talker/server.py).
-- [x] Gateway tracks active Reasoner requests and cancellation in its client. When unavailable it currently emits simulated fallback progress/completion; this is not a working Reasoner. Source: [Reasoner client](../gateway/src/clients/reasoner.rs).
-- [x] Console implements text input, streamed turn views, connection state, audio capture/playback components, process/app controls, and log snapshot/SSE display. Browser state is ephemeral; browser TTS has no producer yet. Sources: [Console application](../console/src/App.tsx), [regions](../console/src/regions/), [store](../console/src/store.ts), [Supervisor proxy](../console/server/plugin.ts).
+- [x] Gateway tracks active Reasoner requests and cancellation in its client. Unavailability emits a scoped task error; it does not simulate progress or completion. Source: [Reasoner client](../gateway/src/clients/reasoner.rs).
+- [x] Console implements text input, streamed turn views, connection state, microphone capture components, process/app controls, and log snapshot/SSE display. Browser state is ephemeral; browser TTS transport remains deferred. Sources: [Console application](../console/src/App.tsx), [regions](../console/src/regions/), [store](../console/src/store.ts), [Supervisor proxy](../console/server/plugin.ts).
 - [x] Focused pipeline, reconnect/lifecycle, sandbox, prompt, sentence, turn-threading and gRPC-handshake tests and cross-platform CI definitions exist. Sources: [CI](../.github/workflows/ci.yml), [Talker tests](../talker/tests/), [Supervisor tests](../supervisor/tests/).
 
 ### 2.2 Known Gaps Carried Forward
 
-- Fresh conversation UUID on Gateway startup; no durable transcript reload or server-authoritative session bootstrap for Console → R1/R7.
-- Approval handling is a placeholder; no shared user-policy resolution/enforcement path → R2.
+- R1a provides durable instance/session identity and Console identity bootstrap; durable transcript reload and replay remain R1c/R7.
+- Gateway accepts Talker output by generation for its stream but does not yet drop output from a superseded generation, and Talker does not limit concurrent `Converse` calls → generation-correctness step before R1c.
+- `ApprovalSignal` remains declared but returns `UNIMPLEMENTED` without P0 enqueue or granting authority; shared user-policy resolution/enforcement remains R2.
+- Listener retains a bidirectional control extension point; declared reset requests return `UNIMPLEMENTED`, and future pause/reconfiguration semantics remain undefined.
 - Active Reasoner entries are volatile client state, not durable task management → R3.
 - A configured filesystem root and sandbox scratch directories are not a workspace registry or execution binding → R4/R5.
-- Reasoner package has no service/backend implementation; its configured on-demand launch is not a complete dispatch path → R6.
-- TTS plays on the voice-service host; the browser playback pipeline has no Talker audio feed → R7.
-- History truncation counts messages rather than complete exchanges; summarization and an aggregate context-size guard are absent. The old 200-character retrieval-cap assumption is invalid; output caps are optional → R1/R8.
+- Reasoner has no service/backend implementation or launchable package → R6.
+- TTS plays on the voice-service host; the browser has no speech playback transport → R7.
+- History truncation counts messages rather than complete exchanges; summarization and an aggregate context-size guard are absent. Retrieval output caps are optional → R1/R8.
 - Long awaits inside an event-loop branch can delay P0 processing despite biased selection → R0/R8.
 - MCP, `web_fetch`, `search_tools`, and a standalone TypeScript Toolkit are not implemented → R5 inventory decision and deferred scope.
+
+### 2.3 Current Validation (2026-10-28, Windows)
+
+The repository cleanup and Listener/approval contract follow-up passed these
+local checks. The unchanged Console retains its initial audit results:
+
+| Component | Result |
+| --- | --- |
+| Gateway | 120 library + 6 CLI tests; `dev-console`: 122 + 6 CLI + 1 real Gateway/Supervisor status-contract test |
+| Supervisor | 52 tests; `sandbox-jobobject`: 55 |
+| Talker | 246 tests; mypy on 14 runtime files; Ruff 0.16.6 lint/format on 28 files |
+| Console | 21 tests, browser/server TypeScript checks, Vite production build; npm audit: zero reported vulnerabilities |
+| Contracts/tooling | `make proto`, buf lint/format, Rust formatting, Gateway rustdoc with broken links denied, local documentation links and diff whitespace |
+
+Follow-up regressions verify approval returns `UNIMPLEMENTED` without entering
+P0, Listener initialization/control ordering and request half-close behavior,
+and the Supervisor's status request against the actual Gateway router.
+
+Docker's conditional test did not exercise an unavailable daemon; Bubblewrap
+was unavailable on this Windows host.
+
+R1a review follow-up (2026-10-30, Linux container):
+
+| Component | Result |
+| --- | --- |
+| Gateway | 121 library + 6 CLI tests; `dev-console`: 123 + 6 CLI + 1 real Gateway/Supervisor status-contract test; `cargo fmt --check` |
+| Supervisor | All `cargo test` targets pass (37 library, 3 + 3 + 11 integration); `cargo fmt --check` |
+| Talker | 245 tests (CI dependency set, CPython 3.13); mypy on 14 runtime files; Ruff 0.16.6 lint/format on 28 files |
+| Console | 21 tests and the browser/server production build |
+| Contracts/tooling | `make proto-py` with the locked grpcio-tools 1.78.0 and mypy-protobuf 5.0.0; `buf lint` and `buf format --diff --exit-code` (buf 1.47.2) |
+| Manual | Two Gateways on a restored copy of one instance with different `TMPDIR` values: the second is rejected. Config typo reports the key and line/column. `init-instance --dry-run` creates nothing and refuses a selected deployment. |
+
+Windows/macOS hosts, the Job Object and Bubblewrap backends, and live voice were
+not exercised in this run. These checks do not establish live
+voice/GPU/browser acceptance, cross-host Windows/macOS/Linux operation, or
+completion of the deferred R1-R8 systems. The audit removed compatibility
+scaffolding and false-success paths; remaining architecture work stays in the
+stages below.
 
 ## 3. Active Implementation Sequence
 
 | Stage | Focus | Main prerequisites | Status |
 | --- | --- | --- | --- |
 | R0 | Structural extraction and documentation alignment | Existing baseline | Complete for this extraction; Windows checks passed; R8 responsiveness/live/cross-host acceptance remains open |
-| R1 | Session: identity and persistence | R0 | In-memory precursor only |
-| R2 | Policy management | R1 identity | Pending |
+| R1 | Instance/session identity; generation semantics; persistence; configuration foundation | R0 | R1a implementation/Windows checks present; R1a host/deployment acceptance and R1b → R1c → R1d remain |
+| R2 | Policy management | R1 identity and R1d deployment policy foundation | Pending |
 | R3 | Task management and lifecycle | R1; R2 approval semantics | Volatile delegation precursor only |
 | R4 | Workspace management and lifecycle | R1/R3 association contracts | Configured-root precursor only |
 | R5 | Sandbox hookup and execution binding | R2–R4; existing Supervisor | Backend infrastructure present; binding pending |
-| R6 | Build Reasoner | R3/R5; capability/protocol decisions | Scaffolding/client only |
+| R6 | Build Reasoner | R3/R5; capability/protocol decisions | Client/protocol only |
 | R7 | Complete and update Console | APIs from R1–R6 | Existing UI partial |
 | R8 | Integration and release validation | Acceptance gates from R0–R7 | Pending |
 
@@ -127,8 +166,8 @@ introducing a plugin framework.
 - [x] Extract the existing event loop into `gateway/src/core/pipeline/run.rs`, retaining P0's separate control branch and existing handler/action boundaries.
 - [x] Keep existing concrete provider construction in assembly and RAG use behind its capability; no generalized provider registry or new core systems are introduced by this extraction.
 - [x] Keep provider background work under the existing lifecycle owner; preserve Supervisor process/sandbox ownership.
-- [x] Keep new responsibilities as files in the existing structure; update `lib.rs` exports and `gateway/structure.txt` to match the actual extraction.
-- [x] Reconcile stale Gateway spec claims about process spawning, client/server direction, interruption protocol, session identity, transport, memory behavior, and actual versus planned audio egress. Extraction status updated on 2026-09-18.
+- [x] Keep new responsibilities as files in the existing structure; update module declarations and imports to match the actual extraction.
+- [x] Reconcile stale Gateway spec claims about process spawning, client/server direction, interruption protocol, session identity, transport, memory behavior, and actual versus planned audio egress.
 - [x] Identify blocking/long awaits on the P0 path and record the required scheduling/cancellation correction separately from mechanical file moves; preserve the responsiveness requirement.
 
 **Acceptance:** Existing behavior remains covered after extraction. Run Gateway
@@ -136,45 +175,91 @@ format/build/tests including `dev-console`, inspect dependency direction, and
 record any remaining P0 responsiveness gap for R8. Do not mark the extraction
 complete solely because the files moved.
 
-**Recorded validation (2026-09-18, Windows):** Both default and `dev-console`
-builds passed with `--locked --offline`. `cargo test --locked --offline
---all-targets` passed 99 tests; adding `--features dev-console` passed 100 tests.
-`cargo fmt --all -- --check` and `git diff --check` passed. The extracted
-assembly, event loop and entry point matched the approved source transformations
-after ignoring formatting outside literals/comments. No additional substantive
-runtime changes were required. No live voice-stack or macOS/Linux run is claimed.
-
-**Unchanged R8 follow-up:** The loop still awaits retrieval and history access,
+**R8 follow-up:** The loop still awaits retrieval and history access,
 then sequential action execution including provider calls and post-turn work.
 P0 itself awaits Reasoner cancellation, Talker barge-in or lifecycle shutdown.
 Biased selection cannot interrupt a selected branch's await. R8 must establish
 and verify the scheduling/cancellation design for responsive control under slow
-work; this extraction deliberately leaves those statements and their order
-unchanged.
+work.
 
 ### R1 — Session: Identity and Persistence
 
-**Goal:** A continuous conversation has durable identity and authoritative history
-independent of process, connection, and transient backend lifetimes.
+**Guiding checklist:** Each checkbox groups changes that must land together.
+The accepted order is R1a → R1b → generation correctness → R1c → R1d → R2.
+Complete the dedicated R1b refactor before R1c commits history-schema semantics. R1d handles broader
+deployment consolidation without expanding R1b's semantic refactor.
 
-**[OPEN]:** Define what `session_id` and the existing `conversation_id` each mean,
-whether they are the same identity, how a session is selected at startup, and how
-the persistence format/schema is versioned. Preserve continuity without assuming
-a multi-conversation UI or a particular storage/event-sourcing design.
+#### R1a — Instance Lifecycle, Deployment Selection, and Binding
 
-- [ ] Define stable session identity, metadata and its relationship to turn/request/task IDs.
-- [ ] Replace unconditional fresh startup identity with explicit create/load/resume behavior.
-- [ ] Choose and implement durable history storage with a clear write boundary, ordering, error reporting and schema/migration policy.
-- [ ] Persist user inputs, assistant responses and tool results with correlation; define treatment of incomplete turns and confirmed-spoken partial responses on interruption.
-- [ ] Make transcript retention independent of Talker readiness and the current prompt window; define failed/queued input behavior rather than silently losing input.
-- [ ] Restore history after restart and prevent duplicates during reconnect/retry; keep derived RAG ingestion separate from transcript persistence.
-- [ ] Define recent-context selection in messages versus exchanges, retention/deletion behavior, and a compaction interface. Record the status of future LLM summarization separately.
-- [ ] Expose authoritative session identity and history snapshot/resume APIs for Console; define how snapshots and live updates join without gaps or duplication.
+- [x] **Identity + configuration + startup:** Introduce validated `InstanceId` and default `SessionId`, initialize/save them once, and resolve the same configuration under managed and standalone startup. Surface configuration failures and stop startup when identity cannot be resolved reliably; no silent default identity. Define restore versus independent-copy behavior. Use canonical `session_id` / `SessionRef` throughout the runtime contract.
+- [x] **Associations + enforcement + exposure:** Each process holds its resolved instance/session as one scope; clients stamp it on the messages they send, and each process checks an incoming scope once at its boundary (gRPC, HTTP, raw audio). No scope fields or checks on internal events, callbacks or calls. Expose identity through runtime/endpoint bootstrap. Establish instance-owned data locations and reject incompatible service bindings (one `FAILED_PRECONDITION` signal, fatal to Gateway) or duplicate local instance use (per-user lock directory, independent of `TMPDIR`). Retain one active session; history schemas and service multiplexing are later work.
+- [x] **Allocation lifetime + transport + telemetry:** Separate sandbox allocation keys/handles from conversation identity and tool request IDs across Gateway/Supervisor contracts, cleanup, and event correlation. Use `supervisor_run_id` for ephemeral Docker runtime ownership; preserve its ephemeral lifetime and cleanup behavior under the `kaguya.sandbox.supervisor_run` label. Full workspace/task execution binding remains R5.
+- [x] **Authoritative selection + portable paths:** Runtime TOML selects Gateway settings and explicit portable storage; its instance reference is portable-root-relative. One shared Rust selection/path resolver applies CLI → environment → documented discovery/profile precedence. Managed and direct Console/CLI paths propagate the absolute root/profile; no independent Gateway identity selector remains.
+- [x] **Instance-local manifest + explicit handoff:** The selected `instances/<InstanceId>/instance.toml` is the sole identity authority and its parent the exact data root. Enforce directory/manifest identity agreement, validate manifest IDs and retain both local leases. `init-instance` / `fork-instance` create verified new directories and print the new selection without rewriting deployment files; `init-instance --dry-run` checks and prints without creating anything.
+- [x] **Terminology + separation:** Keep `instance.rs` / `InstanceIdentity` / `InstanceLease` as the compact lifecycle module. Gateway and Supervisor hold one validated `SessionScope` (`shared/session_scope.rs`) and convert to the generated `SessionRef` only on the wire. Supervisor receives its scope at construction (no bind endpoint, no per-allocation owner); its HTTP adapters keep scalar ID fields and check them per request, including telemetry ingest. Python keeps its immutable `InstanceSessionBinding`. Telemetry carries the configured pair. One instance/session per process is the decided model; the wire scope is the extension point for multiple sessions (owner decision, 2026-10-29/30). Preserve persona identity names, manifest schema/fields, `shared/deployment.rs`, and the Cargo package layout; broader deployment consolidation remains R1d.
+- [x] **Fixed-scope protocol + bootstrap:** One instance/session pair is required at runtime construction. Supervisor and Console's Gateway diagnostics preflight validate the selected manifest and supply authoritative child environment. Voice validates it before accepting traffic; no lazy first-caller binding remains. Named protobuf ID objects inside `SessionRef` carry the configured scope. Unary requests and initial stream messages assert the fixed pair; later messages on a stream (`BargeInSignal`, `TaskContext`) carry no scope. Scope is validated before request effects. Talker acknowledges only the first barge-in of a `Converse`. Keep `UpdatePersona` as a change-driven scoped RPC. No instance/session routing or multiplexing is introduced.
+- [x] **Typed generation context + provenance:** Use `GenerationStart`, shared `PromptContext`, typed active tasks, and a trigger oneof with consistent tool `request_id` / Reasoner `task_id`. Every `TalkerOutput` carries its generation in the outer protobuf envelope; validate it against the dispatch before queuing the generated message directly and projecting it into Console events. Lifecycle payloads do not duplicate the ID. Preserve current cancellation, scheduling and stale-output acceptance policy; stronger generation lifecycle handling is separate work.
+- [x] **Nonmutating diagnostics + trust:** `validate-config` / `show-config` resolve the implemented selection/settings/identity subset without launch, directories, leases, ports, or database writes, and require an initialized instance; `init-instance --dry-run` covers the uninitialized case. Allowlisted output; errors give line/column and key names but never configured values or endpoint addresses; provenance lists only settings with a value. Document shell launch configuration as trusted executable input.
+- [ ] **Acceptance:** Verify stable identity across restarts/configuration edits, independent instance initialization, invalid/missing configuration failures (line/column errors), mismatched-owner rejection through Talker, Listener and a Supervisor serving another pair, duplicate restored instances under different `TMPDIR` values, `init-instance --dry-run` creating nothing and refusing exactly what init refuses, `fork-instance` preserving its source, and allocation release without session replacement. Record what happens when the selection is edited while Supervisor runs and Gateway restarts (re-resolution is R1d). Exercise affected Gateway/Supervisor contracts and Windows/macOS path behavior; distinguish tests actually run from unsupported-host checks.
 
-**Acceptance:** Tests cover restart continuity, storage failure, interrupted
-responses, duplicate delivery, and reconnect to the same session. A bounded
-prompt window must not erase durable history. Detailed retention and recovery
-choices remain open until recorded.
+R1a's selected schema, CLI handoff, storage/binding semantics, diagnostic limits,
+and follow-ups are recorded in [instance lifecycle and deployment selection](r1a-identity.md).
+
+#### R1b — Semantic Refactor of `turn*` (dedicated session)
+
+- [ ] **Complete inventory + naming map:** Classify every remaining `turn*` field, type, function, history/configuration counter, event, and test by actual meaning. The October 23 cleanup uses `generation_id` for one Talker dispatch, `last_user_generation_id` for the latest user-intent generation, `SessionState` for session-wide state, and `utterance_epoch` for Listener's local reset counter. Message-count history limits (including `max_recent_turns`) and the broader UI/config vocabulary still need deliberate reconciliation. Reserve conversational `TurnId` for a separately defined interaction lifecycle; no blanket rename.
+- [ ] **Coordinated refactor:** Apply the naming map through Gateway, Talker/Listener, protobuf/stubs, Console, telemetry, RAG source references, tests, and docs. Preserve existing IDs, dispatch boundaries, scheduling, interruption, and history behavior; update all wire and stored-field consumers together without compatibility shims. Keep behavioral bug fixes separate from this refactor.
+- [ ] **Acceptance:** Review the semantic mapping and call-site changes, run affected behavior tests and frontend checks, regenerate stubs with `make proto`, and run `buf lint proto/` and relevant cross-component checks. Prove representative user, tool-continuation, Reasoner, silence, and barge-in paths retain their behavior.
+
+#### Generation Correctness (before R1c)
+
+A standalone behavior change after R1b's rename and before R1c defines how
+generations are stored. R1b keeps behavior unchanged, and R1c needs a reliable
+current generation. Approved by the owner on 2026-10-30.
+
+- [ ] **Stale output:** Track the active generation in `SessionState`; drop any `TalkerOutput` whose `generation_id` is not the active one, so a late `ResponseComplete` or `Sentence` from a superseded generation cannot cancel or pollute the current one.
+- [ ] **One active Converse:** Define and enforce in Talker that a new `Converse` preempts the active one, so an older stream cannot keep speaking after the shared speaker resets.
+- [ ] **Generation ID contract:** Document `generation_id` as an opaque, non-empty string; do not add format validation.
+- [ ] **Acceptance:** Test a stale `ResponseComplete` after a new dispatch, overlapping `Converse` calls, and the user, tool-continuation, Reasoner, silence and barge-in paths.
+
+#### R1c — History Persistence, Context and Recovery (following session)
+
+- [ ] **Schema + write boundary + ownership:** Add versioned authoritative history to `kaguya.db` using resolved instance/session ownership and R1b's correlation semantics. Define ordering, storage failures, incomplete generations, and confirmed-spoken partials; persist input independently of Talker readiness. Keep derived RAG memory distinct.
+- [ ] **Context + retention:** Separate bounded prompt selection from retained source history; share authoritative history/memory across Talker and Reasoner with role-specific prompts/projections. Define compaction and deletion propagation, preserving source links. A fresh task working context must not replace instance/session/task identity; resumable context branches and LLM summarization remain explicit design choices.
+- [ ] **Recovery + Console + acceptance:** Implement snapshot/cursor replay and deduplication together. Test restart, reconnect, duplicate delivery, unavailable Talker, storage failure, interrupted output, ownership separation, and prompt trimming without transcript loss. Replay must not blindly repeat external effects.
+- [ ] **Identity-write durability prerequisite:** Before accepting valuable persistent history, implement safe identity-file publication and deterministic recovery from interrupted init/fork, with focused failure tests. Preserve local manifest/data consistency, fail closed, and never mint replacement IDs as error recovery. Whole-instance backup/export is tracked in R8.
+
+#### R1d — Service Configuration Resolution in the Launcher
+
+This accepted follow-up runs after R1c and before R2.
+
+**Accepted direction:** The launcher owns resolution of Service Configuration
+(SC) into explicit per-service startup inputs: deployment/profile selection,
+source precedence, deployment-relative paths, identity selection, and
+coordinated endpoints. Services validate their own inputs and construct their
+runtimes. Forwarding the original runtime-file/profile selectors for children
+to repeat deployment resolution does not satisfy this target. R1a describes
+the current selection/reload contract; R1d replaces it deliberately.
+
+- [ ] **Resolution ownership + readers:** Move deployment resolution into launcher-owned code; migrate consumers of `shared/deployment.rs` and retire redundant runtime readers/source sharing. Preserve established selector precedence, explicit-selection failure behavior, and profile replacement semantics; specify complete supported TOML behavior.
+- [ ] **Service boundary:** Define explicit startup inputs for each service. Keep component schemas, semantic validation, provider/client construction, and runtime resource ownership local. Define which defaults and credential operations remain service-local; the launcher need not interpret every provider-specific option. Gateway retains instance creation/forking, active data leases, and authoritative application state.
+- [ ] **Launch paths + bootstrap:** Make Supervisor, Console development controls, and standalone startup use the same resolution authority, or accept explicitly resolved inputs at direct service boundaries. Define initialization/fork inputs and Console/Supervisor bootstrap/proxy discovery without requiring the whole stack for standalone operation.
+- [ ] **Endpoint consistency:** Align actual service binds, client destinations, advertised endpoints, and Console/Supervisor connection information from the resolved deployment; remove fixed routing assumptions.
+- [ ] **Precedence + settings:** Define environment, `.env`, implementation-default, generated bind-value, and credential-reference precedence and prevent child inputs from unintentionally overriding resolved deployment decisions. Reconcile duplicated LLM inference/health settings and distinguish initialization-source settings from ongoing instance data settings.
+- [ ] **Launch contract:** Introduce structured executable/argument/cwd/environment launch descriptors with explicit shell use and deliberate Windows/macOS behavior. Define startup-input delivery, configuration consistency across child startup/restarts, and replace existing command strings; launch configuration remains trusted executable input.
+- [ ] **Diagnostics:** Make `validate-config` / `show-config` use the same resolution path as launch, with deployment-wide effective configuration, provenance, validation, and allowlisted/redacted output. Keep diagnostics free of process launch and instance-data writes.
+- [ ] **Platform paths:** Implement platform application-data paths behind the existing path boundary only with explicit selection, supported-host validation, and explicit data placement. Never silently fall back to portable mode.
+- [ ] **Documentation + acceptance:** Reconcile R1a's child-reload description and Gateway's configuration/composition specification with the implemented launcher boundary. Verify resolved inputs against actual startup, bind/connect agreement, managed/standalone equivalence, changed cwd/paths with spaces, conflicting inherited environment, invalid configuration, and nonmutating/redacted diagnostics across supported platforms; distinguish executed checks from remaining acceptance.
+
+**[OPEN]:** The startup-input carrier/schema, exact standalone and
+connection/bootstrap interfaces, complete precedence and credential contracts,
+configuration pinning versus re-resolution on restart, and launch-descriptor
+replacement. Resolver ownership is settled. Live reconfiguration, profile
+inheritance, provider frameworks, and moving every tuning value into the root
+are not implicitly included.
+
+**[OPEN]:** The complete semantic naming map (R1b), and history schema,
+retention and compaction choices (R1c). Resolve each before dependent work.
 
 ### R2 — Policy Management
 
@@ -208,7 +293,9 @@ jobs), task state transitions, concurrency, retry/resume semantics and durable
 recovery. A failed connection is not automatically a completed or failed task.
 
 - [ ] Define task identity and links to session, initiating turn/request, workspace association and eventual execution binding.
+- [ ] **Task + Reasoner runs (one coordinated checkpoint):** Allow multiple concurrent or sequential Reasoner runs under one `TaskId`. Give each delegation attempt a distinct `ReasonerRunId`; retain both IDs through dispatch, progress, results, cancellation and persistence. Replace the current task-keyed active-delegation map so one run cannot overwrite or remove a sibling. A retry creates a new run under the same task; provider/process identity remains separate.
 - [ ] Define the lifecycle/state machine, terminal outcomes and cancellation/approval transitions.
+- [ ] Define task-result aggregation and completion rules across runs, including partial failure and run-only versus whole-task cancellation. Validate sibling-run independence with fake backends in R3 and real adapters in R6; one run completing must not implicitly complete the objective.
 - [ ] Separate task records and coordination from `clients/reasoner.rs`; keep connection/protocol handling in the client.
 - [ ] Persist required task metadata, progress/result references and terminal outcomes; define reconstruction after Gateway/Supervisor/backend loss.
 - [ ] Correlate and order provider events, handle duplicates/late events, and prevent completed/cancelled tasks from being accidentally revived.
@@ -216,8 +303,8 @@ recovery. A failed connection is not automatically a completed or failed task.
 - [ ] Expose task lists/status/results and narration inputs through explicit APIs/events.
 - [ ] Define how approval waiting and workspace changes interact with running tasks; defer allocation mechanics to R5.
 
-**Acceptance:** Exercise concurrent tasks, targeted cancellation, delayed events,
-provider disconnect, restart reconciliation and result retrieval. Assert that
+**Acceptance:** Exercise concurrent tasks and multiple runs of one task, targeted
+cancellation, delayed events, provider disconnect, restart reconciliation and result retrieval. Assert that
 task identity survives transport replacement and that simulated progress cannot
 be recorded as genuine backend success.
 
@@ -258,11 +345,12 @@ either process restarts. Do not equate binding release with workspace deletion.
 - [ ] Define the binding request/result and validate prerequisites before acquiring runtime resources.
 - [ ] Map logical workspaces to the selected backend's actual working directory/storage; current scratch/container storage does not provide this mapping.
 - [ ] Extend Supervisor acquisition/execution/release contracts with the information needed for workspace and policy enforcement.
+- [ ] Use common correlation conventions for instance/session/task/run/request/allocation references while preserving their different lifetimes. Reuse R1a's allocation boundary; a reusable handle is not an invocation or Reasoner attempt, and a cancellation token is not an identity.
 - [ ] Add backend capability checks and explicit unsupported-combination errors; distinguish native execution from OS-enforced isolation.
 - [ ] Bind both Gateway file-tool access and Reasoner execution to the intended logical workspace and applicable policy.
 - [ ] Implement cancellation, release, timeout/failure cleanup, restart reconciliation and orphan handling without silently deleting persistent workspace data.
 - [ ] Keep backend/process/container details out of core pipeline logic; expose opaque identities and useful status to task management and Console.
-- [ ] Define the canonical initial tool inventory. Resolve the old standalone TypeScript Toolkit proposal separately; do not silently reintroduce direct shell execution or present absent tools as available.
+- [ ] Define the canonical initial tool inventory. Resolve the standalone TypeScript Toolkit proposal separately; do not silently reintroduce direct shell execution or present absent tools as available.
 - [ ] Decide whether basic MCP registration/tool exposure belongs in this delivery; if included, implement it through the same policy/binding path. Large-registry tool search remains deferred.
 
 **Acceptance:** For each supported backend/mode, verify intended file visibility,
@@ -284,10 +372,10 @@ a finalized supported-provider set or a process-per-task requirement.
 - [ ] Implement the Reasoner gRPC server; Gateway remains the client. Evolve Delegate/Interrupt/Telemetry contracts only as required by the agreed task, policy and binding models.
 - [ ] Define a capability/adapter boundary for supported backends; keep backend selection outside the Gateway pipeline.
 - [ ] Implement the first approved adapter using the authorized execution binding, with workspace mapping and applicable permission enforcement.
-- [ ] Map backend progress, output, errors and completion to correlated task events; support context updates where required.
+- [ ] Map backend progress, output, errors and completion to both task and Reasoner-run identities; preserve sibling-run independence and support context updates where required.
 - [ ] Implement cancel/stop/shutdown and reconcile interrupted/disconnected backend runs with R3 lifecycle rules.
 - [ ] Complete Supervisor-controlled startup/readiness for on-demand Reasoner use; surface failures before treating work as running.
-- [ ] Make simulated fallback an explicit development behavior; normal unavailability must not produce a fake successful task.
+- [x] Remove simulated fallback; normal unavailability produces a task error. Real adapter execution remains R6.
 - [ ] Expose backend readiness and useful task/result information to Console, including retrieval of full results when summaries are insufficient.
 - [ ] Run proto generation/lint and adapter/contract tests after wire changes.
 
@@ -332,6 +420,7 @@ requirements instead of declaring them complete from unit tests alone.
 - [ ] Verify full text/voice turns, inline interruption accounting, idle barge-in, tool-result continuation and the configured silence cascade.
 - [ ] Verify RAG ingestion eligibility, retrieval, memory export, persona refresh and prefix prefill; measure prefill benefit rather than assuming it.
 - [ ] Verify session/task recovery across browser reconnect, Gateway restart, Supervisor restart, unavailable provider and failed persistence.
+- [ ] Build backup/export/restore and consistent whole-instance snapshot tooling, with broader disk/power/process-failure scenarios and operational recovery procedures. Preserve R1c's earlier focused identity-publication/recovery prerequisite; optimize performance only against observed requirements or measurements.
 - [ ] Verify authorization and workspace isolation/consistency across direct file tools and real Reasoner execution.
 - [ ] Verify full-result retrieval, targeted cancellation and cleanup without duplicate terminal outcomes or lost history.
 - [ ] Run relevant Rust/Python/TypeScript builds/tests, buf checks, browser tests and supported-host sandbox deployment checks; record results, versions and any skips.
@@ -353,8 +442,8 @@ update does not imply these commands have passed.
 | Supervisor/binding | Rust formatting/tests, existing sandbox contract suite, backend deployment checks on supported hosts |
 | Talker | Python lint/type checks and relevant pytest suites; live STT/TTS validation separately |
 | Reasoner | TypeScript build plus real service/adapter tests introduced in R6; `npm test --if-present` is not evidence of tests when no test script exists |
-| Console | `npm run build`, UI/protocol tests introduced in R7, and actual browser interaction/audio checks |
-| Proto | `make proto` regenerates Python and builds Gateway; also build Supervisor for its generated client; run `buf lint proto/` and applicable breaking-change checks |
+| Console | `npm test`, `npm run build` (browser and server types), and actual browser/microphone interaction checks |
+| Proto | `make proto` regenerates Python and builds both Gateway and Supervisor; run `buf lint proto/` and `buf format --diff --exit-code proto/` |
 | End-to-end | Scenario evidence from R8, with model/provider/backend/platform configuration and explicit limitations |
 
 Existing CI definitions are in [.github/workflows/ci.yml](../.github/workflows/ci.yml)
@@ -375,7 +464,7 @@ Retained empirical questions from the original plan:
 - Voice selection and audio quality; the configured voice is not a completed listening evaluation.
 - Action-tag reliability across supported models and whether additional training is warranted.
 - Custom versus library sentence detection and its latency/quality tradeoffs.
-- Barge-in spoken/unspoken precision: current code uses conservative sentence-level accounting; validate it and evaluate word-level tracking separately.
+- Barge-in spoken/unspoken precision: current code acknowledges naturally completed, error-free playback batches; validate live playback and evaluate word-level tracking separately.
 - RAG growth/scaling and memory-extraction quality. Keyword extraction exists; LLM-based extraction remains future work.
 - History compaction strategy and speculative-prefill invalidation remain distinct from durable storage.
 

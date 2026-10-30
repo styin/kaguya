@@ -15,8 +15,7 @@ export function LeftRail() {
     <div className="leftrail">
       <div className="leftrail-label">Audio</div>
       <div className="audio-card">
-        <AudioStrip kind="mic" name="mic" detail={micActive ? "live" : "idle"} />
-        <AudioStrip kind="tts" name="tts" detail="default output" />
+        <AudioStrip detail={micActive ? "live" : "idle"} />
       </div>
 
       <div className="mic-toggle">

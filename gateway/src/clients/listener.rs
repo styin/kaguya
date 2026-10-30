@@ -3,8 +3,8 @@
 //! The Listener exposes two server endpoints that the Gateway connects to as
 //! a client:
 //!
-//! - **gRPC bidi stream** — delivers ASR events (VAD edges, partial/final
-//!   transcripts) into the Gateway's priority input stream.
+//! - **gRPC bidirectional stream** — initializes scope and carries a control
+//!   extension point; ASR events enter the Gateway's priority input stream.
 //! - **Raw TCP socket** — receives length-prefixed audio frames forwarded
 //!   from the WebSocket endpoint. Audio bypasses gRPC to avoid protobuf
 //!   serialization overhead at 50 fps.
@@ -20,20 +20,20 @@
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
+use crate::core::types::InputEvent;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::listener_service_client::ListenerServiceClient;
-use crate::types::InputEvent;
+use crate::session_scope::SessionScope;
 
 /// Single-use gRPC + audio client for one Listener connection lifecycle.
 ///
 /// Created fresh by [`run_recovery_loop`] on each reconnection cycle.
-/// [`start`](Self::start) establishes both the gRPC bidi stream and the
+/// [`start`](Self::start) establishes both the gRPC event stream and the
 /// audio TCP socket, spawning background tasks for each.
 pub struct ListenerClient {
     grpc_endpoint: String,
@@ -41,6 +41,7 @@ pub struct ListenerClient {
     tasks: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
+    scope: SessionScope,
 }
 
 impl ListenerClient {
@@ -49,6 +50,7 @@ impl ListenerClient {
         audio_addr: String,
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
+        scope: SessionScope,
     ) -> Self {
         Self::with_reconnect_policy(
             grpc_endpoint,
@@ -56,6 +58,7 @@ impl ListenerClient {
             tasks,
             connection,
             ReconnectPolicy::default(),
+            scope,
         )
     }
 
@@ -65,6 +68,7 @@ impl ListenerClient {
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
+        scope: SessionScope,
     ) -> Self {
         Self {
             grpc_endpoint,
@@ -72,10 +76,11 @@ impl ListenerClient {
             tasks,
             connection,
             reconnect,
+            scope,
         }
     }
 
-    /// Establish the gRPC bidi stream and audio TCP socket, spawning
+    /// Establish the gRPC event stream and audio TCP socket, spawning
     /// background receiver/forwarder tasks. Returns the audio sender for
     /// installation into [`ListenerAudioSink`](super::audio_sink::ListenerAudioSink).
     pub async fn start(
@@ -83,15 +88,16 @@ impl ListenerClient {
         p1_tx: mpsc::Sender<InputEvent>,
         p2_tx: mpsc::Sender<InputEvent>,
     ) -> anyhow::Result<mpsc::Sender<bytes::Bytes>> {
-        // ── gRPC bidi stream for ASR events ──
+        // ── gRPC event stream for ASR events ──
         let mut inbound = Self::connect_stream_with_policy(
             &self.grpc_endpoint,
             self.connection.clone(),
             self.reconnect,
+            self.scope,
         )
         .await?;
 
-        info!(addr = %self.grpc_endpoint, "Listener gRPC bidi stream established");
+        info!(addr = %self.grpc_endpoint, "Listener gRPC event stream established");
 
         // Spawn receiver: Listener ASR events → Input Stream
         let asr_connection = self.connection.clone();
@@ -127,7 +133,7 @@ impl ListenerClient {
                 }
             }
             asr_connection.set_readiness(Readiness::Degraded);
-            warn!("Listener bidi stream ended");
+            warn!("Listener event stream ended");
         });
 
         // ── Raw TCP socket forwarder for audio ──
@@ -135,6 +141,7 @@ impl ListenerClient {
         let audio_addr = self.audio_addr.clone();
         let audio_connection = self.connection.clone();
         let audio_reconnect = self.reconnect;
+        let audio_header = audio_header(self.scope);
 
         self.tasks.spawn("listener_audio_forwarder", async move {
             loop {
@@ -146,6 +153,10 @@ impl ListenerClient {
                 .await
                 {
                     Ok(mut stream) => {
+                        if stream.write_all(&audio_header).await.is_err() {
+                            audio_connection.set_readiness(Readiness::Degraded);
+                            continue;
+                        }
                         audio_connection.set_readiness(Readiness::Ready);
                         info!(addr = %audio_addr, "Audio socket connected to Listener");
                         while let Some(data) = audio_rx.recv().await {
@@ -179,24 +190,29 @@ impl ListenerClient {
         Ok(audio_tx)
     }
 
-    /// Open a gRPC bidi stream with bounded retries and exponential backoff.
+    /// Open a gRPC event stream with bounded retries and exponential backoff.
     async fn connect_stream_with_policy(
         endpoint: &str,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
+        scope: SessionScope,
     ) -> anyhow::Result<tonic::Streaming<proto::ListenerOutput>> {
         let retry_delays = reconnect.retry_delays();
         connection.set_readiness(Readiness::Starting);
         for attempt in 1..=reconnect.max_attempts() {
             match tokio::time::timeout(
                 reconnect.attempt_timeout(),
-                Self::connect_stream_once(endpoint),
+                Self::connect_stream_once(endpoint, scope),
             )
             .await
             {
                 Ok(Ok(stream)) => {
                     connection.set_readiness(Readiness::Ready);
                     return Ok(stream);
+                }
+                Ok(Err(e)) if is_scope_mismatch(&e) => {
+                    connection.set_readiness(Readiness::Degraded);
+                    return Err(e);
                 }
                 Ok(Err(e)) => {
                     warn!(
@@ -226,14 +242,20 @@ impl ListenerClient {
 
     async fn connect_stream_once(
         endpoint: &str,
+        scope: SessionScope,
     ) -> anyhow::Result<tonic::Streaming<proto::ListenerOutput>> {
         let channel = Channel::from_shared(endpoint.to_string())?
             .connect()
             .await?;
         let mut client = ListenerServiceClient::new(channel);
-        let (_ctrl_tx, ctrl_rx) = mpsc::channel::<proto::ListenerInput>(16);
-        let outbound = ReceiverStream::new(ctrl_rx);
-        Ok(client.stream(outbound).await?.into_inner())
+        // The request carries only ListenerInit, queued before response headers
+        // are awaited. Listener keeps the subscription after the half-close.
+        let init = proto::ListenerInput {
+            payload: Some(proto::listener_input::Payload::Init(proto::ListenerInit {
+                session: Some(scope.to_proto()),
+            })),
+        };
+        Ok(client.stream(tokio_stream::once(init)).await?.into_inner())
     }
 
     /// Open the raw audio TCP socket with bounded retries.
@@ -280,6 +302,23 @@ impl ListenerClient {
     }
 }
 
+/// Raw transport framing: 7-byte protocol marker, then two 16-byte UUIDs.
+/// Constructed once per audio forwarder; never applied to individual frames.
+fn audio_header(scope: SessionScope) -> [u8; 39] {
+    let mut header = [0u8; 39];
+    header[..7].copy_from_slice(b"KAGUYA1");
+    header[7..23].copy_from_slice(scope.instance_id().as_bytes());
+    header[23..].copy_from_slice(scope.session_id().as_bytes());
+    header
+}
+
+/// Listener answers FAILED_PRECONDITION when it serves a different scope.
+fn is_scope_mismatch(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<tonic::Status>()
+        .is_some_and(|status| status.code() == tonic::Code::FailedPrecondition)
+}
+
 /// Background loop: probe endpoint → create [`ListenerClient`] → start
 /// streams → install audio sink → watch for Degraded → clear sink →
 /// reconnect. Runs until `shutdown` is cancelled.
@@ -287,30 +326,32 @@ impl ListenerClient {
 /// Each cycle creates a fresh client because the Listener has no persistent
 /// channel — `start()` establishes new gRPC and TCP connections, and the
 /// previous cycle's spawned tasks exit naturally when their streams end.
+/// Returns an error only when the Listener serves a different scope.
 pub async fn run_recovery_loop(
     grpc_endpoint: String,
     audio_addr: String,
     task_spawner: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
-    listener_audio: crate::audio_sink::ListenerAudioSink,
+    listener_audio: crate::clients::audio_sink::ListenerAudioSink,
     p1_tx: mpsc::Sender<InputEvent>,
     p2_tx: mpsc::Sender<InputEvent>,
     expected_runtime: bool,
+    scope: SessionScope,
     shutdown: CancellationToken,
-) {
-    use crate::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
+) -> anyhow::Result<()> {
+    use crate::clients::probe::{sleep_probe_interval, wait_for_grpc_endpoint};
 
     if !expected_runtime && p1_tx.is_closed() {
         connection.set_readiness(Readiness::Stopped);
         listener_audio.clear().await;
-        return;
+        return Ok(());
     }
 
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => return,
+            _ = shutdown.cancelled() => return Ok(()),
             _ = wait_for_grpc_endpoint(
                 "listener",
                 &grpc_endpoint,
@@ -325,6 +366,7 @@ pub async fn run_recovery_loop(
             task_spawner.clone(),
             connection.clone(),
             reconnect,
+            scope,
         );
         match listener.start(p1_tx.clone(), p2_tx.clone()).await {
             Ok(audio_tx) => {
@@ -334,7 +376,7 @@ pub async fn run_recovery_loop(
                 loop {
                     tokio::select! {
                         biased;
-                        _ = shutdown.cancelled() => return,
+                        _ = shutdown.cancelled() => return Ok(()),
                         _ = sleep_probe_interval() => {}
                     }
                     if connection.readiness() == Readiness::Degraded {
@@ -344,6 +386,10 @@ pub async fn run_recovery_loop(
                     }
                 }
             }
+            Err(e) if is_scope_mismatch(&e) => {
+                listener_audio.clear().await;
+                return Err(e.context("Listener serves a different instance/session"));
+            }
             Err(e) => {
                 warn!("Listener startup failed after endpoint readiness: {e}");
                 if expected_runtime {
@@ -351,7 +397,7 @@ pub async fn run_recovery_loop(
                 }
                 tokio::select! {
                     biased;
-                    _ = shutdown.cancelled() => return,
+                    _ = shutdown.cancelled() => return Ok(()),
                     _ = sleep_probe_interval() => {}
                 }
             }
@@ -365,6 +411,24 @@ mod tests {
 
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
+
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn raw_header_contains_fixed_session_once_without_text_uuid_encoding() {
+        let scope = test_scope();
+        let header = audio_header(scope);
+        assert_eq!(header.len(), 39);
+        assert_eq!(&header[..7], b"KAGUYA1");
+        assert_eq!(&header[7..23], scope.instance_id().as_bytes());
+        assert_eq!(&header[23..], scope.session_id().as_bytes());
+    }
 
     fn fast_policy() -> ReconnectPolicy {
         ReconnectPolicy::bounded(
@@ -385,6 +449,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
+            test_scope(),
         );
         let (p1_tx, _p1_rx) = mpsc::channel(1);
         let (p2_tx, _p2_rx) = mpsc::channel(1);
@@ -403,11 +468,12 @@ mod tests {
         let lifecycle = LifecycleSupervisor::new();
         let connection = lifecycle.register_connection("listener");
         let listener = ListenerClient::with_reconnect_policy(
-            "http://127.0.0.1:1".into(),
+            "not a valid uri".into(),
             "127.0.0.1:1".into(),
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
+            test_scope(),
         );
         let (p1_tx, _p1_rx) = mpsc::channel(1);
         let (p2_tx, _p2_rx) = mpsc::channel(1);
@@ -425,13 +491,14 @@ mod tests {
 
     // ── Recovery loop integration tests ──
 
-    use crate::audio_sink::ListenerAudioSink;
+    use crate::clients::audio_sink::ListenerAudioSink;
     use crate::proto::listener_service_server::{
         ListenerService as ListenerServiceTrait, ListenerServiceServer,
     };
-    use tokio_stream::wrappers::TcpListenerStream;
+    use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 
-    struct StubListener;
+    /// `Some(code)` rejects initialization with that status.
+    struct StubListener(Option<tonic::Code>);
 
     #[tonic::async_trait]
     impl ListenerServiceTrait for StubListener {
@@ -439,25 +506,43 @@ mod tests {
 
         async fn stream(
             &self,
-            _req: tonic::Request<tonic::Streaming<proto::ListenerInput>>,
+            request: tonic::Request<tonic::Streaming<proto::ListenerInput>>,
         ) -> Result<tonic::Response<Self::StreamStream>, tonic::Status> {
+            if let Some(code) = self.0 {
+                return Err(tonic::Status::new(code, "rejected"));
+            }
+            let mut input = request.into_inner();
+            let first = input
+                .message()
+                .await?
+                .expect("initialization must precede response headers");
+            let Some(proto::listener_input::Payload::Init(init)) = first.payload else {
+                return Err(tonic::Status::invalid_argument(
+                    "expected Listener init first",
+                ));
+            };
+            assert_eq!(init.session, Some(test_scope().to_proto()));
+            // The client sends only ListenerInit and half-closes; like the real
+            // Listener, keep the subscription open afterwards.
+            assert!(input.message().await?.is_none());
             let (tx, rx) = mpsc::channel(1);
-            // Hold stream sender alive so the ASR receiver task doesn't
-            // exit immediately. Drops when the server shuts down.
             tokio::spawn(async move {
+                let _tx = tx;
                 std::future::pending::<()>().await;
-                drop(tx);
             });
             Ok(tonic::Response::new(ReceiverStream::new(rx)))
         }
     }
 
-    async fn start_stub_listener(listener: tokio::net::TcpListener) -> CancellationToken {
+    async fn start_stub_listener(
+        listener: tokio::net::TcpListener,
+        rejection: Option<tonic::Code>,
+    ) -> CancellationToken {
         let shutdown = CancellationToken::new();
         let token = shutdown.clone();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(ListenerServiceServer::new(StubListener))
+                .add_service(ListenerServiceServer::new(StubListener(rejection)))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), token.cancelled())
                 .await
                 .unwrap();
@@ -477,7 +562,13 @@ mod tests {
                     _ = token.cancelled() => return,
                     result = listener.accept() => {
                         match result {
-                            Ok((stream, _)) => conns.push(stream),
+                            Ok((mut stream, _)) => {
+                                use tokio::io::AsyncReadExt;
+                                let mut header = [0u8; 39];
+                                stream.read_exact(&mut header).await.unwrap();
+                                assert_eq!(header, audio_header(test_scope()));
+                                conns.push(stream);
+                            },
                             Err(_) => return,
                         }
                     }
@@ -512,7 +603,7 @@ mod tests {
         let audio_tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let audio_addr = audio_tcp.local_addr().unwrap();
 
-        let _grpc = start_stub_listener(grpc_tcp).await;
+        let _grpc = start_stub_listener(grpc_tcp, None).await;
         let _audio = start_audio_acceptor(audio_tcp).await;
 
         let lifecycle = LifecycleSupervisor::new();
@@ -532,6 +623,7 @@ mod tests {
             p1_tx,
             p2_tx,
             true,
+            test_scope(),
             shutdown.clone(),
         ));
 
@@ -547,5 +639,37 @@ mod tests {
         poll_readiness(&connection, Readiness::Ready).await;
 
         shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn recovery_stops_when_listener_serves_another_scope() {
+        let grpc_tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let grpc_addr = grpc_tcp.local_addr().unwrap();
+        let _grpc = start_stub_listener(grpc_tcp, Some(tonic::Code::FailedPrecondition)).await;
+        let lifecycle = LifecycleSupervisor::new();
+        let (p1_tx, _p1_rx) = mpsc::channel(16);
+        let (p2_tx, _p2_rx) = mpsc::channel(16);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_recovery_loop(
+                format!("http://{grpc_addr}"),
+                "127.0.0.1:1".into(),
+                lifecycle.spawner(),
+                lifecycle.register_connection("listener"),
+                fast_policy(),
+                ListenerAudioSink::new(),
+                p1_tx,
+                p2_tx,
+                true,
+                test_scope(),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a scope mismatch stops recovery");
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("different instance/session"));
     }
 }

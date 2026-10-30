@@ -26,7 +26,7 @@ if _version_not_supported:
 
 
 class ListenerServiceStub(object):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -35,7 +35,7 @@ class ListenerServiceStub(object):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
 
     """
 
@@ -53,7 +53,7 @@ class ListenerServiceStub(object):
 
 
 class ListenerServiceServicer(object):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -62,12 +62,12 @@ class ListenerServiceServicer(object):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
 
     """
 
     def Stream(self, request_iterator, context):
-        """Bidi: Gateway sends control signals; Listener streams ASR events.
+        """Gateway initializes scope, then may send controls; Listener streams ASR events.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -90,7 +90,7 @@ def add_ListenerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class ListenerService(object):
-    """LISTENER SERVICE — Bidi streaming
+    """LISTENER SERVICE — Bidirectional streaming
     Gateway = client, Listener = server
 
     Audio bytes do NOT flow over this gRPC stream. The Gateway forwards raw
@@ -99,7 +99,7 @@ class ListenerService(object):
     overhead is wasteful for the Phase-1 local-only deployment, and gRPC's
     HTTP/2 framing adds head-of-line blocking that voice latency can't
     afford. See `docs/spec-agent-v0.1.0.md` and the raw-socket forwarder in
-    `gateway/src/listener.rs`.
+    `gateway/src/clients/listener.rs`.
 
     """
 
@@ -132,7 +132,7 @@ class ListenerService(object):
 
 
 class TalkerServiceStub(object):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
 
     """
@@ -155,13 +155,13 @@ class TalkerServiceStub(object):
                 _registered_method=True)
         self.UpdatePersona = channel.unary_unary(
                 '/kaguya.v1.TalkerService/UpdatePersona',
-                request_serializer=kaguya__pb2.PersonaConfig.SerializeToString,
+                request_serializer=kaguya__pb2.UpdatePersonaRequest.SerializeToString,
                 response_deserializer=kaguya__pb2.PersonaAck.FromString,
                 _registered_method=True)
 
 
 class TalkerServiceServicer(object):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
 
     """
@@ -201,7 +201,7 @@ def add_TalkerServiceServicer_to_server(servicer, server):
             ),
             'UpdatePersona': grpc.unary_unary_rpc_method_handler(
                     servicer.UpdatePersona,
-                    request_deserializer=kaguya__pb2.PersonaConfig.FromString,
+                    request_deserializer=kaguya__pb2.UpdatePersonaRequest.FromString,
                     response_serializer=kaguya__pb2.PersonaAck.SerializeToString,
             ),
     }
@@ -213,7 +213,7 @@ def add_TalkerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class TalkerService(object):
-    """TALKER SERVICE — Bidi ProcessPrompt + unary helpers
+    """TALKER SERVICE — Bidi Converse + unary helpers
     Gateway = client, Talker = server
 
     """
@@ -287,7 +287,7 @@ class TalkerService(object):
             request,
             target,
             '/kaguya.v1.TalkerService/UpdatePersona',
-            kaguya__pb2.PersonaConfig.SerializeToString,
+            kaguya__pb2.UpdatePersonaRequest.SerializeToString,
             kaguya__pb2.PersonaAck.FromString,
             options,
             channel_credentials,
@@ -482,7 +482,7 @@ class RouterControlServiceStub(object):
         """
         self.SendControl = channel.unary_unary(
                 '/kaguya.v1.RouterControlService/SendControl',
-                request_serializer=kaguya__pb2.ControlSignal.SerializeToString,
+                request_serializer=kaguya__pb2.ControlRequest.SerializeToString,
                 response_deserializer=kaguya__pb2.ControlAck.FromString,
                 _registered_method=True)
 
@@ -505,7 +505,7 @@ def add_RouterControlServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'SendControl': grpc.unary_unary_rpc_method_handler(
                     servicer.SendControl,
-                    request_deserializer=kaguya__pb2.ControlSignal.FromString,
+                    request_deserializer=kaguya__pb2.ControlRequest.FromString,
                     response_serializer=kaguya__pb2.ControlAck.SerializeToString,
             ),
     }
@@ -538,7 +538,7 @@ class RouterControlService(object):
             request,
             target,
             '/kaguya.v1.RouterControlService/SendControl',
-            kaguya__pb2.ControlSignal.SerializeToString,
+            kaguya__pb2.ControlRequest.SerializeToString,
             kaguya__pb2.ControlAck.FromString,
             options,
             channel_credentials,

@@ -1,17 +1,10 @@
-"""inference/prompt_formatter.py — TalkerContext + PersonaConfig → LLM prompt string.
+"""Render shared prompt snapshots and typed generation triggers with cached persona."""
 
-[FIX] Retrieval results are now injected into system_sections BEFORE the
-system message is joined and appended to parts. Previous version appended
-to system_sections after parts.append() — a no-op bug.
-"""
-
-import logging
+import json
 from datetime import UTC, datetime
 
 from inference.soul_container import VALID_EMOTIONS
-from proto import kaguya_pb2  # type: ignore[import]
-
-logger = logging.getLogger(__name__)
+from proto import kaguya_pb2
 
 _IM_START = "<|im_start|>"
 _IM_END = "<|im_end|>"
@@ -42,8 +35,24 @@ Examples:
 
 
 def assemble_prompt(
-    ctx: kaguya_pb2.TalkerContext,
+    ctx: kaguya_pb2.PromptContext,
     persona: kaguya_pb2.PersonaConfig,
+) -> str:
+    """Render a reusable prefill snapshot without inventing a generation trigger."""
+    return _assemble_prompt(ctx, persona, None)
+
+
+def assemble_generation_prompt(
+    start: kaguya_pb2.GenerationStart,
+    persona: kaguya_pb2.PersonaConfig,
+) -> str:
+    return _assemble_prompt(start.prompt_context, persona, start)
+
+
+def _assemble_prompt(
+    ctx: kaguya_pb2.PromptContext,
+    persona: kaguya_pb2.PersonaConfig,
+    start: kaguya_pb2.GenerationStart | None,
 ) -> str:
     parts: list[str] = []
     system_sections: list[str] = []
@@ -69,11 +78,19 @@ def assemble_prompt(
 
     # 5. Current context
     context_lines: list[str] = []
-    if ctx.timestamp_ms:
-        ts = datetime.fromtimestamp(ctx.timestamp_ms / 1000, tz=UTC)
+    if start is not None and start.timestamp_ms:
+        ts = datetime.fromtimestamp(start.timestamp_ms / 1000, tz=UTC)
         context_lines.append(f"Current time: {ts.isoformat()}")
-    if ctx.active_tasks_json:
-        context_lines.append(f"Active tasks: {ctx.active_tasks_json}")
+    if ctx.active_tasks:
+        tasks = json.dumps(
+            [
+                {"task_id": task.task_id, "description": task.description}
+                for task in ctx.active_tasks
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        context_lines.append(f"Active tasks: {tasks}")
     if context_lines:
         system_sections.append("\n".join(context_lines))
 
@@ -81,38 +98,57 @@ def assemble_prompt(
     if ctx.memory_contents:
         system_sections.append(f"Memory:\n{ctx.memory_contents.strip()}")
 
-    # 6.5 RAG Retrieval Results — MUST be before parts.append (FIX)
+    # 7. Retrieval results
     if ctx.retrieval_results:
         retrieval_text = "Relevant context retrieved from memory:\n" + "\n".join(
             f"  [{r.source}] {r.content}" for r in ctx.retrieval_results
         )
         system_sections.append(retrieval_text)
 
-    # NOW join everything into the system message
     parts.append(_msg("system", "\n\n".join(system_sections)))
 
-    # 7. Conversation history
+    # 8. Conversation history
     for turn in ctx.history:
         role = _role_to_str(turn.role)
         parts.append(_msg(role, turn.content, name=turn.name or None))
 
-    # 8. Tool result injection
-    if ctx.tool_result_content:
-        label = f"[TOOL_RESULT:{ctx.tool_request_id}] " if ctx.tool_request_id else ""
-        parts.append(_msg("tool", f"{label}{ctx.tool_result_content}"))
+    # Render the typed trigger after the shared history snapshot.
+    if start is not None:
+        which = start.WhichOneof("trigger")
+        if which == "tool_result":
+            result = start.tool_result
+            parts.append(
+                _msg("tool", f"[TOOL_RESULT:{result.request_id}] {result.content}")
+            )
+        elif which == "reasoner_result":
+            result = start.reasoner_result
+            parts.append(
+                _msg("tool", f"[REASONER_RESULT:{result.task_id}] {result.summary}")
+            )
+        elif which == "reasoner_failure":
+            failure = start.reasoner_failure
+            parts.append(
+                _msg(
+                    "tool",
+                    f"[REASONER_FAILURE:{failure.task_id} code={failure.code}] "
+                    f"{failure.message}",
+                )
+            )
+        elif which == "user_input":
+            parts.append(_msg("user", start.user_input.text))
+        elif which == "reasoner_progress":
+            parts.append(
+                _msg(
+                    "user", f"[REASONER_UPDATE: {start.reasoner_progress.description}]"
+                )
+            )
+        elif which == "silence":
+            seconds = start.silence.duration_ms // 1000
+            parts.append(
+                _msg("user", f"[SYSTEM: {seconds}s silence since last exchange]")
+            )
 
-    # 9. Reasoner result injection
-    if ctx.reasoner_result_content:
-        label = (
-            f"[REASONER_RESULT:{ctx.reasoner_task_id}] " if ctx.reasoner_task_id else ""
-        )
-        parts.append(_msg("tool", f"{label}{ctx.reasoner_result_content}"))
-
-    # 10. User input
-    if ctx.user_input:
-        parts.append(_msg("user", ctx.user_input))
-
-    # 11. Prime assistant generation
+    # 9. Prime assistant generation
     parts.append(f"{_IM_START}assistant\n")
 
     return "".join(parts)
@@ -132,8 +168,7 @@ _ROLE_MAP = {
 
 
 def _role_to_str(role: kaguya_pb2.Role.ValueType) -> str:
-    result = _ROLE_MAP.get(role)
-    if result is None:
-        logger.warning("Unknown proto Role enum value %d, defaulting to 'user'", role)
-        return "user"
-    return result
+    try:
+        return _ROLE_MAP[role]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported history role: {role}") from exc

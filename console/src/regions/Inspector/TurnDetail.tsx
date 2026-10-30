@@ -1,13 +1,12 @@
-import type { AudioEvent, Turn } from "../../types";
-import { firstAudioLatencyMs, turnDurationMs } from "../../store";
+import type { Turn } from "../../types";
+import { turnDurationMs } from "../../store";
 
 /**
  * Turn detail view: full sentence list with per-sentence relative
- * timestamps, plus turn-level metadata (id, duration, time-to-first-
- * sound). Tool / Reasoner sections are intentionally absent — those
+ * timestamps, plus generation identity and duration. Tool / Reasoner sections are intentionally absent — those
  * events aren't on the wire yet (see console/README.md → Future work).
  */
-export function TurnDetail({ turn, audioEvents }: { turn: Turn; audioEvents: AudioEvent[] }) {
+export function TurnDetail({ turn }: { turn: Turn }) {
   if (turn.kind === "user") {
     return (
       <div className="inspector">
@@ -23,16 +22,14 @@ export function TurnDetail({ turn, audioEvents }: { turn: Turn; audioEvents: Aud
   }
 
   const duration = turnDurationMs(turn);
-  const ttfs = firstAudioLatencyMs(audioEvents, turn);
 
   return (
     <div className="inspector">
       <div className="inspector-card">
         <div className="turn-detail-header">
-          <span className="turn-detail-id">{turn.turn_id}</span>
+          <span className="turn-detail-id">{turn.generation_id}</span>
           <span className="turn-detail-meta">
             {duration === null ? "in flight" : `${(duration / 1000).toFixed(2)}s`}
-            {ttfs !== null && ` · TTFS ${ttfs}ms`}
           </span>
         </div>
         <div className="inspector-section-label">Sentences</div>

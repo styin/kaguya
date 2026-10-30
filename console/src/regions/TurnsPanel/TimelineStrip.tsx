@@ -8,15 +8,12 @@ const WINDOW_MS = 60_000;
 const LANES = [
   { id: "user",     label: "User" },
   { id: "talker",   label: "Talker" },
-  { id: "tool",     label: "Tool" },
-  { id: "reasoner", label: "Reasoner" },
 ] as const;
 
 /**
- * Timeline strip — 4-lane network-style timeline atop the turns panel.
+ * Timeline strip — User and Talker activity atop the turns panel.
  * Axis row labels NOW on the right, dropping back by quarters of the
- * visible window. User and Talker lanes plot from the event log; Tool
- * and Reasoner stay empty (skeleton — see console/README.md).
+ * visible window. Both lanes derive from the event log.
  */
 export function TimelineStrip({
   turns,
@@ -79,14 +76,12 @@ export function TimelineStrip({
                         startMs={t.started_at}
                         endMs={t.complete_at ?? now}
                         now={now}
-                        selected={selectedKey === `assistant:${t.turn_id}`}
-                        label={t.turn_id.slice(0, 8)}
-                        onClick={() => onSelect(`assistant:${t.turn_id}`)}
+                        selected={selectedKey === `assistant:${t.generation_id}`}
+                        label={t.generation_id.slice(0, 8)}
+                        onClick={() => onSelect(`assistant:${t.generation_id}`)}
                       />
                     ) : null,
                   )}
-              {/* Tool and Reasoner lanes: skeleton — no blocks until the
-                  gateway forwards `tool_call` / `reasoner_step` events. */}
             </div>
           </div>
         ))}

@@ -1,5 +1,4 @@
 //! Hybrid Retriever — BM25 + optional vector search.
-//! LSP is stale; not included in active retrieval path.
 
 use std::sync::Arc;
 use tracing::debug;
@@ -14,6 +13,7 @@ pub struct HybridRetriever {
     store: Arc<RagStore>,
     embedder: Option<Arc<Embedder>>,
     top_k: usize,
+    rrf_k: f64,
     /// Per-result content cap applied after RRF fusion. `None` = unlimited.
     /// The store always holds full content; this only governs what the
     /// Talker sees per turn.
@@ -25,12 +25,14 @@ impl HybridRetriever {
         store: Arc<RagStore>,
         embedder: Option<Arc<Embedder>>,
         top_k: usize,
+        rrf_k: f64,
         max_chars_per_result: Option<usize>,
     ) -> Self {
         Self {
             store,
             embedder,
             top_k,
+            rrf_k,
             max_chars_per_result,
         }
     }
@@ -84,7 +86,7 @@ impl HybridRetriever {
             }
         }
 
-        let mut fused = ranker::reciprocal_rank_fusion(sources);
+        let mut fused = ranker::reciprocal_rank_fusion(sources, self.rrf_k);
         fused.truncate(self.top_k);
 
         // Apply per-result content cap, if configured. Done at output time

@@ -12,9 +12,6 @@ Limitation: _BOUNDARY requires whitespace + uppercase after punctuation,
 so it only detects boundaries *between* sentences. The final sentence in
 a generation has no following text — flush() handles that case.
 
-Phase 2: Replace regex heuristics with a proper sentence segmentation model
-(e.g., PySBD, spaCy sentencizer) or leverage server-side sentence chunking
-once we migrate to /v1/chat/completions.
 """
 
 import re

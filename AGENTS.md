@@ -23,7 +23,7 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 
 ## Architecture Invariants (Do Not Violate)
 
-- Gateway is the only component that touches the filesystem.
+- Gateway is the only component that owns or writes instance data (identity manifest, persona files, RAG database). Launchers (Supervisor, Console) read deployment configuration and may validate the selected instance read-only; Supervisor owns sandbox scratch storage. R1d moves deployment resolution into the launcher.
 - Talker Agent is fully stateless — all context arrives via gRPC from Gateway each turn.
 - Audio bytes never enter protobuf serialization at 50fps. Raw bytes over Unix socket only.
 - Tokens never cross the gRPC boundary — only complete semantic units (sentences, tags).
@@ -46,10 +46,16 @@ Kaguya is intended to run across multiple desktop platforms, especially Windows 
 | Talker Agent | Python (asyncio, grpcio)            |
 | Reasoner     | TypeScript (Node.js)                |
 | Toolkit      | TypeScript (Node.js)                |
-| Proto schema | buf (generates stubs for all three) |
+| Proto schema | Protobuf; buf lint/format, tonic-build for Rust, grpcio-tools for Python |
 
 ## Workflow
 
 - Run `make proto` to regenerate all gRPC stubs after editing `proto/kaguya/v1/kaguya.proto`.
 - Proto changes must pass `buf lint proto/` before committing.
-- Implement milestones in order (M0 → M7). Each milestone produces a testable artifact.
+- Follow the active R0 → R8 sequence and acceptance gates in the implementation plan; M0 → M7 labels describe the existing baseline.
+
+## Unpublished Contracts
+
+- Update all producers, consumers, tests, and documentation together when a contract changes.
+- Do not preserve obsolete APIs, fields, aliases, migration code, or compatibility adapters for earlier repository versions.
+- Keep third-party protocol support and platform abstractions that are required by the current implementation.

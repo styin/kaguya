@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 import {
   actions,
-  audioInBytesForTurn,
   selectTurns,
   useStore,
 } from "../../store";
@@ -11,7 +10,6 @@ import "./turnspanel.css";
 
 export function TurnsPanel() {
   const events = useStore((s) => s.events);
-  const audioEvents = useStore((s) => s.audioEvents);
   const selTurn = useStore((s) => s.selTurn);
   const searchQuery = useStore((s) => s.searchQuery);
 
@@ -52,14 +50,6 @@ export function TurnsPanel() {
         <span className="turns-summary">
           <b>{counts.total}</b> turns · <b>{counts.assistant}</b> assistant · <b>{counts.user}</b> user
         </span>
-        <button
-          type="button"
-          className="turns-export"
-          disabled
-          title="Export not implemented (see console/README.md → Future work)"
-        >
-          Export
-        </button>
       </div>
       <div className="turns-list">
         {reversed.map((t) => (
@@ -68,8 +58,6 @@ export function TurnsPanel() {
             turn={t}
             selectedKey={selTurn}
             onSelect={actions.setSelTurn}
-            audioEvents={audioEvents}
-            audioInBytes={t.kind === "assistant" ? audioInBytesForTurn(audioEvents, t) : 0}
           />
         ))}
       </div>

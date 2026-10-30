@@ -1,9 +1,9 @@
-//! Docker backend — container isolation with per-session filesystem affinity.
+//! Docker backend — container isolation with per-allocation filesystem affinity.
 //! Files persist across calls made with the same Supervisor handle.
 //!
-//! Lifecycle note: one Supervisor may serve handles for multiple Gateway
-//! conversations. Session containers are never reused because they contain
-//! conversation files; hosted mode destroys released containers and replenishes
+//! Lifecycle note: one Supervisor may serve handles for multiple sandbox
+//! allocations. Allocation containers are never reused because they contain
+//! allocation files; hosted mode destroys released containers and replenishes
 //! the clean warm pool.
 //! `mode`:
 //!   single_user → create on handle acquisition and destroy on release.
@@ -12,8 +12,8 @@
 //!
 //! Every container is labeled so orphans from a hard crash can be reaped:
 //!   `kaguya.sandbox=1`                    — all Kaguya sandbox containers
-//!   `kaguya.sandbox.instance=<uuid>`      — this Supervisor process only
-//! Graceful `shutdown()` sweeps this instance's label; `make sandbox-clean`
+//!   `kaguya.sandbox.supervisor_run=<uuid>` — this Supervisor process only
+//! Graceful `shutdown()` sweeps this run's label; `make sandbox-clean`
 //! reaps the global label after a crash.
 
 use std::collections::HashMap;
@@ -44,17 +44,16 @@ pub struct DockerBackend {
     pids: u64,
     cpus: f64,
     network: bool,
-    /// Per-Supervisor label value. Global cleanup can therefore reap this
-    /// instance without touching containers owned by another Supervisor.
-    instance: String,
+    /// Unique label value for this Supervisor process lifetime.
+    supervisor_run_id: String,
     state: Mutex<DockerState>,
 }
 
 #[derive(Default)]
 struct DockerState {
-    replenishing: usize,               // clean containers currently being created
-    warm: Vec<String>,                 // idle container ids
-    sessions: HashMap<String, String>, // provider session → container id
+    replenishing: usize,                  // clean containers currently being created
+    warm: Vec<String>,                    // idle container ids
+    allocations: HashMap<String, String>, // provider allocation → container id
 }
 
 impl DockerBackend {
@@ -81,7 +80,7 @@ impl DockerBackend {
             pids: cfg.pids_limit,
             cpus: cfg.cpus,
             network: cfg.network,
-            instance: Uuid::new_v4().to_string(),
+            supervisor_run_id: Uuid::new_v4().to_string(),
             state: Mutex::new(DockerState::default()),
         })
     }
@@ -98,7 +97,10 @@ impl DockerBackend {
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
             format!("--label={LABEL_ALL}"),
-            format!("--label=kaguya.sandbox.instance={}", self.instance),
+            format!(
+                "--label=kaguya.sandbox.supervisor_run={}",
+                self.supervisor_run_id
+            ),
             format!("--memory={}m", self.mem_mb),
             format!("--memory-swap={}m", self.mem_mb), // == memory ⇒ swap disabled
             format!("--pids-limit={}", self.pids),
@@ -138,8 +140,11 @@ impl DockerBackend {
     }
 
     /// Force-remove containers lost between `docker run` and state insertion.
-    async fn reap_instance(&self) {
-        let filter = format!("label=kaguya.sandbox.instance={}", self.instance);
+    async fn reap_supervisor_run(&self) {
+        let filter = format!(
+            "label=kaguya.sandbox.supervisor_run={}",
+            self.supervisor_run_id
+        );
         let out = Command::new(&self.docker_cli)
             .args(["ps", "-aq", "--filter", &filter])
             .output()
@@ -151,10 +156,10 @@ impl DockerBackend {
         }
     }
 
-    async fn container_for(&self, session: &str) -> Result<String, String> {
+    async fn container_for(&self, allocation: &str) -> Result<String, String> {
         {
             let st = self.state.lock().await;
-            if let Some(id) = st.sessions.get(session) {
+            if let Some(id) = st.allocations.get(allocation) {
                 return Ok(id.clone());
             }
         }
@@ -168,26 +173,26 @@ impl DockerBackend {
             None => self.create_container().await?,
         };
         let mut st = self.state.lock().await;
-        if let Some(existing) = st.sessions.get(session) {
+        if let Some(existing) = st.allocations.get(allocation) {
             // Lost a race; drop the extra container.
             let existing = existing.clone();
             drop(st);
             Self::destroy(&self.docker_cli, &id).await;
             return Ok(existing);
         }
-        st.sessions.insert(session.to_string(), id.clone());
+        st.allocations.insert(allocation.to_string(), id.clone());
         Ok(id)
     }
 }
 
 #[async_trait]
 impl SandboxBackend for DockerBackend {
-    async fn acquire(&self, session: &str) -> Result<(), String> {
-        self.container_for(session).await.map(|_| ())
+    async fn acquire(&self, allocation: &str) -> Result<(), String> {
+        self.container_for(allocation).await.map(|_| ())
     }
 
-    async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult {
-        let id = match self.container_for(session).await {
+    async fn execute(&self, allocation: &str, req: ExecRequest) -> ExecResult {
+        let id = match self.container_for(allocation).await {
             Ok(i) => i,
             Err(e) => return ExecResult::backend_error(e),
         };
@@ -218,6 +223,7 @@ impl SandboxBackend for DockerBackend {
             Some(req.code.clone()),
             backstop,
             req.max_output_bytes,
+            || {},
         )
         .await;
         if upload.exit_code != 0 {
@@ -242,7 +248,7 @@ impl SandboxBackend for DockerBackend {
         };
 
         // Outer backstop in case docker itself hangs.
-        let mut r = run_spawned(child, req.stdin, backstop, req.max_output_bytes).await;
+        let mut r = run_spawned(child, req.stdin, backstop, req.max_output_bytes, || {}).await;
         if r.exit_code == 124 {
             // coreutils `timeout` ⇒ timed out
             r.timed_out = true;
@@ -250,16 +256,16 @@ impl SandboxBackend for DockerBackend {
         r
     }
 
-    async fn cleanup(&self, session: &str) {
+    async fn cleanup(&self, allocation: &str) {
         let id = {
             let mut st = self.state.lock().await;
-            st.sessions.remove(session)
+            st.allocations.remove(allocation)
         };
         if let Some(id) = id {
             Self::destroy(&self.docker_cli, &id).await;
         }
 
-        // Never return a used container to the pool: it contains conversation
+        // Never return a used container to the pool: it contains allocation
         // files. Reserve a replacement slot under the lock, then create the
         // clean container without holding the lock.
         let replenish = {
@@ -302,21 +308,21 @@ impl SandboxBackend for DockerBackend {
     }
 
     async fn shutdown(&self) {
-        let (warm, sessions) = {
+        let (warm, allocations) = {
             let mut st = self.state.lock().await;
             (
                 std::mem::take(&mut st.warm),
-                std::mem::take(&mut st.sessions),
+                std::mem::take(&mut st.allocations),
             )
         };
         for id in warm {
             Self::destroy(&self.docker_cli, &id).await;
         }
-        for (_, id) in sessions {
+        for (_, id) in allocations {
             Self::destroy(&self.docker_cli, &id).await;
         }
         // Catch any container we created but lost track of.
-        self.reap_instance().await;
+        self.reap_supervisor_run().await;
     }
 
     fn name(&self) -> &'static str {

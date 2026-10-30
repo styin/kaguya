@@ -13,7 +13,7 @@ export async function startCapture(
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   const source = ctx.createMediaStreamSource(stream);
 
-  const workletUrl = createWorkletBlobUrl("capture");
+  const workletUrl = createWorkletBlobUrl();
   await ctx.audioWorklet.addModule(workletUrl);
   URL.revokeObjectURL(workletUrl);
 
@@ -36,7 +36,7 @@ export async function startCapture(
   return {
     stop() {
       // Only clear the shared ref if it still points at OUR analyser
-      // (StrictMode double-mount safety; see playback.ts for context).
+      // (StrictMode can replace the capture instance before cleanup).
       if (audioRefs.mic === analyser) audioRefs.mic = null;
       worklet.disconnect();
       analyser.disconnect();

@@ -1,11 +1,16 @@
 # kaguya-talker
 
-Process 2 of the Kaguya system. Owns voice I/O and LLM inference for one
-conversation turn.
+The Kaguya voice process. Owns voice I/O and LLM inference for one fixed
+instance/session pair. Each `Converse` stream handles one generation; the
+process does not multiplex instances or sessions.
 
 ## Modules
 
-- **main.py** — asyncio entrypoint: starts both gRPC servers + Listener task.
+- **main.py** — validates the required startup scope, then starts both gRPC
+  servers and the Listener task.
+- **binding.py** — immutable expected instance/session scope shared by Talker,
+  Listener gRPC, and raw audio ingress. Validates request assertions and the
+  audio connection preamble.
 - **config.py** — `TalkerConfig` (pydantic-settings, direct-run defaults,
   `KAGUYA_*` env vars injected by launchers).
 - **server.py** — `TalkerServiceServicer`: bidi `Converse` for inference +
@@ -19,9 +24,12 @@ conversation turn.
     audio frames, the turn detector, and the event queue feeding the gRPC.
 - **voice/turn_detector.py** — Rule-based end-of-turn detection (Phase 1; see
   REF-004 for the planned Phase 2 learned model).
-- **voice/speaker.py** — Spoken text → Kokoro TTS → audio out.
-- **inference/prompt_formatter.py** — `TalkerContext` + `PersonaConfig` →
-  Qwen3 chat-template prompt.
+- **voice/speaker.py** — Spoken text → Kokoro TTS → audio out. Barge-in
+  accounting acknowledges only completed playback batches; the interrupted
+  batch and queued text stay unspoken. Exact word delivery is not measured.
+- **inference/prompt_formatter.py** — `PromptContext` plus a typed generation
+  trigger and cached `PersonaConfig` → Qwen3 chat-template prompt. Prefill uses
+  the same snapshot renderer without a generation trigger.
 - **inference/llm_client.py** — Async HTTP streaming to the OpenAI-compatible
   LLM server (`/v1/completions`).
 - **inference/sentence_detector.py** — Token buffer → sentence boundaries.
@@ -37,8 +45,10 @@ Implementation plan: [`../docs/implementation-plan-v0.1.0.md`](../docs/implement
 
 - **LLM server** — OpenAI-compatible `/v1/completions` endpoint, default
   `http://localhost:1234`. llama.cpp, LM Studio, or vLLM all work.
-- **Gateway** — not required to bring up the Talker process for testing.
-  Talker/Listener expose local endpoints and wait for Gateway to connect.
+- **Configured scope** — standalone and managed startup both require the
+  selected instance's `instance_id` and `default_session_id`. Gateway need not
+  be running when voice starts, but these IDs must already be provisioned and
+  must match the pair Gateway will use. Voice does not generate or choose IDs.
 
 ---
 
@@ -58,8 +68,7 @@ brew install uv portaudio opus
 # 2. Project dependencies (from talker/)
 uv sync --dev
 
-# 3. Run
-uv run python main.py
+# 3. Set the required scope and run as shown in "Running" below.
 ```
 
 That's it. `uv sync` reads `pyproject.toml` + `uv.lock`, downloads a
@@ -115,33 +124,55 @@ Install Python 3.11+ and uv via your preferred method, then:
 ```powershell
 cd talker
 uv sync --dev
-uv run python main.py
+# Set the required scope and run as shown in "Running" below.
 ```
 
 ---
 
 ## Running
 
+Supervisor and the dev console validate the selected manifest and inject its
+pair into `KAGUYA_INSTANCE_ID` and `KAGUYA_SESSION_ID`. Runtime bind settings
+come from the selected runtime configuration/profile and are also injected as
+`KAGUYA_*` environment variables.
+
+For standalone debugging, copy the values from the same `instance.toml` that
+Gateway selects. Replace the placeholders below with its `instance_id` and
+`default_session_id`; do not generate new IDs for the voice process.
+
 ```sh
-# From talker/
+# From talker/, macOS/Linux/WSL
+export KAGUYA_INSTANCE_ID="<instance_id>"
+export KAGUYA_SESSION_ID="<default_session_id>"
 uv run python main.py
 ```
 
-When launched by the Kaguya Supervisor or dev console, runtime bind settings
-come from `../config/kaguya.runtime.toml` and are injected as `KAGUYA_*`
-environment variables. `config.py` defaults and `.env` are direct-run
-fallbacks only, useful for `uv run python main.py`.
+```powershell
+# From talker/, Windows
+$env:KAGUYA_INSTANCE_ID = "<instance_id>"
+$env:KAGUYA_SESSION_ID = "<default_session_id>"
+uv run python main.py
+```
 
-Common direct-run overrides:
+Both IDs are required canonical lowercase, non-nil, distinct UUIDs. Missing or
+invalid values fail startup before voice dependencies load, inference clients
+are created, or listeners open. There is no first-caller binding or automatic
+fallback identity. Inference-only unit tests can construct `TalkerConfig`
+without deployment IDs; starting the service cannot.
 
-| Var                            | Default              | Notes                              |
-| ------------------------------ | -------------------- | ---------------------------------- |
-| `KAGUYA_LOG_LEVEL`             | `INFO`               | Logger level                       |
-| `KAGUYA_LLM_BASE_URL`          | `http://localhost:1234` | OpenAI-compatible endpoint      |
-| `KAGUYA_TALKER_LISTEN_ADDR`    | `0.0.0.0:50053`      | TalkerService gRPC bind address    |
-| `KAGUYA_LISTENER_GRPC_ADDR`    | `0.0.0.0:50055`      | ListenerService gRPC bind address  |
-| `KAGUYA_LISTENER_AUDIO_ADDR`   | `0.0.0.0`            | Raw TCP audio socket bind address  |
-| `KAGUYA_LISTENER_AUDIO_PORT`   | `50056`              | Raw TCP audio socket bind port     |
+`config.py` defaults and `.env` remain available for direct-run settings. The
+identity variables have no default; they can also be supplied in `.env`.
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `KAGUYA_INSTANCE_ID` | **required** | Selected manifest's `instance_id` |
+| `KAGUYA_SESSION_ID` | **required** | Selected manifest's `default_session_id` |
+| `KAGUYA_LOG_LEVEL` | `INFO` | Logger level |
+| `KAGUYA_LLM_BASE_URL` | `http://localhost:1234` | OpenAI-compatible endpoint |
+| `KAGUYA_TALKER_LISTEN_ADDR` | `0.0.0.0:50053` | TalkerService gRPC bind address |
+| `KAGUYA_LISTENER_GRPC_ADDR` | `0.0.0.0:50055` | ListenerService gRPC bind address |
+| `KAGUYA_LISTENER_AUDIO_ADDR` | `0.0.0.0` | Raw TCP audio socket bind address |
+| `KAGUYA_LISTENER_AUDIO_PORT` | `50056` | Raw TCP audio socket bind port |
 
 ### macOS port-binding gotcha
 
@@ -151,6 +182,8 @@ HuggingFace model fetches) can transiently hold ports as TIME_WAIT
 corpses; binding to `0.0.0.0:PORT` then fails with `EADDRINUSE` because
 the kernel requires the port to be free on every interface. Loopback is
 its own interface and not affected. Easiest workaround:
+
+With the required scope already exported:
 
 ```sh
 KAGUYA_TALKER_LISTEN_ADDR=127.0.0.1:50053 \
@@ -189,17 +222,15 @@ The script generates Python + mypy `.pyi` stubs into `talker/proto/`
 uv run pytest -v
 ```
 
-The `tests/test_grpc_handshake.py` regression test exercises the bidi
-`Stream` and `Converse` handshakes against an in-process server, which
-catches the metadata-flush bug if anyone reverts that fix.
+`tests/test_grpc_handshake.py` exercises stream setup against an in-process
+server: valid scope/start receives headers before ASR/inference output,
+malformed Talker initialization fails promptly, and an invalid replacement
+cannot take over a live Listener stream.
+`tests/test_instance_session_binding.py` checks typed scope rejection before
+persona, cache, or speaker mutation, plus cached persona and generation
+correlation. Startup and raw-audio scope validation have separate regressions.
 
-### Test harness (deprecated)
-
-`scripts/mic_to_listener_harness.py` was a single-process harness from
-before the Listener/Gateway gRPC role flip. It is currently **broken** —
-it dials Gateway as a gRPC client and uses removed proto messages
-(`ListenerEvent`, `StreamEvents`). Pending rewrite. See the file's
-top-of-file warning for details.
+### End-to-end text input
 
 For end-to-end testing without a real microphone, use the Gateway's
 WebSocket text-command path:
@@ -212,22 +243,53 @@ echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
 
 ## Architecture notes
 
-- **Stateless.** All context arrives via gRPC from the Gateway each turn.
-  Persona is cached in-process (delivered via `UpdatePersona`), but
-  conversation state lives entirely on the Gateway side.
+- **Fixed scope.** One immutable expected pair is established before service
+  startup. Every session-targeting RPC asserts that pair; a different pair is
+  rejected rather than selecting another runtime. The shared binding object
+  has no unbound state and never changes in response to requests.
+- **Stateless generation.** Conversation state lives on Gateway. Each
+  `GenerationStart` supplies a fresh `PromptContext` and exactly one typed
+  trigger. Persona is cached in-process through `UpdatePersonaRequest` on
+  startup, reconnect, and changes; it is not retransmitted in every generation.
+- **Typed protocol.** `SessionRef` contains `InstanceId { value }` and
+  `SessionId { value }`. Scope is carried in protobuf requests, not custom
+  gRPC identity metadata. `GenerationStart` has `session`, `generation_id`,
+  `timestamp_ms`, `prompt_context`, and a trigger `oneof`: user input, tool
+  result, Reasoner result/progress/failure, or silence. Tool results retain
+  `request_id`; Reasoner results/progress/failures retain `task_id`. Failures
+  retain their error message and code instead of becoming successful results. `PromptContext`
+  contains history, memory, tools, typed active tasks, and retrieval results.
+  `PrefillRequest` carries `session` and `prompt_context` without inventing a
+  generation or trigger. `UpdatePersonaRequest` carries `session` and `persona`.
+- **Stream setup.** Listener accepts a bidi stream beginning with
+  `ListenerInput.init` (`ListenerInit { session }`). Gateway sends only that and
+  half-closes. Typed `ListenerInput.control` messages stay declared as an
+  extension point; reset currently ends the RPC with `UNIMPLEMENTED`. Talker
+  begins with `TalkerInput.start` (`GenerationStart`), followed by inline
+  `BargeInSignal {}` requests; only the first barge-in is acknowledged. Gateway queues each initial
+  message before waiting for headers, and both services validate scope before
+  sending them. Listener queue takeover happens only after scope validation.
+  Missing, misordered, or repeated initialization is rejected. Half-closing
+  Listener input leaves its event subscription active; cancellation closes it.
+- **Generation provenance.** Each Converse stream serves one generation.
+  Every `TalkerOutput` carries its `generation_id` in the outer envelope; Gateway
+  validates it against the dispatch before forwarding the protobuf directly.
+  Lifecycle payloads do not duplicate that field. A canonical UUID adds 38 bytes
+  per semantic output, including barge-in acknowledgments, with no audio overhead.
+  Listener's local `utterance_epoch` counter invalidates stale silence loops;
+  it is unrelated to generation IDs.
 - **Two gRPC servers, one process.** `TalkerService` on `:50053` and
-  `ListenerService` on `:50055`. Both run in the same asyncio loop so
-  they can share the GPU context for VAD/STT/TTS/LLM.
-- **Audio bypass.** Raw 16-bit PCM/Opus frames don't go through gRPC at
-  50fps — they ride a dedicated TCP socket (`:50056` by default) with
-  length-prefixed frames.
-- **Bidi handshake.** Both `Stream` and `Converse` call
-  `await context.send_initial_metadata(())` on entry. Without this,
-  grpcio-aio defers HTTP/2 HEADERS until the first `yield`, which would
-  deadlock the Gateway-side await on its first send.
-- **opus.dll on Windows.** Bundled in `native/win32/`. Prepended to
-  `PATH` and registered via `os.add_dll_directory()` at import time so
-  opuslib's `find_library` resolves it without system installation.
+  `ListenerService` on `:50055` run in the same asyncio loop. They share the
+  fixed scope and the voice process's resources.
+- **Audio bypass.** Raw 16-bit PCM/Opus frames do not go through gRPC at
+  50fps. They use a dedicated TCP socket (`:50056` by default). Gateway sends
+  one 39-byte header (`KAGUYA1` plus binary InstanceId and SessionId);
+  length-prefixed frames follow. The header must match the startup scope
+  before frames reach the recorder. This adds connection setup bytes rather
+  than bytes to each audio frame; no latency benchmark is implied.
+- **opus.dll on Windows.** Bundled in `native/win32/`, prepended to `PATH`,
+  and registered via `os.add_dll_directory()` at import time so opuslib's
+  `find_library` resolves it without system installation.
 - **Proto imports.** Use the flat `from proto import kaguya_pb2` form
   (single source of truth in `talker/proto/`).
 
@@ -236,42 +298,35 @@ echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
 ```mermaid
 sequenceDiagram
     participant G as Gateway (client)
-    participant T as Talker (server)
+    participant V as Voice (Talker + Listener)
 
-    note over G,T: ── Audio (continuous, raw TCP) ──
-    G->>T: Length-prefixed Opus frames on :50056
-    note over T: opus_decoder → 16 kHz PCM
-    note over T: listener.py → RealtimeSTT (Whisper + Silero VAD)
-    note over T: turn_detector → emit decision
+    Note over G,V: Expected instance/session pair established before service startup
+    G->>V: UpdatePersona(UpdatePersonaRequest: session, persona)
+    V-->>G: PersonaAck after validation
 
-    note over G,T: ── ASR events (gRPC bidi: ListenerService.Stream) ──
-    G->>T: ListenerInput.control (e.g. reset)
-    T-->>G: VadSpeechStart / VadSpeechEnd
-    T-->>G: PartialTranscript (repeated)
-    T-->>G: FinalTranscript
+    G->>V: Stream: first ListenerInput.init (ListenerInit: session)
+    V-->>G: Response headers after validation
+    G->>V: Raw TCP: 39-byte scope header, then length-prefixed PCM/Opus
+    Note over V: Opus decode if needed, RealtimeSTT, utterance detection
+    V-->>G: VAD events, partial transcripts, final transcript
 
-    note over G,T: ── Turn (gRPC bidi: TalkerService.Converse) ──
-    G->>T: TalkerInput.start (TalkerContext)
-    note over T: prompt_formatter → Qwen3 prompt
-    note over T: llm_client → /v1/completions SSE
-    note over T: sentence_detector + soul_container
-    note over T: speaker → Kokoro TTS
-    T-->>G: ResponseStarted
-    T-->>G: SentenceEvent / EmotionEvent
-    T-->>G: ToolRequest / DelegateRequest (if tagged)
-    T-->>G: ResponseComplete
+    G->>V: Converse: first TalkerInput.start (GenerationStart)
+    Note over V: Validate session, generation ID, prompt context, and typed trigger
+    V-->>G: Response headers
+    V-->>G: TalkerOutput(generation_id, ResponseStarted)
+    Note over V: Cached persona + prompt context + trigger → Qwen3 prompt
+    Note over V: LLM SSE → sentence detector + tag extraction → Kokoro TTS
+    V-->>G: TalkerOutput(generation_id, sentence/emotion/tool/delegation)
+    opt User interrupts
+        G->>V: TalkerInput.barge_in (BargeInSignal)
+        Note over V: First barge-in only: cancel inference, stop speaker
+        V-->>G: TalkerOutput(generation_id, BargeInAck(spoken, unspoken))
+    end
+    V-->>G: TalkerOutput(generation_id, ResponseComplete)
 
-    note over G,T: ── Barge-in (inline on Converse) ──
-    G->>T: TalkerInput.barge_in
-    note over T: cancel_event.set() → break inference loop
-    note over T: speaker.stop() → split spoken/unspoken
-    T-->>G: BargeInAck(spoken, unspoken)
-
-    note over G,T: ── Between turns (unary) ──
-    G->>T: PrefillCache(PrefillRequest)
-    T-->>G: PrefillAck
-    G->>T: UpdatePersona(PersonaConfig)
-    T-->>G: PersonaAck
+    G->>V: PrefillCache(PrefillRequest: session, prompt_context)
+    V-->>G: PrefillAck
+    Note over G,V: UpdatePersona is repeated on reconnect or actual changes
 ```
 
 See [`../REFERENCES.md`](../REFERENCES.md) for design decision rationale.

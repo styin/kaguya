@@ -1,46 +1,43 @@
 //! Core pipeline data types.
 //!
-//! [`TurnState`] holds mutable per-conversation state across event loop
+//! [`SessionState`] holds mutable per-session state across event loop
 //! iterations. [`PipelineAction`] enumerates every side effect a handler
 //! can request — one variant per I/O call, enabling precise test assertions.
 
 use tokio_util::sync::CancellationToken;
 
+use crate::core::types::DispatchKind;
 use crate::proto;
-use crate::types::DispatchKind;
 
-/// Mutable conversation state shared between the orchestrator, handlers,
+/// Mutable session state shared between the orchestrator, handlers,
 /// and executor across event loop iterations.
 #[derive(Debug)]
-pub struct TurnState {
+pub struct SessionState {
     /// Cancellation token for the active Talker generation, if any.
     pub active_gen: Option<CancellationToken>,
     /// Cancellation token for the active silence timer cascade, if any.
     pub active_silence: Option<CancellationToken>,
     /// Accumulated sentence text from the current response stream.
     pub current_response: String,
-    /// Turn ID of the most recent user-intent dispatch.
-    pub last_turn_id: String,
+    /// Generation ID of the most recent user-intent dispatch.
+    pub last_user_generation_id: String,
     /// What kind of round triggered the active dispatch.
     /// Read on `ResponseComplete` to gate memory persistence.
     pub current_dispatch_kind: Option<DispatchKind>,
     /// Last exported memory markdown, used to detect changes for persona push.
     pub last_memory_md: String,
-    /// Conversation ID for this session.
-    pub conversation_id: String,
 }
 
-impl TurnState {
+impl SessionState {
     /// Initialize state for a new conversation session.
-    pub fn new(conversation_id: String, initial_memory_md: String) -> Self {
+    pub fn new(initial_memory_md: String) -> Self {
         Self {
             active_gen: None,
             active_silence: None,
             current_response: String::new(),
-            last_turn_id: String::new(),
+            last_user_generation_id: String::new(),
             current_dispatch_kind: None,
             last_memory_md: initial_memory_md,
-            conversation_id,
         }
     }
 
@@ -64,7 +61,7 @@ impl TurnState {
     }
 }
 
-/// A side effect requested by a handler, executed by [`ActionExecutor`].
+/// A side effect requested by a handler, executed by [`ActionExecutor`](super::ActionExecutor).
 ///
 /// One variant per I/O operation. Handlers return `Vec<PipelineAction>`
 /// and never call components directly.
@@ -72,9 +69,9 @@ impl TurnState {
 pub enum PipelineAction {
     // ── Talker ──
     /// Open a Converse bidi stream. Executor stores the returned
-    /// cancellation token in `TurnState::active_gen`.
+    /// cancellation token in `SessionState::active_gen`.
     DispatchTalker {
-        context: proto::TalkerContext,
+        context: proto::GenerationStart,
         kind: DispatchKind,
     },
     /// Interrupt the active generation stream.
@@ -82,24 +79,24 @@ pub enum PipelineAction {
 
     // ── Output ──
     SendResponseStarted {
-        turn_id: String,
+        generation_id: String,
     },
     SendSentence {
+        generation_id: String,
         text: String,
     },
     SendEmotion {
+        generation_id: String,
         emotion: String,
     },
     SendResponseComplete {
-        turn_id: String,
+        generation_id: String,
         was_interrupted: bool,
     },
     /// Echo voice transcript to WebSocket clients.
     SendUserInput {
         text: String,
     },
-    MuteOutput,
-    UnmuteOutput,
 
     // ── History ──
     AppendUserHistory {
@@ -133,7 +130,7 @@ pub enum PipelineAction {
     EvaluateAndStoreMemory {
         user_input: String,
         assistant_response: String,
-        turn_id: String,
+        generation_id: String,
     },
     /// Push updated persona to Talker if memory changed since last turn.
     UpdatePersonaIfChanged,
@@ -150,19 +147,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn turn_state_new_initializes_empty() {
-        let state = TurnState::new("conv-1".into(), "# Memory".into());
-        assert_eq!(state.conversation_id, "conv-1");
+    fn session_state_new_initializes_empty() {
+        let state = SessionState::new("# Memory".into());
         assert_eq!(state.last_memory_md, "# Memory");
         assert!(!state.is_generating());
         assert!(state.current_response.is_empty());
-        assert!(state.last_turn_id.is_empty());
+        assert!(state.last_user_generation_id.is_empty());
         assert!(state.current_dispatch_kind.is_none());
     }
 
     #[test]
     fn is_generating_reflects_active_gen() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(String::new());
         assert!(!state.is_generating());
 
         state.active_gen = Some(CancellationToken::new());
@@ -171,7 +167,7 @@ mod tests {
 
     #[test]
     fn cancel_active_gen_clears_and_cancels() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(String::new());
         let token = CancellationToken::new();
         let child = token.clone();
         state.active_gen = Some(token);
@@ -184,14 +180,14 @@ mod tests {
 
     #[test]
     fn cancel_active_gen_noop_when_none() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(String::new());
         state.cancel_active_gen(); // should not panic
         assert!(state.active_gen.is_none());
     }
 
     #[test]
     fn cancel_active_silence_clears_and_cancels() {
-        let mut state = TurnState::new("c".into(), String::new());
+        let mut state = SessionState::new(String::new());
         let token = CancellationToken::new();
         let child = token.clone();
         state.active_silence = Some(token);
@@ -200,23 +196,5 @@ mod tests {
 
         assert!(state.active_silence.is_none());
         assert!(child.is_cancelled());
-    }
-
-    #[test]
-    fn pipeline_action_variants_are_comparable() {
-        // Verify PartialEq works for test assertions.
-        let a = PipelineAction::MuteOutput;
-        let b = PipelineAction::MuteOutput;
-        assert_eq!(a, b);
-
-        let c = PipelineAction::SendSentence {
-            text: "hello".into(),
-        };
-        let d = PipelineAction::SendSentence {
-            text: "hello".into(),
-        };
-        assert_eq!(c, d);
-
-        assert_ne!(PipelineAction::MuteOutput, PipelineAction::UnmuteOutput,);
     }
 }

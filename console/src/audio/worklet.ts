@@ -1,6 +1,6 @@
-// AudioWorkletProcessor for mic capture and TTS playback.
+// AudioWorkletProcessor for mic capture.
 // Runs in the audio thread — no DOM access, no imports.
-// Registered by capture.ts and playback.ts via addModule().
+// Registered by capture.ts via addModule().
 
 const CAPTURE_PROCESSOR = `
 class CaptureProcessor extends AudioWorkletProcessor {
@@ -38,45 +38,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
 registerProcessor("capture-processor", CaptureProcessor);
 `;
 
-const PLAYBACK_PROCESSOR = `
-class PlaybackProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this._ring = new Float32Array(0);
-    this.port.onmessage = (e) => {
-      const pcm16 = new Int16Array(e.data);
-      const float32 = new Float32Array(pcm16.length);
-      for (let i = 0; i < pcm16.length; i++) {
-        float32[i] = pcm16[i] / (pcm16[i] < 0 ? 0x8000 : 0x7FFF);
-      }
-      const merged = new Float32Array(this._ring.length + float32.length);
-      merged.set(this._ring);
-      merged.set(float32, this._ring.length);
-      this._ring = merged;
-    };
-  }
-
-  process(_inputs, outputs) {
-    const output = outputs[0]?.[0];
-    if (!output) return true;
-
-    const needed = output.length;
-    if (this._ring.length >= needed) {
-      output.set(this._ring.slice(0, needed));
-      this._ring = this._ring.slice(needed);
-    } else {
-      // Underrun — output silence for missing samples
-      output.set(this._ring);
-      this._ring = new Float32Array(0);
-    }
-    return true;
-  }
-}
-registerProcessor("playback-processor", PlaybackProcessor);
-`;
-
-export function createWorkletBlobUrl(type: "capture" | "playback"): string {
-  const code = type === "capture" ? CAPTURE_PROCESSOR : PLAYBACK_PROCESSOR;
-  const blob = new Blob([code], { type: "application/javascript" });
+export function createWorkletBlobUrl(): string {
+  const blob = new Blob([CAPTURE_PROCESSOR], { type: "application/javascript" });
   return URL.createObjectURL(blob);
 }

@@ -1,10 +1,8 @@
 //! Reciprocal Rank Fusion (RRF) — merges rankings from multiple retrieval sources.
-//! k=60 per Cormack et al., 2009.
+//! The denominator offset is supplied by Gateway configuration.
 
 use crate::proto;
 use std::collections::HashMap;
-
-const RRF_K: f64 = 60.0;
 
 pub struct RankedItem {
     pub id: String,
@@ -13,12 +11,13 @@ pub struct RankedItem {
 
 pub fn reciprocal_rank_fusion(
     sources: Vec<(&str, Vec<RankedItem>)>,
+    k: f64,
 ) -> Vec<proto::RetrievalResult> {
     let mut scores: HashMap<String, (f64, String, String)> = HashMap::new();
 
     for (source_name, items) in sources {
         for (rank, item) in items.iter().enumerate() {
-            let rrf = 1.0 / (RRF_K + rank as f64 + 1.0);
+            let rrf = 1.0 / (k + rank as f64 + 1.0);
             let entry = scores.entry(item.id.clone()).or_insert((
                 0.0,
                 item.content.clone(),

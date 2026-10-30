@@ -92,6 +92,11 @@ test native_backend_contract ... ok
 Docker is the container-isolated backend. On Windows, Kaguya uses Docker Desktop
 with the WSL 2 Linux engine.
 
+When the Docker backend is selected and the sandbox is enabled, Supervisor
+checks the `docker` CLI and daemon (`docker version`) during startup. If either
+is unavailable, Supervisor does not start. Set `[sandbox] enabled = false` to
+run without a sandbox.
+
 ### Windows prerequisites
 
 Install/update:

@@ -3,39 +3,48 @@
 
 PROTO_DIR  := proto
 PROTO_FILE := $(PROTO_DIR)/kaguya/v1/kaguya.proto
+# Override when using an already-provisioned environment, e.g.
+# make proto TALKER_PYTHON=/absolute/path/to/python
+TALKER_PYTHON ?= uv run python
+PYTHON ?= python
 
 # ── Proto (Python) ──
 # Delegates to talker/scripts/gen_proto.py: generates flat-layout stubs into
 # talker/proto/, also writes mypy-protobuf .pyi stubs, and patches the gRPC
 # import to be relative. Pure Python — works on macOS, Linux, Windows.
 proto-py:
-	cd talker && uv run python scripts/gen_proto.py
+	cd talker && $(TALKER_PYTHON) scripts/gen_proto.py
 
 # ── Proto (Rust) ──
-# tonic-build in gateway/build.rs regenerates Rust stubs on every cargo build.
+# Each Rust crate regenerates its bindings through tonic-build.
 proto-rs:
 	cd gateway && cargo build
+	cd supervisor && cargo build
 
 # ── Both ──
 proto: proto-py proto-rs
 
 # ── Tests ──
-# `npm test --if-present` silently skips when there's no test script —
-# reasoner is currently scaffolding only.
 test:
 	cd gateway  && cargo test
+	cd gateway  && cargo test --features dev-console
 	cd supervisor && cargo test
 	cd talker   && uv run pytest
-	cd reasoner && npm test --if-present
+	cd console  && npm test
 
 # ── Lint ──
-# rustc/clippy strict, ruff for Python, buf for proto. Each tool only fails
-# the target if it itself is failing — install the tools you use.
+# Build/type checks, formatting, Ruff and protobuf lint. Install the listed tools
+# before running; a missing tool fails the target.
 lint:
 	cd gateway && cargo build
+	cd gateway && cargo fmt --check
 	cd supervisor && cargo build
+	cd supervisor && cargo fmt --check
 	cd talker  && uv run ruff check .
+	cd talker  && uv run ruff format --check .
+	cd console && npm run build
 	buf lint $(PROTO_DIR)
+	buf format --diff --exit-code $(PROTO_DIR)
 
 # ── Format ──
 # Writes formatting changes in place. CI typically uses `--check` flavors
@@ -55,15 +64,15 @@ SANDBOX_IMAGE ?= kaguya-sandbox:latest
 sandbox-image:
 	docker build -t $(SANDBOX_IMAGE) -f docker/sandbox.Dockerfile docker
 
-# Reap orphaned sandbox containers left by a hard crash (graceful shutdown
-# already cleans up). Safe to run anytime; matches the `kaguya.sandbox` label.
+# Remove Kaguya sandbox containers after stopping Supervisor, including
+# orphans left by a hard crash. Matches the `kaguya.sandbox` label.
 sandbox-clean:
-	docker ps -aq --filter label=kaguya.sandbox=1 | xargs -r docker rm -f
+	$(PYTHON) scripts/maintenance.py sandbox-clean
 
 # ── Clean ──
 clean:
 	cd gateway && cargo clean
-	rm -rf talker/.venv
-	rm -rf reasoner/node_modules
+	cd supervisor && cargo clean
+	$(PYTHON) scripts/maintenance.py clean
 
 .PHONY: proto proto-py proto-rs test lint format clean sandbox-image sandbox-clean

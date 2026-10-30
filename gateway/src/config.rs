@@ -1,14 +1,15 @@
 //! Gateway-local configuration.
 //!
-//! [`GatewayConfig`] is loaded from `gateway.toml` and covers server addresses,
+//! [`GatewayConfig`] is loaded from the selected deployment's settings file and covers server addresses,
 //! persona file paths, history depth, silence timer tuning, RAG settings, and
-//! the runtime topology section that resolves client endpoint addresses.
+//! the runtime topology projection from that same selected deployment.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     pub server: ServerConfig,
     pub files: FilesConfig,
@@ -18,7 +19,7 @@ pub struct GatewayConfig {
     pub rag: RagConfig,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
-    #[serde(default)]
+    #[serde(skip)]
     pub runtime: RuntimeConfig,
 }
 
@@ -63,7 +64,7 @@ pub enum LaunchMode {
     External,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub profile: Option<String>,
     #[serde(default)]
@@ -115,20 +116,15 @@ fn default_enabled() -> bool {
     true
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            profile: None,
-            runtimes: BTreeMap::new(),
-        }
-    }
-}
-
 impl RuntimeConfig {
-    pub fn load_topology(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+    pub fn load_topology_selected(
+        path: impl AsRef<std::path::Path>,
+        profile: Option<String>,
+    ) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let topology = toml::from_str::<RuntimeTopologyFile>(&content)?;
-        Self::from_topology(topology, selected_runtime_profile())
+        let topology = toml::from_str::<RuntimeTopologyFile>(&content)
+            .map_err(|error| crate::deployment::toml_error("runtime topology", &content, &error))?;
+        Self::from_topology(topology, profile)
     }
 
     fn from_topology(
@@ -139,10 +135,12 @@ impl RuntimeConfig {
         let processes = if let Some(profile) = selected_profile.as_deref() {
             match topology.profiles.get(profile) {
                 Some(profile_config) => profile_config.processes.clone(),
-                None if topology.profiles.is_empty() => topology.processes,
                 None => anyhow::bail!("runtime profile '{profile}' is not defined"),
             }
         } else {
+            if !topology.profiles.is_empty() {
+                anyhow::bail!("runtime profile must be selected when named profiles are defined");
+            }
             topology.processes
         };
         validate_runtime_topology(&processes)?;
@@ -205,9 +203,7 @@ pub struct SilenceConfig {
     pub context_shift_secs: u64,
     /// Gate the proactive silence-triggered LLM dispatch (P4 SilenceExceeded).
     /// Timers themselves keep running — tiers still tick and emit events for
-    /// telemetry — but the dispatch is suppressed when this is `false`. See
-    /// B10 in TODO.md for the eventual prompt-engineering fix that will make
-    /// the LLM optionally silent and let this flag flip back to `true`.
+    /// telemetry — but the dispatch is suppressed when this is `false`.
     #[serde(default = "default_silence_enabled")]
     pub enabled: bool,
 }
@@ -217,10 +213,13 @@ fn default_silence_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RagConfig {
-    pub db_path: PathBuf,
     pub embedding_url: Option<String>,
     pub top_k: usize,
+    /// Reciprocal-rank fusion denominator offset; must be finite and positive.
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f64,
     /// Hard cap on stored memory content length (chars). Defensive only;
     /// real voice utterances never approach this. Prevents pathological
     /// inputs (paste-bombs, adversarial content) from poisoning the index.
@@ -239,6 +238,10 @@ pub struct RagConfig {
     pub max_chars_per_md_entry: Option<usize>,
 }
 
+fn default_rrf_k() -> f64 {
+    60.0
+}
+
 fn default_max_storage_chars() -> Option<usize> {
     Some(4096)
 }
@@ -246,9 +249,9 @@ fn default_max_storage_chars() -> Option<usize> {
 impl Default for RagConfig {
     fn default() -> Self {
         Self {
-            db_path: "data/kaguya.db".into(),
             embedding_url: None,
             top_k: 10,
+            rrf_k: default_rrf_k(),
             max_storage_chars: default_max_storage_chars(),
             max_chars_per_result: None,
             max_chars_per_md_entry: None,
@@ -258,11 +261,38 @@ impl Default for RagConfig {
 
 impl GatewayConfig {
     pub fn load(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let mut config = toml::from_str::<Self>(&content)?;
-        if let Some(runtime) = load_runtime_topology()? {
-            config.runtime = runtime;
-        }
+        let path = crate::deployment::resolve_path(&std::env::current_dir()?, path.as_ref())?;
+        let content = std::fs::read_to_string(&path)?;
+        let mut config = toml::from_str::<Self>(&content).map_err(|error| {
+            crate::deployment::toml_error(
+                format_args!("Gateway settings {}", path.display()),
+                &content,
+                &error,
+            )
+        })?;
+        anyhow::ensure!(
+            config.rag.rrf_k.is_finite() && config.rag.rrf_k > 0.0,
+            "rag.rrf_k must be finite and positive"
+        );
+        let base = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Gateway settings file has no parent"))?;
+        config.files.soul_path = crate::deployment::resolve_path(base, &config.files.soul_path)?;
+        config.files.identity_path =
+            crate::deployment::resolve_path(base, &config.files.identity_path)?;
+        config.files.workspace_root =
+            crate::deployment::resolve_path(base, &config.files.workspace_root)?;
+        Ok(config)
+    }
+
+    pub fn load_selected(
+        selection: &crate::deployment::DeploymentSelection,
+    ) -> anyhow::Result<Self> {
+        let mut config = Self::load(&selection.gateway_settings)?;
+        config.runtime = RuntimeConfig::load_topology_selected(
+            &selection.runtime_config,
+            selection.profile.clone(),
+        )?;
         Ok(config)
     }
 
@@ -288,30 +318,6 @@ impl GatewayConfig {
     }
 }
 
-fn load_runtime_topology() -> anyhow::Result<Option<RuntimeConfig>> {
-    if let Ok(path) = std::env::var("KAGUYA_RUNTIME_CONFIG") {
-        return RuntimeConfig::load_topology(path).map(Some);
-    }
-
-    for candidate in [
-        "../config/kaguya.runtime.toml",
-        "config/kaguya.runtime.toml",
-    ] {
-        let path = std::path::Path::new(candidate);
-        if path.exists() {
-            return RuntimeConfig::load_topology(path).map(Some);
-        }
-    }
-
-    Ok(None)
-}
-
-fn selected_runtime_profile() -> Option<String> {
-    std::env::var("KAGUYA_RUNTIME_PROFILE")
-        .ok()
-        .filter(|profile| !profile.trim().is_empty())
-}
-
 fn validate_runtime_topology(processes: &BTreeMap<String, RuntimeSpec>) -> anyhow::Result<()> {
     for (process_id, process) in processes {
         for (endpoint_name, bind_addr) in &process.bind {
@@ -320,17 +326,17 @@ fn validate_runtime_topology(processes: &BTreeMap<String, RuntimeSpec>) -> anyho
             };
             let Some(bind_port) = endpoint_port(bind_addr) else {
                 anyhow::bail!(
-                    "runtime process '{process_id}' bind.{endpoint_name} has no explicit port: {bind_addr}"
+                    "runtime process '{process_id}' bind.{endpoint_name} has no explicit port"
                 );
             };
             let Some(connect_port) = endpoint_port(connect_addr) else {
                 anyhow::bail!(
-                    "runtime process '{process_id}' endpoints.{endpoint_name} has no explicit port: {connect_addr}"
+                    "runtime process '{process_id}' endpoints.{endpoint_name} has no explicit port"
                 );
             };
             if bind_port != connect_port {
                 anyhow::bail!(
-                    "runtime process '{process_id}' bind/endpoints port mismatch for '{endpoint_name}': bind={bind_addr}, endpoint={connect_addr}"
+                    "runtime process '{process_id}' bind/endpoints port mismatch for '{endpoint_name}'"
                 );
             }
         }
@@ -427,45 +433,30 @@ mod tests {
     #[test]
     fn runtime_endpoints_override_default_clients() {
         let toml = r#"
-            [server]
-            ws_addr = "127.0.0.1:8080"
-            grpc_addr = "0.0.0.0:50051"
 
-            [files]
-            soul_path = "SOUL.md"
-            identity_path = "IDENTITY.md"
-            workspace_root = "."
-
-            [history]
-            max_recent_turns = 50
-
-            [silence]
-            soft_prompt_secs = 3
-            follow_up_secs = 8
-            context_shift_secs = 30
-
-            [runtime]
-            profile = "test"
-
-            [runtime.runtimes.voice_stack]
+            [processes.voice_stack]
             enabled = true
             criticality = "required"
             provides = ["talker", "listener"]
 
-            [runtime.runtimes.voice_stack.endpoints]
+            [processes.voice_stack.endpoints]
             talker_grpc = "http://runtime-talker"
             listener_grpc = "http://runtime-listener"
             listener_audio = "runtime-audio:1"
 
-            [runtime.runtimes.reasoner]
+            [processes.reasoner]
             enabled = true
             criticality = "degraded_usable"
 
-            [runtime.runtimes.reasoner.endpoints]
+            [processes.reasoner.endpoints]
             grpc = "http://runtime-reasoner"
         "#;
 
-        let config: GatewayConfig = toml::from_str(toml).expect("config should parse");
+        let topology = toml::from_str::<RuntimeTopologyFile>(toml).unwrap();
+        let config = GatewayConfig {
+            runtime: RuntimeConfig::from_topology(topology, None).unwrap(),
+            ..GatewayConfig::default()
+        };
         let clients = config.resolved_clients();
 
         assert_eq!(clients.talker_addr, "http://runtime-talker");
@@ -475,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_config_parses_without_clients_block() {
+    fn gateway_component_settings_parse() {
         let toml = r#"
             [server]
             ws_addr = "127.0.0.1:8080"

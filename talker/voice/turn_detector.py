@@ -56,35 +56,39 @@ class TurnDetector:
         self._buffer: str = ""
         self._vad_stop_ts: float | None = None  # set by on_vad_stop
         self._emitted: bool = False
-        self._emit_lock = threading.Lock()  # guards _emitted + _buffer read in _emit()
-        self._turn_id: int = (
+        self._state_lock = threading.Lock()
+        self._utterance_epoch: int = (
             0  # incremented on each speech start; used to cancel stale tick loops
         )
 
     @property
     def has_emitted(self) -> bool:
-        """Returns True if a final_transcript has already been emitted this turn."""
-        return self._emitted
+        """Returns True if a final_transcript has already been emitted this utterance."""
+        with self._state_lock:
+            return self._emitted
 
     @property
-    def turn_id(self) -> int:
-        """Current turn ID. Incremented on each speech start.
+    def utterance_epoch(self) -> int:
+        """Current utterance epoch. Incremented on each speech start.
 
         Used by the listener's silence tick loop to detect stale loops
         that survived from a previous utterance.
         """
-        return self._turn_id
+        with self._state_lock:
+            return self._utterance_epoch
 
     def on_speech_start(self) -> None:
         """Called on vad_speech_start. Resets state for a new utterance."""
-        self._buffer = ""
-        self._vad_stop_ts = None
-        self._emitted = False
-        self._turn_id += 1
+        with self._state_lock:
+            self._buffer = ""
+            self._vad_stop_ts = None
+            self._emitted = False
+            self._utterance_epoch += 1
 
     def on_vad_stop(self) -> None:
         """Called on vad_speech_end. Marks when silence began."""
-        self._vad_stop_ts = time.monotonic()
+        with self._state_lock:
+            self._vad_stop_ts = time.monotonic()
 
     def on_partial(self, text: str) -> str | None:
         """Called on each partial transcript update.
@@ -98,14 +102,15 @@ class TurnDetector:
         Returns:
             The text to emit as final_transcript, or None if we should keep waiting.
         """
-        if self._emitted:
-            return None
-        self._buffer = text.strip()
-        if self._vad_stop_ts is None:
-            return None  # VAD still active — never emit mid-speech.
-        return self._evaluate(self._silence_duration_ms())
+        with self._state_lock:
+            if self._emitted:
+                return None
+            self._buffer = text.strip()
+            if self._vad_stop_ts is None:
+                return None  # VAD still active — never emit mid-speech.
+            return self._evaluate(self._silence_duration_ms())
 
-    def on_silence_tick(self) -> str | None:
+    def on_silence_tick(self, expected_utterance_epoch: int) -> str | None:
         """Called periodically while VAD is silent.
 
         Tick interval is configured via silence_tick_interval_ms (default 50ms).
@@ -115,19 +120,23 @@ class TurnDetector:
         Returns:
             The text to emit as final_transcript, or None.
         """
-        if self._emitted or not self._buffer or self._vad_stop_ts is None:
-            return None
-        return self._evaluate(self._silence_duration_ms())
+        with self._state_lock:
+            if (
+                expected_utterance_epoch != self._utterance_epoch
+                or self._emitted
+                or not self._buffer
+                or self._vad_stop_ts is None
+            ):
+                return None
+            return self._evaluate(self._silence_duration_ms())
 
     # ──────────────────────────────────────────
     # Internal
     # ──────────────────────────────────────────
 
     def _evaluate(self, silence_ms: float) -> str | None:
-        # NOTE: _buffer is read here without _emit_lock. This is safe because
-        # partial transcripts are monotonically growing (each Whisper update is
-        # the full accumulated text), so a newer buffer is always a superset of
-        # what was validated. _emit() acquires the lock to prevent double-emit.
+        # Caller holds _state_lock through evaluation and emission. ASR updates
+        # may revise text, and a new utterance must not reset this state midway.
         if silence_ms < self._syntax_ms:
             # Firmly inside normal clause-boundary pause territory — always wait.
             return None
@@ -142,14 +151,10 @@ class TurnDetector:
         return self._emit()
 
     def _emit(self) -> str | None:
-        # Lock guards against concurrent calls from the recorder thread
-        # (via on_partial → _evaluate) and the event loop thread
-        # (via on_silence_tick → _evaluate). See REF-007.
-        with self._emit_lock:
-            if self._emitted or not self._buffer:
-                return None
-            self._emitted = True
-            return self._buffer
+        if self._emitted or not self._buffer:
+            return None
+        self._emitted = True
+        return self._buffer
 
     def _silence_duration_ms(self) -> float:
         if self._vad_stop_ts is None:

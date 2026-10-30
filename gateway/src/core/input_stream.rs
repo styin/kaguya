@@ -4,7 +4,7 @@
 //! Note that priority is enforced by the biased select in the event loop, not by the data structure itself.
 //! This module defines the data structures and channel setup.
 
-use crate::types::InputEvent;
+use crate::core::types::InputEvent;
 use tokio::sync::mpsc;
 
 pub struct InputSenders {

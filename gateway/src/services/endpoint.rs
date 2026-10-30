@@ -1,6 +1,6 @@
 //! Phase 1 Endpoint Service — WebSocket server for dev console
 //! ---
-//! Handles a single connected browser client at a time (§2.4).
+//! Handles a single connected browser client at a time.
 //! Phase 2 targets OpenPod protocol integration.
 
 use std::borrow::Cow;
@@ -20,17 +20,17 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::audio_sink::ListenerAudioSink;
+use crate::clients::audio_sink::ListenerAudioSink;
+use crate::core::types::*;
 use crate::lifecycle::{LifecycleSnapshot, LifecycleSupervisor};
-use crate::types::*;
+use crate::session_scope::SessionScope;
 
 const CLOSE_SUPERSEDED: u16 = 4001;
 
 pub struct EndpointState {
     pub control_tx: mpsc::Sender<ControlSignal>,
     pub p1_tx: mpsc::Sender<InputEvent>,
-    pub audio_out_rx: tokio::sync::Mutex<mpsc::Receiver<bytes::Bytes>>,
-    pub metadata_rx: tokio::sync::Mutex<mpsc::Receiver<MetadataEvent>>,
+    pub metadata_tx: tokio::sync::broadcast::Sender<MetadataEvent>,
     pub active_client: std::sync::Mutex<Option<CancellationToken>>,
     pub listener_audio: ListenerAudioSink,
     pub runtime_status: RuntimeStatusState,
@@ -39,18 +39,20 @@ pub struct EndpointState {
 #[derive(Clone)]
 pub struct RuntimeStatusState {
     pub lifecycle: LifecycleSupervisor,
+    pub scope: SessionScope,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatusResponse {
     pub lifecycle: LifecycleSnapshot,
+    pub instance_id: String,
+    pub session_id: String,
 }
 
 pub fn router(state: Arc<EndpointState>) -> Router {
     Router::new()
         .route("/ws", get(ws_upgrade))
         .route("/health", get(|| async { "OK" }))
-        .route("/capabilities/status", get(runtime_status))
         .route("/runtime/status", get(runtime_status))
         .with_state(state)
 }
@@ -62,7 +64,19 @@ async fn runtime_status(State(state): State<Arc<EndpointState>>) -> Json<Runtime
 fn runtime_status_response(state: &RuntimeStatusState) -> RuntimeStatusResponse {
     RuntimeStatusResponse {
         lifecycle: state.lifecycle.snapshot(),
+        instance_id: state.scope.instance_id().to_string(),
+        session_id: state.scope.session_id().to_string(),
     }
+}
+
+fn session_init(scope: SessionScope) -> serde_json::Value {
+    serde_json::json!({
+        "event_type": "session_init",
+        "data": {
+            "instance_id": scope.instance_id().to_string(),
+            "session_id": scope.session_id().to_string(),
+        }
+    })
 }
 
 async fn ws_upgrade(
@@ -85,10 +99,16 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
 
     info!("dev console connected");
 
-    // Lock output receivers — released when this connection ends (cancel or close),
-    // allowing the next client to acquire them.
-    let mut metadata_rx = state.metadata_rx.lock().await;
-    let mut audio_rx = state.audio_out_rx.lock().await;
+    // Subscribe before the bootstrap write so events produced during it are retained.
+    let mut metadata_rx = state.metadata_tx.subscribe();
+    let bootstrap = session_init(state.runtime_status.scope);
+    if socket
+        .send(Message::Text(bootstrap.to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
 
     loop {
         tokio::select! {
@@ -111,7 +131,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
                         handle_text_message(&json, &state).await;
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        // G4: forward raw audio bytes to Listener via Unix socket
+                        // G4: forward raw audio bytes to Listener via the raw TCP socket
                         state.listener_audio.send(bytes::Bytes::from(data)).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -120,18 +140,22 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
             }
 
             // G3: metadata egress — sentences, emotions, response lifecycle
-            Some(meta) = metadata_rx.recv() => {
+            result = metadata_rx.recv() => {
+                let meta = match result {
+                    Ok(meta) => meta,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "dev console fell behind the live event stream");
+                        let _ = socket.send(Message::Close(Some(CloseFrame {
+                            code: 1013,
+                            reason: Cow::from("live event stream lagged; reconnect"),
+                        }))).await;
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
                 let json = serde_json::to_string(&meta).unwrap_or_default();
                 if socket.send(Message::Text(json)).await.is_err() {
                     warn!("dev console send failed");
-                    break;
-                }
-            }
-
-            // G2: audio egress — TTS PCM output
-            Some(audio) = audio_rx.recv() => {
-                if socket.send(Message::Binary(audio.to_vec())).await.is_err() {
-                    warn!("dev console audio send failed");
                     break;
                 }
             }
@@ -182,13 +206,39 @@ mod tests {
         let talker = lifecycle.register_connection("talker");
         talker.set_readiness(Readiness::Ready);
 
-        let response = runtime_status_response(&RuntimeStatusState { lifecycle });
+        let response = runtime_status_response(&RuntimeStatusState {
+            lifecycle,
+            scope: test_scope(),
+        });
 
         assert_eq!(response.lifecycle.connections.len(), 1);
+        assert_eq!(response.session_id, "22222222-2222-4222-8222-222222222222");
         assert_eq!(response.lifecycle.connections[0].name, "talker");
         assert_eq!(
             response.lifecycle.connections[0].readiness,
             Readiness::Ready
         );
+    }
+
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn session_bootstrap_has_one_canonical_session_reference() {
+        let bootstrap = session_init(test_scope());
+        assert_eq!(
+            bootstrap["data"]["instance_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(
+            bootstrap["data"]["session_id"],
+            "22222222-2222-4222-8222-222222222222"
+        );
+        assert_eq!(bootstrap["data"].as_object().unwrap().len(), 2);
     }
 }

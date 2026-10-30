@@ -16,7 +16,6 @@ mod job_object;
 mod native;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 #[cfg(windows)]
 use std::process::Stdio;
 use std::sync::Arc;
@@ -31,7 +30,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::{SandboxBackendKind, SandboxConfig, SandboxModeKind};
-use crate::telemetry::TelemetryHub;
+use crate::session_scope::SessionScope;
+use crate::telemetry::{TelemetryCorrelation, TelemetryHub};
 
 const SANDBOX_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
@@ -48,10 +48,10 @@ pub enum Language {
 
 impl Language {
     pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().as_str() {
-            "python" | "python3" | "py" => Some(Self::Python),
-            "node" | "javascript" | "js" => Some(Self::Node),
-            "bash" | "sh" | "shell" => Some(Self::Bash),
+        match s {
+            "python" => Some(Self::Python),
+            "node" => Some(Self::Node),
+            "bash" => Some(Self::Bash),
             _ => None,
         }
     }
@@ -98,6 +98,14 @@ pub struct ExecRequest {
     pub max_output_bytes: usize,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecArguments {
+    language: String,
+    code: String,
+    stdin: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExecResult {
     pub stdout: String,
@@ -136,13 +144,13 @@ impl ExecResult {
 
 #[async_trait]
 pub trait SandboxBackend: Send + Sync {
-    /// Provision or attach the session before an opaque handle is returned.
-    async fn acquire(&self, session: &str) -> Result<(), String>;
-    /// Run code in the session's sandbox. Same `session` ⇒ shared filesystem
-    /// state (per-conversation affinity).
-    async fn execute(&self, session: &str, req: ExecRequest) -> ExecResult;
-    /// Tear down a session's resources (called when a conversation ends).
-    async fn cleanup(&self, session: &str);
+    /// Provision or attach the allocation before an opaque handle is returned.
+    async fn acquire(&self, allocation: &str) -> Result<(), String>;
+    /// Run code in the allocation's sandbox. Same `allocation` ⇒ shared filesystem
+    /// state for that allocation only.
+    async fn execute(&self, allocation: &str, req: ExecRequest) -> ExecResult;
+    /// Tear down an allocation's resources on release.
+    async fn cleanup(&self, allocation: &str);
     /// Pre-warm resources at startup (hosted Docker warm pool). Default no-op.
     async fn prewarm(&self) {}
     /// Global teardown at Supervisor shutdown. Default no-op.
@@ -163,21 +171,27 @@ pub struct SandboxManager {
 }
 
 impl SandboxManager {
-    pub fn from_config(cfg: &SandboxConfig, workspace_root: PathBuf) -> anyhow::Result<Self> {
+    pub fn from_config(cfg: &SandboxConfig) -> anyhow::Result<Self> {
+        if !cfg.enabled {
+            return Ok(Self::disabled());
+        }
         let allowed: Vec<Language> = cfg
             .allowed_languages
             .iter()
-            .filter_map(|s| Language::parse(s))
-            .collect();
+            .map(|language| {
+                Language::parse(language).ok_or_else(|| {
+                    anyhow::anyhow!("unsupported sandbox allowed_languages entry: {language}")
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
 
         let backend: Box<dyn SandboxBackend> = match cfg.backend {
-            SandboxBackendKind::Native => Box::new(native::NativeBackend::new(workspace_root)),
+            SandboxBackendKind::Native => Box::new(native::NativeBackend::new()),
             SandboxBackendKind::Docker => Box::new(docker::DockerBackend::new(cfg)?),
             SandboxBackendKind::Bubblewrap => {
                 #[cfg(unix)]
                 {
-                    Box::new(bubblewrap::BubblewrapBackend::new(workspace_root)?)
-                        as Box<dyn SandboxBackend>
+                    Box::new(bubblewrap::BubblewrapBackend::new()?) as Box<dyn SandboxBackend>
                 }
                 #[cfg(not(unix))]
                 {
@@ -187,12 +201,10 @@ impl SandboxManager {
             SandboxBackendKind::JobObject => {
                 #[cfg(all(windows, feature = "sandbox-jobobject"))]
                 {
-                    Box::new(job_object::JobObjectBackend::new(cfg, workspace_root)?)
-                        as Box<dyn SandboxBackend>
+                    Box::new(job_object::JobObjectBackend::new(cfg)?) as Box<dyn SandboxBackend>
                 }
                 #[cfg(not(all(windows, feature = "sandbox-jobobject")))]
                 {
-                    let _ = workspace_root;
                     anyhow::bail!(
                         "job_object backend requires Windows + `--features sandbox-jobobject`"
                     );
@@ -207,20 +219,10 @@ impl SandboxManager {
             warn!(
                 "Sandbox: backend=native + mode=hosted runs model-authored code with NO \
                  host isolation. Only safe if each Supervisor is confined per tenant \
-                 (one container/VM per session). For shared multi-tenant hosts, use \
+                 (one container/VM per allocation). For shared multi-tenant hosts, use \
                  backend=docker."
             );
         }
-        // A non-empty allow-list that parsed to nothing is almost certainly a
-        // typo; the empty list otherwise means "allow all" (see exec_from_json).
-        if allowed.is_empty() && !cfg.allowed_languages.is_empty() {
-            warn!(
-                "Sandbox: allowed_languages={:?} parsed to zero known languages; \
-                 ALL languages will be permitted. Valid values: python, node, bash.",
-                cfg.allowed_languages
-            );
-        }
-
         info!(
             "Sandbox: backend={} mode={:?} enabled={}",
             backend.name(),
@@ -237,11 +239,11 @@ impl SandboxManager {
         })
     }
 
-    /// Disabled facade used when configuration turns the provider off or
-    /// backend initialization fails. Backend methods remain gated by `enabled`.
+    /// Disabled facade used when configuration turns the provider off.
+    /// Backend methods remain gated by `enabled`.
     pub fn disabled() -> Self {
         Self {
-            backend: Box::new(native::NativeBackend::new(std::env::temp_dir())),
+            backend: Box::new(native::NativeBackend::new()),
             enabled: false,
             default_timeout: Duration::from_secs(30),
             max_output_bytes: 16 * 1024,
@@ -255,29 +257,29 @@ impl SandboxManager {
         }
     }
 
-    pub async fn acquire(&self, session: &str) -> anyhow::Result<()> {
+    pub async fn acquire(&self, allocation: &str) -> anyhow::Result<()> {
         if !self.enabled {
             anyhow::bail!("sandbox is disabled");
         }
         debug!(
-            %session,
+            %allocation,
             backend = self.backend.name(),
-            "acquiring sandbox backend session"
+            "acquiring sandbox backend allocation"
         );
         self.backend
-            .acquire(session)
+            .acquire(allocation)
             .await
             .map_err(anyhow::Error::msg)
     }
 
-    pub async fn cleanup(&self, session: &str) {
+    pub async fn cleanup(&self, allocation: &str) {
         if self.enabled {
             debug!(
-                %session,
+                %allocation,
                 backend = self.backend.name(),
-                "cleaning up sandbox backend session"
+                "cleaning up sandbox backend allocation"
             );
-            self.backend.cleanup(session).await;
+            self.backend.cleanup(allocation).await;
         }
     }
 
@@ -297,20 +299,17 @@ impl SandboxManager {
 
     /// Parse Tool Manager arguments, execute through the selected backend, and
     /// return the canonical JSON payload placed on the P3 result path.
-    pub async fn exec_from_json(&self, session: &str, args_json: &str) -> String {
+    pub async fn exec_from_json(&self, allocation: &str, args_json: &str) -> String {
         if !self.enabled {
             return ExecResult::backend_error("sandbox is disabled").to_tool_json();
         }
-        let v: serde_json::Value = match serde_json::from_str(args_json) {
+        let args: ExecArguments = match serde_json::from_str(args_json) {
             Ok(v) => v,
             Err(e) => {
                 return ExecResult::backend_error(format!("bad args JSON: {e}")).to_tool_json()
             }
         };
-        let lang_s = v
-            .get("language")
-            .and_then(|x| x.as_str())
-            .unwrap_or("python");
+        let lang_s = &args.language;
         let language = match Language::parse(lang_s) {
             Some(l) => l,
             None => {
@@ -322,32 +321,28 @@ impl SandboxManager {
             return ExecResult::backend_error(format!("language not allowed: {lang_s}"))
                 .to_tool_json();
         }
-        let code = match v.get("code").and_then(|x| x.as_str()) {
-            Some(c) => c.to_string(),
-            None => return ExecResult::backend_error("missing 'code'").to_tool_json(),
-        };
-        let stdin = v.get("stdin").and_then(|x| x.as_str()).map(str::to_string);
-
         let req = ExecRequest {
             language,
-            code,
-            stdin,
+            code: args.code,
+            stdin: args.stdin,
             timeout: self.default_timeout,
             max_output_bytes: self.max_output_bytes,
         };
-        self.backend.execute(session, req).await.to_tool_json()
+        self.backend.execute(allocation, req).await.to_tool_json()
     }
 }
 
 /// Supervisor-facing handle registry around the backend manager.
 ///
-/// Handles are deliberately opaque to the Gateway. This keeps backend/session
-/// identity and cleanup authority inside the runtime owner.
+/// Handles are deliberately opaque to the Gateway. This keeps backend/allocation
+/// identity and cleanup authority inside the runtime owner. The HTTP boundary
+/// checks each request's scope; the provider serves the Supervisor's one scope.
 #[derive(Clone)]
 pub struct SandboxProvider {
     manager: Arc<SandboxManager>,
+    /// Opaque handle → allocation ID.
     handles: Arc<Mutex<HashMap<String, String>>>,
-    telemetry: Option<TelemetryHub>,
+    telemetry: Option<(TelemetryHub, SessionScope)>,
 }
 
 impl SandboxProvider {
@@ -359,12 +354,9 @@ impl SandboxProvider {
         }
     }
 
-    pub fn disabled() -> Self {
-        Self::new(SandboxManager::disabled())
-    }
-
-    pub fn with_telemetry(mut self, telemetry: TelemetryHub) -> Self {
-        self.telemetry = Some(telemetry);
+    /// Emit execution events correlated with the scope this Supervisor serves.
+    pub fn with_telemetry(mut self, telemetry: TelemetryHub, scope: SessionScope) -> Self {
+        self.telemetry = Some((telemetry, scope));
         self
     }
 
@@ -380,12 +372,14 @@ impl SandboxProvider {
         self.manager.prewarm().await;
     }
 
-    pub async fn acquire(&self, session: &str) -> anyhow::Result<String> {
+    pub async fn acquire(&self, allocation_id: &str) -> anyhow::Result<String> {
         if !self.is_enabled() {
             anyhow::bail!("sandbox provider is disabled");
         }
-        if session.trim().is_empty() {
-            anyhow::bail!("sandbox session id must not be empty");
+        let allocation_uuid = Uuid::parse_str(allocation_id)
+            .map_err(|_| anyhow::anyhow!("sandbox allocation_id must be a UUID"))?;
+        if allocation_uuid.is_nil() || allocation_uuid.to_string() != allocation_id {
+            anyhow::bail!("sandbox allocation_id must be a non-nil canonical UUID");
         }
 
         if let Some((handle, _)) = self
@@ -393,22 +387,25 @@ impl SandboxProvider {
             .lock()
             .await
             .iter()
-            .find(|(_, existing)| *existing == session)
+            .find(|(_, existing)| *existing == allocation_id)
         {
-            debug!(%session, %handle, "reusing sandbox handle");
+            debug!(%allocation_id, %handle, "reusing sandbox handle");
             return Ok(handle.clone());
         }
 
-        self.manager.acquire(session).await?;
+        self.manager.acquire(allocation_id).await?;
 
         let mut handles = self.handles.lock().await;
-        if let Some((handle, _)) = handles.iter().find(|(_, existing)| *existing == session) {
+        if let Some((handle, _)) = handles
+            .iter()
+            .find(|(_, existing)| *existing == allocation_id)
+        {
             return Ok(handle.clone());
         }
         let handle = Uuid::new_v4().to_string();
-        handles.insert(handle.clone(), session.to_string());
+        handles.insert(handle.clone(), allocation_id.to_string());
         info!(
-            %session,
+            %allocation_id,
             %handle,
             backend = self.backend_name(),
             "acquired sandbox handle"
@@ -416,72 +413,77 @@ impl SandboxProvider {
         Ok(handle)
     }
 
-    pub async fn execute(&self, handle: &str, args_json: &str) -> String {
-        let session = self.handles.lock().await.get(handle).cloned();
-        match session {
-            Some(session) => {
-                debug!(
-                    %session,
-                    %handle,
-                    backend = self.backend_name(),
-                    "executing sandbox request"
-                );
-                let started = std::time::Instant::now();
-                let content = self.manager.exec_from_json(&session, args_json).await;
-                if let Some(telemetry) = &self.telemetry {
-                    let result = serde_json::from_str::<serde_json::Value>(&content)
-                        .unwrap_or_else(|_| serde_json::json!({}));
-                    telemetry
-                        .emit(
-                            "supervisor",
-                            "sandbox.exec.completed",
-                            Some(session.clone()),
-                            None,
-                            Some(handle.to_string()),
-                            serde_json::json!({
-                                "backend": self.backend_name(),
-                                "duration_ms": started.elapsed().as_millis() as u64,
-                                "exit_code": result.get("exit_code").and_then(|v| v.as_i64()),
-                                "timed_out": result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false),
-                                "truncated": result.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
-                                "stdout_bytes": result.get("stdout").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
-                                "stderr_bytes": result.get("stderr").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
-                                "error": result.get("error").cloned().unwrap_or(serde_json::Value::Null),
-                            }),
-                        )
-                        .await;
-                }
-                content
-            }
-            None => ExecResult::backend_error("unknown or released sandbox handle").to_tool_json(),
+    pub async fn execute(&self, handle: &str, request_id: &str, args_json: &str) -> String {
+        if request_id.trim().is_empty() {
+            return ExecResult::backend_error("sandbox request_id must not be empty")
+                .to_tool_json();
         }
+        let Some(allocation_id) = self.handles.lock().await.get(handle).cloned() else {
+            return ExecResult::backend_error("unknown or released sandbox handle").to_tool_json();
+        };
+        debug!(
+            %allocation_id,
+            %handle,
+            backend = self.backend_name(),
+            "executing sandbox request"
+        );
+        let started = std::time::Instant::now();
+        let content = self.manager.exec_from_json(&allocation_id, args_json).await;
+        if let Some((telemetry, scope)) = &self.telemetry {
+            let result = serde_json::from_str::<serde_json::Value>(&content)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            telemetry
+                .emit_with_correlation(
+                    "supervisor",
+                    "sandbox.exec.completed",
+                    TelemetryCorrelation {
+                        instance_id: Some(scope.instance_id().to_string()),
+                        session_id: Some(scope.session_id().to_string()),
+                        allocation_id: Some(allocation_id),
+                    },
+                    None,
+                    Some(request_id.to_string()),
+                    serde_json::json!({
+                        "handle": handle,
+                        "backend": self.backend_name(),
+                        "duration_ms": started.elapsed().as_millis() as u64,
+                        "exit_code": result.get("exit_code").and_then(|v| v.as_i64()),
+                        "timed_out": result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false),
+                        "truncated": result.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
+                        "stdout_bytes": result.get("stdout").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
+                        "stderr_bytes": result.get("stderr").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
+                        "error": result.get("error").cloned().unwrap_or(serde_json::Value::Null),
+                    }),
+                )
+                .await;
+        }
+        content
     }
 
     pub async fn release(&self, handle: &str) -> anyhow::Result<()> {
-        let session = self.handles.lock().await.remove(handle);
-        let Some(session) = session else {
+        let Some(allocation_id) = self.handles.lock().await.remove(handle) else {
             anyhow::bail!("unknown or released sandbox handle");
         };
-        self.manager.cleanup(&session).await;
-        info!(%session, %handle, "released sandbox handle");
+        self.manager.cleanup(&allocation_id).await;
+        info!(%allocation_id, %handle, "released sandbox handle");
         Ok(())
     }
 
-    pub async fn cleanup_sessions(&self) {
-        let sessions = {
+    pub async fn cleanup_allocations(&self) {
+        let allocations = {
             let mut handles = self.handles.lock().await;
             handles
                 .drain()
-                .map(|(_, session)| session)
+                .map(|(_, allocation_id)| allocation_id)
                 .collect::<Vec<_>>()
         };
-        for session in sessions {
-            self.manager.cleanup(&session).await;
+        for allocation_id in allocations {
+            self.manager.cleanup(&allocation_id).await;
         }
     }
 
     pub async fn shutdown(&self) {
-        self.cleanup_sessions().await;
+        self.cleanup_allocations().await;
         self.manager.shutdown().await;
     }
 }
@@ -490,7 +492,7 @@ impl SandboxProvider {
 // Shared execution primitives (used by native / bubblewrap / docker)
 // ──────────────────────────────────────────
 
-pub(crate) fn sanitize_session(s: &str) -> String {
+pub(crate) fn sanitize_allocation(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -503,7 +505,7 @@ pub(crate) fn sanitize_session(s: &str) -> String {
 }
 
 /// Unique hidden runner-script filename for a single execution. Concurrent
-/// `sandbox_exec` calls in the same session share a scratch dir, so a fixed
+/// `sandbox_exec` calls in the same allocation share a scratch dir, so a fixed
 /// name would race; only this transient script is per-exec — files the user's
 /// code creates still persist across calls.
 pub(crate) fn script_name(ext: &str) -> String {
@@ -543,14 +545,14 @@ pub(crate) async fn run_spawned(
     program_stdin: Option<String>,
     timeout: Duration,
     cap: usize,
+    on_exit: impl FnOnce(),
 ) -> ExecResult {
-    if let Some(input) = program_stdin {
-        if let Some(mut si) = child.stdin.take() {
-            let _ = si.write_all(input.as_bytes()).await;
+    let stdin = child.stdin.take();
+    let stdin_task = tokio::spawn(async move {
+        if let (Some(input), Some(mut stdin)) = (program_stdin, stdin) {
+            let _ = stdin.write_all(input.as_bytes()).await;
         } // dropped → EOF
-    } else {
-        let _ = child.stdin.take(); // close so stdin-reading programs get EOF
-    }
+    });
 
     let mut so = child.stdout.take();
     let mut se = child.stderr.take();
@@ -568,9 +570,14 @@ pub(crate) async fn run_spawned(
     });
 
     let mut timed_out = false;
+    let mut backend_error = None;
     let exit_code = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status.code().unwrap_or(-1),
-        Ok(Err(e)) => return ExecResult::backend_error(format!("wait failed: {e}")),
+        Ok(Err(e)) => {
+            backend_error = Some(format!("wait failed: {e}"));
+            kill_tree(&mut child).await;
+            -1
+        }
         Err(_) => {
             timed_out = true;
             kill_tree(&mut child).await;
@@ -578,6 +585,10 @@ pub(crate) async fn run_spawned(
             -1
         }
     };
+    stdin_task.abort();
+    let _ = stdin_task.await;
+    // Resource owners can close a job before draining pipes held by descendants.
+    on_exit();
 
     let (out, ot) = collect_reader_task(out_task).await;
     let (err, et) = collect_reader_task(err_task).await;
@@ -587,7 +598,7 @@ pub(crate) async fn run_spawned(
         exit_code,
         timed_out,
         truncated: ot || et,
-        backend_error: None,
+        backend_error,
     }
 }
 
@@ -618,13 +629,18 @@ pub(crate) async fn kill_tree(child: &mut Child) {
         if let Some(pid) = child.id() {
             // taskkill /T walks the parent-child tree by PID — no process
             // group needed, dependency-free.
-            let _ = Command::new("taskkill")
+            let mut command = Command::new("taskkill");
+            command
                 .args(["/F", "/T", "/PID", &pid.to_string()])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
-                .await;
-            return;
+                .kill_on_drop(true);
+            if matches!(
+                tokio::time::timeout(SANDBOX_CLEANUP_GRACE, command.status()).await,
+                Ok(Ok(status)) if status.success()
+            ) {
+                return;
+            }
         }
     }
     #[cfg(unix)]
@@ -644,5 +660,3 @@ pub(crate) async fn kill_tree(child: &mut Child) {
     }
     let _ = child.start_kill();
 }
-
-pub use SandboxBackend as _SandboxBackend; // keep trait importable via module

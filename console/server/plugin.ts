@@ -1,13 +1,16 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
+import type { AppStatusSnapshot, ProcessInfo, ProcessStatus, LogEntry } from "../src/types";
+import {
+  consoleLaunchPlan,
+  resolveRuntimeSelection,
+  resolveLaunchSession,
+} from "./runtime-selection.mjs";
 
 const SUPERVISOR_ORIGIN = "http://127.0.0.1:3001";
-const APP_RUNTIME_PROFILE = "app";
-const DEV_STANDALONE_RUNTIME_PROFILE = "dev_standalone";
 const MAX_LOG_ENTRIES = 10_000;
 const LOCAL_LOG_ID_START = 1_000_000_000;
 // eslint-disable-next-line no-control-regex
@@ -15,55 +18,17 @@ const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const SPINNER_RE = /^[\u2800-\u28ff]\s/;
 const VOICE_STATUS_SPINNER_RE = /^(?:[\\|/-]\s*)?(?:recording|speak now)\s*$/i;
 
-type ProcessStatus = "stopped" | "starting" | "running" | "errored";
 type ProcessAction = "start" | "stop" | "restart";
-
-interface ProcessInfo {
-  name: string;
-  label: string;
-  managed: boolean;
-  status: ProcessStatus;
-  group?: string;
-  blockedBy?: string[];
-  pid?: number;
-  uptimeSecs?: number;
-  exitCode?: number | null;
-  children?: RuntimeChildInfo[];
-}
-
-interface RuntimeChildInfo {
-  name: string;
-  label: string;
-  kind: "process" | "connection";
-  status: ProcessStatus;
-  pid?: number | null;
-  exitCode?: number | null;
-}
-
-interface AppStatusSnapshot {
-  state: "stopped" | "running" | "degraded" | "stopping";
-  processes: ProcessInfo[];
-  gateway?: unknown;
-}
 
 interface ActionResult {
   ok: boolean;
   error?: string | null;
 }
 
-interface LogEntry {
-  id: number;
-  timestamp: string;
-  source: string;
-  stream: "stdout" | "stderr";
-  line: string;
-}
-
 interface StandaloneProcessConfig {
   name: string;
   label: string;
   command: string;
-  command_win32?: string;
   cwd: string;
   env?: Record<string, string>;
 }
@@ -77,26 +42,20 @@ interface StandaloneProcessState {
   stopping: boolean;
 }
 
-interface RuntimeProcessConfig {
-  label?: string;
-  command?: string;
-  command_win32?: string;
-  cwd?: string;
-  env: Record<string, string>;
-  bind: Record<string, string>;
-  endpoints: Record<string, string>;
-}
+type ConsoleLaunchPlan = ReturnType<typeof consoleLaunchPlan>;
 
 export function supervisorPlugin(): Plugin {
   let supervisor: ChildProcess | null = null;
   let cleanedUp = false;
-  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-  const standalone = new StandaloneManager(repoRoot);
 
   return {
     name: "kaguya-supervisor",
     configureServer(server) {
-      supervisor = startRustSupervisor();
+      const selection = resolveRuntimeSelection();
+      const session = resolveLaunchSession(selection);
+      const plan = consoleLaunchPlan(selection, session);
+      const standalone = new StandaloneManager(plan.standalone);
+      supervisor = startRustSupervisor(plan.supervisorEnv);
 
       const cleanup = () => {
         if (cleanedUp) return;
@@ -119,7 +78,13 @@ export function supervisorPlugin(): Plugin {
 
       server.middlewares.use((req, res, next) => {
         if (!req.url?.startsWith("/api/")) return next();
-        void handleApi(req, res, standalone);
+        void handleApi(req, res, standalone).catch((error: unknown) => {
+          if (res.headersSent) { res.end(); return; }
+          json(res, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          }, 503);
+        });
       });
     },
   };
@@ -157,12 +122,10 @@ async function handleApi(
   const processAction = /^\/api\/process\/([^/]+)\/(start|stop|restart)$/.exec(
     url.pathname,
   );
-  if (processAction && req.method === "POST") {
-    const [, name, action] = processAction as [
-      string,
-      string,
-      ProcessAction,
-    ];
+  const action = processAction?.[2];
+  if (processAction && req.method === "POST" &&
+      (action === "start" || action === "stop" || action === "restart")) {
+    const name = processAction[1];
     if (name === "kaguya_app") {
       await handleAppProcessAction(action, res, standalone);
       return;
@@ -192,23 +155,14 @@ async function handleApi(
   proxyToSupervisor(req, res);
 }
 
-function startRustSupervisor(): ChildProcess {
+function startRustSupervisor(env: ConsoleLaunchPlan["supervisorEnv"]): ChildProcess {
   const supervisorDir = fileURLToPath(
     new URL("../../supervisor/", import.meta.url),
-  );
-  const configPath = fileURLToPath(
-    new URL("../../config/kaguya.runtime.toml", import.meta.url),
   );
   const cargoToml = path.join(supervisorDir, "Cargo.toml");
   const child = spawn("cargo", ["run", "--manifest-path", cargoToml], {
     cwd: supervisorDir,
-    env: {
-      ...process.env,
-      KAGUYA_RUNTIME_CONFIG: configPath,
-      KAGUYA_RUNTIME_PROFILE: APP_RUNTIME_PROFILE,
-      KAGUYA_SUPERVISOR_AUTOSTART: "false",
-      RUST_LOG: process.env.RUST_LOG ?? "kaguya_supervisor=info",
-    },
+    env,
     shell: process.platform === "win32",
     stdio: ["ignore", "inherit", "inherit"],
     windowsHide: true,
@@ -276,15 +230,16 @@ function proxyToSupervisor(
 }
 
 async function fetchSupervisorStatus(): Promise<AppStatusSnapshot> {
-  try {
-    const res = await fetch(`${SUPERVISOR_ORIGIN}/api/app/status`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    if (!res.ok) throw new Error(`supervisor status ${res.status}`);
-    return (await res.json()) as AppStatusSnapshot;
-  } catch {
-    return { state: "stopped", processes: [], gateway: null };
+  const res = await fetch(`${SUPERVISOR_ORIGIN}/api/app/status`, {
+    signal: AbortSignal.timeout(1000),
+  });
+  if (!res.ok) throw new Error(`supervisor status unavailable (${res.status})`);
+  const status = await res.json() as AppStatusSnapshot;
+  if (!status || !["stopped", "running", "degraded", "stopping"].includes(status.state) ||
+      !Array.isArray(status.processes)) {
+    throw new Error("supervisor returned invalid app status");
   }
+  return status;
 }
 
 function composeConsoleStatus(
@@ -383,8 +338,8 @@ async function supervisorAction(pathname: string): Promise<ActionResult> {
   }
 }
 
-function json(res: http.ServerResponse, payload: unknown): void {
-  res.writeHead(200, { "Content-Type": "application/json" });
+function json(res: http.ServerResponse, payload: unknown, status = 200): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(payload));
 }
 
@@ -394,42 +349,8 @@ class StandaloneManager {
   private readonly logSubscribers = new Set<(entry: LogEntry) => void>();
   private logId = LOCAL_LOG_ID_START;
 
-  constructor(repoRoot: string) {
-    const runtimeConfigPath = path.join(repoRoot, "config", "kaguya.runtime.toml");
-    const gateway = loadRuntimeProcessConfig(
-      runtimeConfigPath,
-      DEV_STANDALONE_RUNTIME_PROFILE,
-      "gateway",
-    );
-    const voiceStack = loadRuntimeProcessConfig(
-      runtimeConfigPath,
-      DEV_STANDALONE_RUNTIME_PROFILE,
-      "voice_stack",
-    );
-
-    this.add({
-      name: "gateway_standalone",
-      label: gateway.label ?? "Gateway",
-      command: gateway.command ?? "cargo run --features dev-console",
-      command_win32: gateway.command_win32,
-      cwd: resolveRuntimeCwd(runtimeConfigPath, gateway.cwd, repoRoot, "gateway"),
-      env: {
-        ...gateway.env,
-        KAGUYA_RUNTIME_CONFIG: runtimeConfigPath,
-        KAGUYA_RUNTIME_PROFILE: DEV_STANDALONE_RUNTIME_PROFILE,
-      },
-    });
-    this.add({
-      name: "voice_stack_standalone",
-      label: voiceStack.label ?? "Voice Stack",
-      command: voiceStack.command ?? ".venv/bin/python main.py",
-      command_win32: voiceStack.command_win32 ?? ".venv\\Scripts\\python.exe main.py",
-      cwd: resolveRuntimeCwd(runtimeConfigPath, voiceStack.cwd, repoRoot, "talker"),
-      env: {
-        ...voiceStack.env,
-        ...voiceStackBindEnv(voiceStack.bind),
-      },
-    });
+  constructor(configs: StandaloneProcessConfig[]) {
+    for (const config of configs) this.add(config);
   }
 
   has(name: string): boolean {
@@ -519,9 +440,9 @@ class StandaloneManager {
     state.exitCode = null;
     state.stopping = false;
 
-    const child = spawn(this.commandForPlatform(state.config), {
+    const child = spawn(state.config.command, {
       cwd: state.config.cwd,
-      env: { ...process.env, ...state.config.env },
+      env: state.config.env,
       shell: process.platform === "win32" ? true : "/bin/bash",
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -577,13 +498,6 @@ class StandaloneManager {
     child.once("exit", () => setTimeout(() => this.start(name), 200));
     this.stopChild(child);
     return { ok: true };
-  }
-
-  private commandForPlatform(config: StandaloneProcessConfig): string {
-    if (process.platform === "win32" && config.command_win32) {
-      return config.command_win32;
-    }
-    return config.command;
   }
 
   private stopChild(child: ChildProcess, sync = false): void {
@@ -659,179 +573,4 @@ function normalizeLogSource(source: string): string {
   if (source === "gateway_standalone") return "gateway";
   if (source === "voice_stack_standalone") return "talker";
   return source;
-}
-
-function loadRuntimeProcessConfig(
-  configPath: string,
-  profile: string,
-  processName: string,
-): RuntimeProcessConfig {
-  const content = fs.readFileSync(configPath, "utf-8");
-  return parseRuntimeProcessConfig(content, profile, processName);
-}
-
-function parseRuntimeProcessConfig(
-  content: string,
-  profile: string,
-  processName: string,
-): RuntimeProcessConfig {
-  const result: RuntimeProcessConfig = { env: {}, bind: {}, endpoints: {} };
-  const baseSection = `profiles.${profile}.processes.${processName}`;
-  let section = "";
-
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = stripTomlComment(rawLine).trim();
-    if (!line) continue;
-
-    const sectionMatch = /^\[([^\]]+)\]$/.exec(line);
-    if (sectionMatch) {
-      section = sectionMatch[1] ?? "";
-      continue;
-    }
-
-    if (
-      section !== baseSection &&
-      section !== `${baseSection}.env` &&
-      section !== `${baseSection}.bind` &&
-      section !== `${baseSection}.endpoints`
-    ) {
-      continue;
-    }
-
-    const keyValue = /^([A-Za-z0-9_]+)\s*=\s*(.+)$/.exec(line);
-    if (!keyValue) continue;
-    const [, key, rawValue] = keyValue;
-    const value = parseTomlString(rawValue);
-    if (value === null) continue;
-
-    if (section === `${baseSection}.env`) {
-      result.env[key] = value;
-    } else if (section === `${baseSection}.bind`) {
-      result.bind[key] = value;
-    } else if (section === `${baseSection}.endpoints`) {
-      result.endpoints[key] = value;
-    } else if (key === "label") {
-      result.label = value;
-    } else if (key === "command") {
-      result.command = value;
-    } else if (key === "command_win32") {
-      result.command_win32 = value;
-    } else if (key === "cwd") {
-      result.cwd = value;
-    }
-  }
-
-  validateBindEndpointPorts(result, `${profile}.${processName}`);
-  return result;
-}
-
-function stripTomlComment(line: string): string {
-  let inString = false;
-  let escaped = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (char === "#" && !inString) {
-      return line.slice(0, i);
-    }
-  }
-  return line;
-}
-
-function parseTomlString(rawValue: string | undefined): string | null {
-  if (!rawValue) return null;
-  const value = rawValue.trim();
-  if (!value.startsWith('"') || !value.endsWith('"')) return null;
-  return value
-    .slice(1, -1)
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, "\\");
-}
-
-function resolveRuntimeCwd(
-  configPath: string,
-  configuredCwd: string | undefined,
-  repoRoot: string,
-  fallbackDir: string,
-): string {
-  if (!configuredCwd) return path.join(repoRoot, fallbackDir);
-  if (path.isAbsolute(configuredCwd)) return configuredCwd;
-  return path.resolve(path.dirname(configPath), configuredCwd);
-}
-
-function voiceStackBindEnv(bind: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  if (bind.talker_grpc) {
-    env.KAGUYA_TALKER_LISTEN_ADDR = bind.talker_grpc;
-  }
-  if (bind.listener_grpc) {
-    env.KAGUYA_LISTENER_GRPC_ADDR = bind.listener_grpc;
-  }
-  if (bind.listener_audio) {
-    const { host, port } = splitHostPort(bind.listener_audio);
-    env.KAGUYA_LISTENER_AUDIO_ADDR = host;
-    env.KAGUYA_LISTENER_AUDIO_PORT = port;
-  }
-  return env;
-}
-
-function splitHostPort(addr: string): { host: string; port: string } {
-  const index = addr.lastIndexOf(":");
-  if (index < 0) return { host: addr, port: "" };
-  return {
-    host: addr.slice(0, index).replace(/^\[/, "").replace(/\]$/, ""),
-    port: addr.slice(index + 1),
-  };
-}
-
-function validateBindEndpointPorts(
-  config: RuntimeProcessConfig,
-  label: string,
-): void {
-  for (const [name, bindAddr] of Object.entries(config.bind)) {
-    const endpointAddr = config.endpoints[name];
-    if (!endpointAddr) continue;
-    const bindPort = portOf(bindAddr);
-    const endpointPort = portOf(endpointAddr);
-    if (!bindPort) {
-      throw new Error(`${label}.bind.${name} has no explicit port: ${bindAddr}`);
-    }
-    if (!endpointPort) {
-      throw new Error(
-        `${label}.endpoints.${name} has no explicit port: ${endpointAddr}`,
-      );
-    }
-    if (bindPort !== endpointPort) {
-      throw new Error(
-        `${label}.${name} bind/endpoints port mismatch: bind=${bindAddr}, endpoint=${endpointAddr}`,
-      );
-    }
-  }
-}
-
-function portOf(addr: string): string | null {
-  const withoutScheme = addr.includes("://")
-    ? (addr.split("://", 2)[1] ?? addr)
-    : addr;
-  const authority = withoutScheme.split("/", 1)[0] ?? withoutScheme;
-  if (authority.startsWith("[")) {
-    const marker = "]:";
-    const index = authority.indexOf(marker);
-    if (index < 0) return null;
-    return authority.slice(index + marker.length) || null;
-  }
-  const index = authority.lastIndexOf(":");
-  if (index < 0) return null;
-  return authority.slice(index + 1) || null;
 }

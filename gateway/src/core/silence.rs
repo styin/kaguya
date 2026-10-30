@@ -5,8 +5,8 @@
 //! 30s → context shift
 //! Cancelled on speech start (vad_speech_start) or new dispatch
 
+use crate::core::types::InputEvent;
 use crate::lifecycle::TaskSpawner;
-use crate::types::InputEvent;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

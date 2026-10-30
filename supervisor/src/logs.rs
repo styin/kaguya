@@ -109,7 +109,7 @@ impl Default for LogStore {
 fn normalize_source(source: &str) -> String {
     match source {
         "gateway" | "gateway_standalone" | "kaguya_app" => "gateway".to_string(),
-        "voice_stack" | "talker_standalone" => "talker".to_string(),
+        "voice_stack" => "talker".to_string(),
         other => other.to_string(),
     }
 }
@@ -194,7 +194,7 @@ mod tests {
     fn push_normalizes_python_warning_level() {
         let logs = LogStore::new();
         logs.push(
-            "talker_standalone",
+            "voice_stack",
             "stderr",
             "2026-08-15 10:00:00 [voice.listener] WARNING: microphone unavailable",
         );

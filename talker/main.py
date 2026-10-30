@@ -5,7 +5,7 @@ import logging
 
 import grpc
 
-from proto import kaguya_pb2_grpc  # type: ignore[import]
+from proto import kaguya_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +15,8 @@ def _bind_or_raise(server: grpc.aio.Server, addr: str, name: str) -> int:
 
     `grpc.aio.Server.add_insecure_port()` returns the chosen port on
     success and `0` on failure (address-in-use, permission denied, malformed
-    address). The original code ignored the return value and logged
-    "listening" regardless — bind failures showed up later as opaque
-    "connection refused" errors at the client. This helper makes the
-    failure mode obvious: process exits with the offending address in
-    the message, no more "but the log said it was listening!" debugging.
+    address). Refuse startup when binding fails and include the offending
+    address in the error.
     """
     port = server.add_insecure_port(addr)
     if port == 0:
@@ -31,17 +28,21 @@ def _bind_or_raise(server: grpc.aio.Server, addr: str, name: str) -> int:
 
 
 async def main() -> None:
-    # Heavy deps imported lazily so `from main import _bind_or_raise` (used
-    # by tests/test_main_bind.py) doesn't transitively pull in RealtimeTTS
-    # — the CI test environment intentionally omits RealtimeSTT/RealtimeTTS
-    # to skip CUDA setup. Real runs always reach this code path and import
-    # everything normally.
+    from binding import InstanceSessionBinding, validate_identifiers
     from config import TalkerConfig
+
+    config = TalkerConfig()
+    binding = InstanceSessionBinding(
+        *validate_identifiers(config.instance_id, config.session_id)
+    )
+
+    # Validate deployment scope before importing CUDA/TTS dependencies, creating
+    # clients, or binding any listeners. Direct startup has the same contract as
+    # managed startup: both KAGUYA_INSTANCE_ID and KAGUYA_SESSION_ID are required.
     from server import TalkerServiceServicer
     from voice.listener import Listener, ListenerServiceImpl
     from voice.speaker import Speaker
 
-    config = TalkerConfig()
     logging.basicConfig(
         level=getattr(logging, config.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -50,9 +51,9 @@ async def main() -> None:
 
     # Init components
     speaker = Speaker(config)
-    talker_servicer = TalkerServiceServicer(config, speaker)
-    listener = Listener(config)
-    listener_servicer = ListenerServiceImpl(listener.event_queue)
+    talker_servicer = TalkerServiceServicer(config, speaker, binding)
+    listener = Listener(config, binding)
+    listener_servicer = ListenerServiceImpl(listener.event_queue, binding)
 
     # ── Talker gRPC server ──
     talker_server = grpc.aio.server()

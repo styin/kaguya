@@ -2,6 +2,12 @@ from pydantic_settings import BaseSettings
 
 
 class TalkerConfig(BaseSettings):
+    # Fixed service scope supplied by the launcher. Optional at configuration
+    # construction so inference-only callers need not impersonate a deployment;
+    # main validates both before loading voice dependencies or opening ports.
+    instance_id: str | None = None
+    session_id: str | None = None
+
     # Listener / STT implementation defaults.
     whisper_model: str = "distil-large-v3"
     whisper_compute_type: str = "int8"

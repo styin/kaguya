@@ -6,18 +6,18 @@
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::input_stream::InputReceivers;
+use crate::core::input_stream::InputReceivers;
+use crate::core::narration::NarrationFilter;
+use crate::core::types::{ControlSignal, InputEvent};
 use crate::lifecycle::{LifecycleSupervisor, ShutdownReason};
-use crate::narration::NarrationFilter;
 use crate::proto;
 use crate::telemetry::TelemetryClient;
-use crate::types::{ControlSignal, InputEvent};
 
-use super::{handlers, PipelineComponents, TurnState};
+use super::{handlers, PipelineComponents, SessionState};
 
 pub async fn run(
     pipeline: &PipelineComponents<'_>,
-    mut turn: TurnState,
+    mut session: SessionState,
     mut narration: NarrationFilter,
     mut control_rx: mpsc::Receiver<ControlSignal>,
     mut input_rx: InputReceivers,
@@ -28,7 +28,6 @@ pub async fn run(
 ) {
     let talker = pipeline.talker;
     let history = pipeline.history;
-    let output = pipeline.output;
     let tools = pipeline.tools;
     let reasoner = pipeline.reasoner;
     let rag = pipeline.rag;
@@ -42,39 +41,36 @@ pub async fn run(
                 match ctrl {
                     ControlSignal::Stop => {
                         info!("P0: STOP");
-                        turn.cancel_active_gen();
-                        turn.cancel_active_silence();
+                        session.cancel_active_gen();
+                        session.cancel_active_silence();
                         reasoner.cancel_all().await;
-                        output.mute_audio();
-                        talker.barge_in(&turn.conversation_id).await;
+                        talker.barge_in().await;
                     }
                     ControlSignal::Shutdown => {
                         info!("P0: SHUTDOWN");
-                        turn.cancel_active_gen();
-                        turn.cancel_active_silence();
+                        session.cancel_active_gen();
+                        session.cancel_active_silence();
                         reasoner.cancel_all().await;
                         lifecycle.shutdown(ShutdownReason::ControlShutdown).await;
                         break;
-                    }
-                    ControlSignal::Approval { context } => {
-                        info!(ctx = %context, "P0: APPROVAL (Phase 2)");
                     }
                 }
             }
 
             // ── Talker Output ──
             Some(out) = talker_output_rx.recv() => {
+                let generation_id = &out.generation_id;
+                debug!(%generation_id, "processing Talker generation event");
                 let actions = match out.payload {
-                    Some(proto::talker_output::Payload::ResponseStarted(rs)) => {
-                        debug!(turn = %rs.turn_id, "response started");
-                        handlers::handle_response_started(&mut turn, &rs.turn_id)
+                    Some(proto::talker_output::Payload::ResponseStarted(_)) => {
+                        handlers::handle_response_started(&mut session, generation_id)
                     }
                     Some(proto::talker_output::Payload::Sentence(se)) => {
                         debug!(text = %se.text, "→ [SENTENCE]");
-                        handlers::handle_sentence(&mut turn, &se.text)
+                        handlers::handle_sentence(&mut session, generation_id, &se.text)
                     }
                     Some(proto::talker_output::Payload::Emotion(em)) => {
-                        handlers::handle_emotion(&em.emotion)
+                        handlers::handle_emotion(generation_id, &em.emotion)
                     }
                     Some(proto::talker_output::Payload::ToolRequest(tr)) => {
                         info!(tool = %tr.tool_name, "→ [TOOL]");
@@ -99,12 +95,12 @@ pub async fn run(
                         debug!(interrupted = rc.was_interrupted, "response complete");
                         let last_user = history.last_user_input().await;
                         handlers::handle_response_complete(
-                            &mut turn, &rc.turn_id, rc.was_interrupted, last_user,
+                            &mut session, generation_id, rc.was_interrupted, last_user,
                         )
                     }
                     None => continue,
                 };
-                pipeline.executor(&mut turn).execute_all(actions).await;
+                pipeline.executor(&mut session).execute_all(actions).await;
             }
 
             // ── P1: User Intent ──
@@ -151,14 +147,13 @@ pub async fn run(
                 }
 
                 let actions = handlers::handle_user_intent(
-                    &mut turn, &text, is_voice, ready,
+                    &mut session, &text, is_voice, ready,
                     retrieval, recent, tool_defs, &tasks,
                 );
                 if let Some(duration_ms) = rag_elapsed_ms {
                     telemetry.emit(
                         "rag.retrieve.completed",
-                        Some(turn.conversation_id.clone()),
-                        Some(turn.last_turn_id.clone()),
+                        Some(session.last_user_generation_id.clone()),
                         None,
                         serde_json::json!({
                             "duration_ms": duration_ms,
@@ -169,7 +164,7 @@ pub async fn run(
                         }),
                     );
                 }
-                pipeline.executor(&mut turn).execute_all(actions).await;
+                pipeline.executor(&mut session).execute_all(actions).await;
             }
 
             // ── P2: ASR States ──
@@ -177,8 +172,8 @@ pub async fn run(
                 match event {
                     InputEvent::VadSpeechStart => {
                         debug!("P2: vad_speech_start → BARGE-IN");
-                        let actions = handlers::handle_vad_speech_start(&mut turn);
-                        pipeline.executor(&mut turn).execute_all(actions).await;
+                        let actions = handlers::handle_vad_speech_start(&mut session);
+                        pipeline.executor(&mut session).execute_all(actions).await;
                     }
                     InputEvent::PartialTranscript { text } => {
                         debug!(text = %text, "P2: partial");
@@ -200,23 +195,23 @@ pub async fn run(
                         let tasks = reasoner.active_tasks().await;
                         let ready = talker.is_ready();
                         handlers::handle_tool_result(
-                            &mut turn, &request_id, &tool_name, &content,
+                            &mut session, &request_id, &tool_name, &content,
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerStep { task_id: _, description } => {
+                    InputEvent::ReasonerStep { task_id, description } => {
                         let should_narrate = narration.should_narrate(&description);
                         // Skip the async history fetch when the handler will
                         // short-circuit anyway (narration filtered or already
                         // generating). Avoids unnecessary RwLock contention on
                         // the high-frequency reasoner step path.
-                        if !should_narrate || turn.is_generating() {
+                        if !should_narrate || session.is_generating() {
                             continue;
                         }
                         let recent = history.recent().await;
                         let ready = talker.is_ready();
                         handlers::handle_reasoner_step(
-                            &mut turn, &description,
+                            &mut session, &task_id, &description,
                             should_narrate, ready, recent,
                         )
                     }
@@ -227,18 +222,24 @@ pub async fn run(
                         let tasks = reasoner.active_tasks().await;
                         let ready = talker.is_ready();
                         handlers::handle_reasoner_completed(
-                            &mut turn, &task_id, &summary,
+                            &mut session, &task_id, &summary,
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerError { task_id, message, .. } => {
+                    InputEvent::ReasonerError { task_id, message, code } => {
                         warn!(task_id = %task_id, err = %message, "P3: reasoner error");
-                        continue;
+                        let recent = history.recent().await;
+                        let tool_defs = tools.definitions();
+                        let tasks = reasoner.active_tasks().await;
+                        handlers::handle_reasoner_failed(
+                            &mut session, proto::ReasonerFailure { task_id, message, code },
+                            talker.is_ready(), recent, tool_defs, &tasks,
+                        )
                     }
                     _ => continue,
                 };
                 if !actions.is_empty() {
-                    pipeline.executor(&mut turn).execute_all(actions).await;
+                    pipeline.executor(&mut session).execute_all(actions).await;
                 }
             }
 
@@ -250,11 +251,11 @@ pub async fn run(
                     let tool_defs = tools.definitions();
                     let ready = talker.is_ready();
                     let actions = handlers::handle_silence(
-                        &mut turn, duration, silence_enabled,
+                        &mut session, duration, silence_enabled,
                         ready, recent, tool_defs,
                     );
                     if !actions.is_empty() {
-                        pipeline.executor(&mut turn).execute_all(actions).await;
+                        pipeline.executor(&mut session).execute_all(actions).await;
                     }
                 }
             }

@@ -4,8 +4,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("PROTOC", protoc);
 
     tonic_build::configure()
-        .build_server(true) // Gateway as server: ListenerService, RouterControlService
-        .build_client(true) // Gateway as client: TalkerService, ReasonerService
+        .build_server(true) // RouterControlService and test services
+        .build_client(true) // TalkerService, ListenerService, ReasonerService
         .compile_protos(&["../proto/kaguya/v1/kaguya.proto"], &["../proto"])?;
     Ok(())
 }
