@@ -1,4 +1,4 @@
-//! Instance identity, portable data, explicit creation/rekey, and active leases.
+//! Instance identity, portable data, explicit creation/forking, and active leases.
 //! The selected instance-local manifest is the only durable identity authority.
 
 use std::fs::{self, File, OpenOptions};
@@ -9,38 +9,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::GatewayConfig;
-use crate::deployment::{validate_manifest_location, DeploymentSelection};
-use crate::proto::{self, SessionRef};
+use crate::deployment::{toml_error, validate_manifest_location, DeploymentSelection};
+use crate::session_scope::SessionScope;
 
 const SCHEMA_VERSION: u32 = 1;
-
-/// Validate generated request/runtime scope and borrow its scalar boundary IDs.
-pub fn validate_session_ref(session: Option<&SessionRef>) -> Result<(&str, &str)> {
-    let session = session.context("session reference is required")?;
-    let instance = session
-        .instance_id
-        .as_ref()
-        .context("instance_id is required")?
-        .value
-        .as_str();
-    let selected = session
-        .session_id
-        .as_ref()
-        .context("session_id is required")?
-        .value
-        .as_str();
-    for (field, value) in [("instance_id", instance), ("session_id", selected)] {
-        let id = Uuid::parse_str(value)
-            .map_err(|_| anyhow::anyhow!("{field} must be a canonical non-nil UUID"))?;
-        if id.is_nil() || id.to_string() != value {
-            bail!("{field} must be a canonical non-nil UUID");
-        }
-    }
-    if instance == selected {
-        bail!("instance_id and session_id must differ");
-    }
-    Ok((instance, selected))
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,18 +40,9 @@ pub struct InstanceLease {
 }
 
 impl InstanceIdentity {
-    /// Project the persisted manifest onto the validated runtime association.
-    pub fn session_ref(&self) -> Result<SessionRef> {
-        let session = SessionRef {
-            instance_id: Some(proto::InstanceId {
-                value: self.instance_id.clone(),
-            }),
-            session_id: Some(proto::SessionId {
-                value: self.default_session_id.clone(),
-            }),
-        };
-        validate_session_ref(Some(&session))?;
-        Ok(session)
+    /// The runtime scope this manifest selects.
+    pub fn scope(&self) -> Result<SessionScope> {
+        SessionScope::parse(&self.instance_id, &self.default_session_id)
     }
 
     fn new() -> Self {
@@ -94,7 +57,7 @@ impl InstanceIdentity {
         if self.schema_version != SCHEMA_VERSION {
             bail!("unsupported instance manifest schema version");
         }
-        self.session_ref()?;
+        self.scope()?;
         Ok(())
     }
 }
@@ -131,13 +94,8 @@ pub fn inspect(manifest: &Path) -> Result<(InstanceIdentity, InstancePaths)> {
             manifest.display()
         )
     })?;
-    let identity: InstanceIdentity =
-        toml::from_str(&content).map_err(|error: toml::de::Error| {
-            anyhow::anyhow!(
-                "invalid instance manifest at byte {:?}",
-                error.span().map(|span| span.start)
-            )
-        })?;
+    let identity: InstanceIdentity = toml::from_str(&content)
+        .map_err(|error| toml_error("instance manifest", &content, &error))?;
     identity.validate()?;
     let paths = InstancePaths::from_manifest(manifest, &identity)?;
     readable_file(&paths.soul, "instance SOUL.md")?;
@@ -148,22 +106,11 @@ pub fn inspect(manifest: &Path) -> Result<(InstanceIdentity, InstancePaths)> {
     Ok((identity, paths))
 }
 
-pub fn validate_selection(
-    selection: &DeploymentSelection,
-    for_init: bool,
-) -> Result<Option<(InstanceIdentity, InstancePaths)>> {
-    match selection.manifest.as_deref() {
-        Some(path) if path.try_exists()? => inspect(path).map(Some),
-        _ if for_init => Ok(None),
-        Some(path) => bail!("selected instance manifest is missing: {}", path.display()),
-        None => {
-            selection.require_manifest()?;
-            unreachable!()
-        }
+/// Check `init-instance` preconditions without creating anything.
+pub fn check_init(selection: &DeploymentSelection, config: &GatewayConfig) -> Result<()> {
+    if selection.manifest.is_some() {
+        bail!("deployment already selects an instance; initialize from an unselected deployment, or use fork-instance");
     }
-}
-
-pub fn validate_initialization_sources(config: &GatewayConfig) -> Result<()> {
     readable_file(&config.files.soul_path, "initial persona SOUL.md source")?;
     readable_file(
         &config.files.identity_path,
@@ -172,15 +119,29 @@ pub fn validate_initialization_sources(config: &GatewayConfig) -> Result<()> {
     Ok(())
 }
 
+/// Per-user directory for instance-ID locks. It must not follow `TMPDIR`,
+/// which differs between launch contexts and would let a restored copy of
+/// the same instance run twice.
+fn instance_lock_dir() -> Result<PathBuf> {
+    let dir = dirs::data_local_dir()
+        .context("cannot determine the per-user data directory for instance locks")?
+        .join("kaguya")
+        .join("instance-locks");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir)?;
+    Ok(dir)
+}
+
 fn acquire_locks(identity: InstanceIdentity, paths: InstancePaths) -> Result<InstanceLease> {
-    let runtime = std::env::temp_dir().join("kaguya-instance-locks");
-    fs::create_dir_all(&runtime)?;
     let instance_lock = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(runtime.join(format!("{}.lock", identity.instance_id)))?;
+        .open(instance_lock_dir()?.join(format!("{}.lock", identity.instance_id)))?;
     instance_lock
         .try_lock()
         .context("instance identity is already owned by another local Gateway process")?;
@@ -272,10 +233,7 @@ pub fn init_instance(
     selection: &DeploymentSelection,
     config: &GatewayConfig,
 ) -> Result<(InstanceIdentity, PathBuf)> {
-    if selection.manifest.is_some() {
-        bail!("deployment already selects an instance; initialize from an unselected deployment, or use rekey-instance");
-    }
-    validate_initialization_sources(config)?;
+    check_init(selection, config)?;
     create_instance(
         selection,
         InstanceIdentity::new(),
@@ -285,7 +243,8 @@ pub fn init_instance(
     )
 }
 
-pub fn rekey_instance(selection: &DeploymentSelection) -> Result<(InstanceIdentity, PathBuf)> {
+/// Copy the selected instance's data under new instance/session IDs.
+pub fn fork_instance(selection: &DeploymentSelection) -> Result<(InstanceIdentity, PathBuf)> {
     let source = load_required(selection)?;
     create_instance(
         selection,
@@ -299,48 +258,6 @@ pub fn rekey_instance(selection: &DeploymentSelection) -> Result<(InstanceIdenti
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn generated_session_reference_validates_required_canonical_distinct_ids() {
-        let identity = InstanceIdentity {
-            schema_version: SCHEMA_VERSION,
-            instance_id: "01234567-89ab-4cde-8fab-0123456789ab".into(),
-            default_session_id: "fedcba98-7654-4321-8fed-cba987654321".into(),
-        };
-        let session = identity.session_ref().unwrap();
-        assert_eq!(
-            validate_session_ref(Some(&session)).unwrap(),
-            (
-                identity.instance_id.as_str(),
-                identity.default_session_id.as_str()
-            )
-        );
-        assert!(validate_session_ref(None).is_err());
-        assert!(validate_session_ref(Some(&SessionRef::default())).is_err());
-        let mut missing = session.clone();
-        missing.instance_id = None;
-        assert!(validate_session_ref(Some(&missing)).is_err());
-        missing = session.clone();
-        missing.session_id = None;
-        assert!(validate_session_ref(Some(&missing)).is_err());
-        for invalid in [
-            "",
-            "not-a-uuid",
-            "00000000-0000-0000-0000-000000000000",
-            "01234567-89AB-4CDE-8FAB-0123456789AB",
-            "0123456789ab4cde8fab0123456789ab",
-        ] {
-            let mut wrong_instance = session.clone();
-            wrong_instance.instance_id.as_mut().unwrap().value = invalid.into();
-            assert!(validate_session_ref(Some(&wrong_instance)).is_err());
-            let mut wrong_session = session.clone();
-            wrong_session.session_id.as_mut().unwrap().value = invalid.into();
-            assert!(validate_session_ref(Some(&wrong_session)).is_err());
-        }
-        let mut same_ids = session;
-        same_ids.session_id.as_mut().unwrap().value = identity.instance_id;
-        assert!(validate_session_ref(Some(&same_ids)).is_err());
-    }
 
     fn deployment(root: &Path, manifest_reference: Option<&str>) -> DeploymentSelection {
         let manifest = manifest_reference
@@ -365,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn local_manifest_init_rekey_and_locks_preserve_data() {
+    fn local_manifest_init_fork_and_locks_preserve_data() {
         let root = std::env::temp_dir().join(format!("kaguya instance {} spaces", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         fs::write(root.join("gateway.toml"), "# component fixture").unwrap();
@@ -375,7 +292,7 @@ mod tests {
         config.files.soul_path = root.join("soul.md");
         config.files.identity_path = root.join("persona.md");
         let selection = deployment(&root, None);
-        assert!(validate_selection(&selection, true).unwrap().is_none());
+        check_init(&selection, &config).unwrap();
         assert!(load_required(&selection).is_err());
         assert!(!selection.portable_root.exists());
         let (identity, manifest) = init_instance(&selection, &config).unwrap();
@@ -395,8 +312,8 @@ mod tests {
         assert!(!paths.root.join("owner.toml").exists());
         assert!(!paths.root.join("instances").exists());
         assert!(!paths.root.join(".owner.lock").exists());
-        assert!(!std::env::temp_dir()
-            .join("kaguya-instance-locks")
+        assert!(!instance_lock_dir()
+            .unwrap()
             .join(format!("{}.lock", identity.instance_id))
             .exists());
         let selected = deployment(
@@ -407,11 +324,12 @@ mod tests {
         // Read-only validation is usable even while the running instance holds
         // leases; it checks metadata without attempting to acquire ownership.
         assert_eq!(
-            validate_selection(&selected, false).unwrap().unwrap().0,
+            inspect(selected.require_manifest().unwrap()).unwrap().0,
             identity
         );
         assert!(load_required(&selected).is_err());
-        assert!(rekey_instance(&selected).is_err());
+        assert!(fork_instance(&selected).is_err());
+        assert!(check_init(&selected, &config).is_err());
         let restored_root = root.join("restored");
         fs::create_dir(&restored_root).unwrap();
         fs::write(restored_root.join("gateway.toml"), "# fixture").unwrap();
@@ -452,7 +370,7 @@ mod tests {
         fs::write(&manifest, toml::to_string(&changed).unwrap()).unwrap();
         assert_eq!(inspect(&manifest).unwrap().0, changed);
         let root_before = fs::read(&selected.runtime_config).unwrap();
-        let (independent, new_manifest) = rekey_instance(&selected).unwrap();
+        let (independent, new_manifest) = fork_instance(&selected).unwrap();
         assert_ne!(independent.instance_id, identity.instance_id);
         assert_ne!(independent.default_session_id, changed.default_session_id);
         assert_eq!(fs::read(&selected.runtime_config).unwrap(), root_before);
@@ -477,5 +395,12 @@ mod tests {
         assert!(inspect(&manifest).is_err());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn instance_locks_live_in_a_per_user_directory_not_tmpdir() {
+        let dir = instance_lock_dir().unwrap();
+        assert!(dir.ends_with(Path::new("kaguya").join("instance-locks")));
+        assert!(!dir.starts_with(std::env::temp_dir()));
     }
 }

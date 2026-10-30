@@ -117,9 +117,9 @@ message TalkerInput {
   }
 }
 
-message BargeInSignal {
-  SessionRef session = 1;
-}
+// Scope is set by the stream's GenerationStart. Talker acknowledges only the
+// first barge-in of a Converse; later ones are ignored.
+message BargeInSignal {}
 
 // Reusable per-call context. Persona remains a change-driven UpdatePersona RPC.
 message PromptContext {
@@ -268,10 +268,10 @@ message TaskRequest {
   SessionRef session = 4;
 }
 
+// Scope is set by the stream's initial TaskRequest.
 message TaskContext {
   string task_id = 1;
   string context = 2; // additional context during execution
-  SessionRef session = 3;
 }
 
 message DelegateOutput {
@@ -304,11 +304,11 @@ message ReasonerError {
 }
 
 message InterruptRequest {
-  SessionRef session = 4;
+  SessionRef session = 1;
   oneof signal {
-    TaskCancel cancel = 1;
-    GlobalStop stop = 2;
-    Shutdown shutdown = 3;
+    TaskCancel cancel = 2;
+    GlobalStop stop = 3;
+    Shutdown shutdown = 4;
   }
 }
 message TaskCancel {

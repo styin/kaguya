@@ -7,7 +7,7 @@ mode = "portable"
 portable_root = "../gateway/data"
 
 [instance]
-# After init-instance/rekey-instance, select the printed manifest_reference.
+# After init-instance/fork-instance, select the printed manifest_reference.
 # manifest = "instances/<InstanceId>/instance.toml"
 
 [sandbox]

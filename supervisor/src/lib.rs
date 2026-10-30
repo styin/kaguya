@@ -7,6 +7,8 @@ pub mod logs;
 pub mod process;
 pub mod sandbox;
 pub mod server;
+#[path = "../../shared/session_scope.rs"]
+pub mod session_scope;
 pub mod telemetry;
 
 pub mod proto {

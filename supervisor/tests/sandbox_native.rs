@@ -3,7 +3,6 @@
 //! Supervisor-owned sandbox provider beyond mere compilation.
 
 use kaguya_supervisor::config::SandboxConfig;
-use kaguya_supervisor::proto;
 use kaguya_supervisor::sandbox::{SandboxManager, SandboxProvider};
 
 #[tokio::test]
@@ -241,43 +240,16 @@ async fn malformed_arguments_do_not_execute() {
 async fn opaque_handle_controls_execution_and_release() {
     let cfg = SandboxConfig::default();
     let provider = SandboxProvider::new(SandboxManager::from_config(&cfg).unwrap());
-    let owner = proto::SessionRef {
-        instance_id: Some(proto::InstanceId {
-            value: uuid::Uuid::new_v4().to_string(),
-        }),
-        session_id: Some(proto::SessionId {
-            value: uuid::Uuid::new_v4().to_string(),
-        }),
-    };
     let allocation_id = uuid::Uuid::new_v4().to_string();
-    let handle = provider.acquire(&owner, &allocation_id).await.unwrap();
+    let handle = provider.acquire(&allocation_id).await.unwrap();
     assert_eq!(
-        provider.acquire(&owner, &allocation_id).await.unwrap(),
+        provider.acquire(&allocation_id).await.unwrap(),
         handle,
         "acquisition retries must return the existing opaque handle"
     );
-
-    let mut malformed_owner = owner.clone();
-    malformed_owner.session_id = None;
-    assert!(provider
-        .acquire(&malformed_owner, &allocation_id)
-        .await
-        .is_err());
-    assert!(provider.release(&malformed_owner, &handle).await.is_err());
-    let rejected = provider
-        .execute(
-            &malformed_owner,
-            &handle,
-            "invalid-owner",
-            r#"{"language":"python","code":"print('must-not-run')"}"#,
-        )
-        .await;
-    let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
-    assert!(rejected["error"].as_str().unwrap().contains("session_id"));
-    assert_eq!(rejected["stdout"], "");
+    assert!(provider.acquire("not-a-uuid").await.is_err());
     let output = provider
         .execute(
-            &owner,
             &handle,
             "request-one",
             r#"{"language":"python","code":"print('through-supervisor')"}"#,
@@ -290,10 +262,9 @@ async fn opaque_handle_controls_execution_and_release() {
         .unwrap()
         .contains("through-supervisor"));
 
-    provider.release(&owner, &handle).await.unwrap();
+    provider.release(&handle).await.unwrap();
     let after_release = provider
         .execute(
-            &owner,
             &handle,
             "request-two",
             r#"{"language":"python","code":"print('no')"}"#,

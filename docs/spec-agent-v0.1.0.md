@@ -43,9 +43,10 @@ The canonical [protobuf schema](../proto/kaguya/v1/kaguya.proto) defines
 `SessionRef { InstanceId instance_id, SessionId session_id }`; each named ID
 message holds a `string value`. Receivers require both objects and validate
 canonical, non-nil, distinct UUIDs before comparing the pair. Rust Gateway and
-Supervisor use their generated `proto::SessionRef` internally, with small local
-validation helpers; the immutable Python `InstanceSessionBinding` remains the
-voice process's configured pair. Identity agreement is not caller
+Supervisor hold one validated `SessionScope` and convert it to `SessionRef` only
+on the wire; the immutable Python `InstanceSessionBinding` remains the voice
+process's configured pair. Only messages that open a request or stream carry the
+scope. Identity agreement is not caller
 authentication. Hosted authorization remains deferred.
 
 
@@ -334,7 +335,7 @@ Phase 1: sentence-level boundaries for correct TTS intonation. Phase 2: clause-l
 
 ### 3.8 Barge-In Handling (inline on Converse stream)
 
-Barge-in is delivered as a `BargeInSignal { session }` on the active `TalkerService.Converse` bidi stream — there is no separate `Prepare` RPC. The current voice speech-start path sends it on `vad_speech_start`; text input cancels the prior Gateway dispatch token. Complete text interruption/playback accounting remains acceptance work.
+Barge-in is delivered as an empty `BargeInSignal {}` on the active `TalkerService.Converse` bidi stream, whose scope was set by its `GenerationStart`; there is no separate `Prepare` RPC. Talker acknowledges only the first barge-in of a `Converse`; later ones are ignored. The current voice speech-start path sends it on `vad_speech_start`; text input cancels the prior Gateway dispatch token. Complete text interruption/playback accounting remains acceptance work.
 
 **IF the Talker is currently speaking/generating:**
 

@@ -29,6 +29,8 @@ pub mod instance;
 pub mod lifecycle;
 pub mod rag;
 pub mod sandbox;
+#[path = "../../shared/session_scope.rs"]
+pub mod session_scope;
 pub mod telemetry;
 pub mod tools;
 

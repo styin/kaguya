@@ -2,7 +2,7 @@
 
 The runtime TOML is the deployment entry point. It selects component settings,
 an explicit portable data root, and one instance-local manifest. Gateway owns
-instance creation, rekeying, persona initialization, and active data leases.
+instance creation, forking, persona initialization, and active data leases.
 Supervisor manages processes and sandbox allocations. R1a supports one active
 session per instance; history remains in memory until R1c.
 
@@ -88,18 +88,20 @@ existing pair binding.
 
 `gateway/src/instance.rs` keeps the compact lifecycle boundary:
 `InstanceIdentity`, `InstancePaths`, `InstanceLease`, `init_instance()`,
-`rekey_instance()`, and `load_required()`. Instance identity survives restore
+`fork_instance()`, and `load_required()`. Instance identity survives restore
 to another host and does not identify the physical machine. `IDENTITY.md`,
 `identity_md`, and the voice `IdentityConfig` describe mutable persona identity
 content, not InstanceId. The manifest remains a storage/lifecycle concern.
-Gateway and Supervisor each use their generated `proto::SessionRef` directly
-for runtime scope, including its named `InstanceId` and `SessionId` messages.
-Small component-local helpers construct and validate these values at startup
-and request boundaries. Generated message types alone do not guarantee valid
-IDs; validation requires both objects and canonical, non-nil, distinct UUID
-values. Runtime state and RPCs retain the same representation. The existing
-`shared/deployment.rs` resolver and Cargo package layout remain unchanged;
-broader configuration consolidation remains R1d.
+
+Each Rust process holds its instance/session pair as one `SessionScope`
+(`shared/session_scope.rs`, included by Gateway and Supervisor like
+`deployment.rs`). It is validated once, where the pair enters the process: from
+the manifest at startup, or from a gRPC `SessionRef` or HTTP request. Inside the
+process the type carries that guarantee, so components do not re-validate or
+compare copies of it. Validation requires canonical, non-nil, distinct UUIDs.
+Clients convert the scope to the generated `SessionRef` only when they write a
+wire message. The existing `shared/deployment.rs` resolver and Cargo package
+layout remain unchanged; broader configuration consolidation remains R1d.
 
 ## Explicit creation and print-only selection handoff
 
@@ -119,8 +121,15 @@ sources before creating directories, generates IDs and a new UUID directory,
 copies persona templates, then publishes and reads back the local manifest.
 Startup creates an empty instance-owned RAG database. Initialization never
 borrows or snapshots a previous database, and there is no external database
-source setting. Templates are preserved. Use `rekey-instance` when an independent
+source setting. Templates are preserved. Use `fork-instance` when an independent
 copy of a selected instance and its existing data is intended.
+
+`init-instance --dry-run` checks the same preconditions (no instance selected,
+readable persona sources, a portable root that is absent or a directory), prints
+the resolved selection, instances directory and initialization sources with
+`"dry_run": true`, and creates nothing. It prints no IDs, because IDs are
+generated only at creation. A dry run shows eligibility; it cannot promise that
+creation will succeed.
 
 Output is JSON containing `instance_id`, `default_session_id`, absolute
 `manifest` and `instance_directory`, `manifest_reference`, and
@@ -131,11 +140,11 @@ Output is JSON containing `instance_id`, `default_session_id`, absolute
 manifest = "instances/<printed InstanceId>/instance.toml"
 ```
 
-Neither initialization nor rekeying edits the deployment file. Normal startup
+Neither initialization nor forking edits the deployment file. Normal startup
 requires a valid selected manifest and readable instance persona; it never
 mints an identity to recover from an invalid or missing selection.
 
-`rekey-instance` requires a selected, valid source instance and acquires its
+`fork-instance` requires a selected, valid source instance and acquires its
 leases before copying. It creates new instance/session IDs and a separate
 UUID directory containing a snapshot of the existing persona/RAG data. The
 source manifest, data, and deployment selection remain intact. Select the
@@ -145,55 +154,51 @@ A restore that retains the manifest retains both IDs.
 Identity publication is fail-closed, not a complete interruption-recovery
 protocol. Failed operations may leave incomplete new directories/manifests;
 there is no directory guessing, automatic fallback, or replacement-ID recovery.
-Safe identity update publication and deterministic interrupted-init/rekey
+Safe identity update publication and deterministic interrupted-init/fork
 recovery are required before R1c acceptance. Full backup/export and consistent
 whole-instance snapshots remain R8 follow-ups.
 
-## Active locks, bindings, and originating context
+## Active locks, scope, and process boundaries
 
-Gateway holds an instance-ID OS lock under the host/user's temporary
-`kaguya-instance-locks` directory plus a `.owner.lock` in the data directory.
-These handles live in `InstanceLease` for the Gateway lifetime. They reject
-duplicate local restored instances under the same host/user and concurrent
-use of one data directory. Lock-file presence alone is not an active claim;
-the OS lock is. Runtime lock files are separate from portable identity data.
-Distributed duplicate-instance coordination is not implemented.
+Gateway holds an instance-ID OS lock in a per-user directory,
+`kaguya/instance-locks` under the platform's local data directory (created
+with mode `0700` on Unix), plus a `.owner.lock` in the data directory. These
+handles live in `InstanceLease` for the Gateway lifetime. They reject duplicate
+local restored instances for the same user and concurrent use of one data
+directory. The lock directory deliberately does not follow `TMPDIR`, which
+differs between launch contexts. Lock-file presence alone is not an active
+claim; the OS lock is. Runtime lock files are separate from portable identity
+data. Distributed duplicate-instance coordination is not implemented.
 
-Terminology follows the actual relationship:
+Kaguya runs one session per instance. Multiple sessions may come later, so the
+scope stays on the wire as an extension point, without defensive checks inside
+a process:
 
-| Relationship | Term and implementation |
+| Where | What happens |
 | --- | --- |
-| Instance owns persona/RAG data and allocations | Data/resource ownership |
-| Service accepts one instance/session pair | Fixed `proto::SessionRef` in Rust; immutable `InstanceSessionBinding` in Python |
-| Request/callback/event carries its originating IDs | Instance/session context or correlation |
+| Process startup | Gateway and Supervisor read the manifest into one `SessionScope`; voice reads `KAGUYA_INSTANCE_ID`/`KAGUYA_SESSION_ID` into its immutable `InstanceSessionBinding` |
+| Messages that open a request or stream | Carry `SessionRef`: `ListenerInit`, `GenerationStart`, `PrefillRequest`, `UpdatePersonaRequest`, `ControlRequest`, `TaskRequest`, `InterruptRequest`, `TelemetrySubscribe`; plus the raw-audio header |
+| Later messages on a stream | Carry no scope; the first message set it (`BargeInSignal`, `TaskContext`) |
+| Receiving process | Checks the scope once against its configured pair before any effect |
+| Inside a process | No scope fields on internal events or calls; clients stamp the scope on what they send |
 
-Supervisor reads and validates its configured pair before launch, stores the
-generated `proto::SessionRef` in its binding state and allocation ownership
-records, and enforces policy through `bind_instance_session()` /
-`require_instance_session()`. The Python `InstanceSessionBinding` in
-`talker/binding.py` is immutable and constructed
-before voice services accept traffic. Talker, Listener gRPC, and audio ingress
-share it. Missing or invalid startup IDs stop startup; no first caller can
-claim the process. A different instance or session is rejected. Gateway retains
-the fatal voice-binding rejection path through P0.
+Supervisor reads and validates its pair before launch, passes it to
+`SupervisorApp::new`, and serves exactly that scope. Its HTTP adapters keep
+flat `instanceId` / `sessionId` fields and check them in each sandbox and
+telemetry handler (`require_scope`). `/api/sandbox/status` reports the served
+pair; Gateway compares it at startup and stops on a mismatch. An unreachable
+Supervisor only disables the sandbox tool. The Python `InstanceSessionBinding`
+in `talker/binding.py` is constructed before voice services accept traffic and
+is shared by Talker, Listener gRPC and audio ingress. Missing or invalid startup
+IDs stop startup; no first caller can claim a process.
 
-Gateway constructs its clients, tools, history and `SessionState` with the
-validated generated `proto::SessionRef`. Tool and Reasoner callbacks are
-labeled by their Gateway adapter and checked before the pipeline consumes them. This is
-originating correlation, not independent verification of a remote provider.
-Supervisor's HTTP adapters retain scalar `instanceId` / `sessionId` JSON and
-construct or extract the generated reference at that boundary.
-Authoritative history, Reasoner implementation/run lifecycle, authorization,
-multiplexing, and ownership transfer remain their separate stages.
-
-The protobuf schema is the shared runtime contract. A protobuf `SessionRef` contains
-named `InstanceId { value }` and `SessionId { value }` messages. Unary requests
-carry this assertion. Initial `ListenerInput.init` (`ListenerInit`),
-`GenerationStart`, and Reasoner's initial `TaskRequest` establish bidirectional
-stream scope. Voice validates scope before sending response headers or mutating
-state. Bidirectional clients enqueue their first message before waiting for
-headers, avoiding a startup deadlock. Scope is
-an assertion against the configured pair, not a routing or authentication key.
+A scope mismatch has one signal and one outcome. Voice services answer
+`FAILED_PRECONDITION`; Gateway treats it as fatal from both `UpdatePersona` and
+Listener initialization and shuts down through P0. `INVALID_ARGUMENT` means a
+malformed Gateway request: it is logged and the connection is marked degraded,
+not reported as a binding failure. The audio socket closes silently on a
+mismatched header; the Listener gRPC stream on the same process rejects the
+mismatch first.
 
 `GenerationStart` carries shared `PromptContext` plus exactly one typed trigger:
 user input, tool result (`request_id`), Reasoner result/progress/failure (`task_id`), or
@@ -202,10 +207,10 @@ silence. Active tasks are typed rather than JSON inside the prompt context.
 persona changes; persona is not resent with every generation. Every
 `TalkerOutput` carries the accepted `GenerationStart.generation_id` in its outer
 envelope. Gateway validates that field against the stream's expected generation
-and forwards the generated protobuf directly; there is no local output wrapper
-or duplicate generation field in lifecycle payloads. Console associates events
-with that generation rather than whichever response is currently open. This
-preserves provenance without introducing a new stale-output policy.
+and forwards the generated protobuf directly. Console associates events with
+that generation rather than whichever response is currently open. Filtering
+stale output by generation is the generation-correctness step before R1c.
+Talker acknowledges only the first barge-in of a `Converse`.
 
 For canonical UUID strings, `SessionRef` has an 80-byte protobuf payload
 (82 bytes when embedded as a small-numbered message field). It is sent at
@@ -216,12 +221,12 @@ frame.
 uses 38 protobuf bytes. It accompanies every semantic output, including barge-in
 acknowledgments, but does not add bytes to audio frames. The canonical protobuf
 schema owns field numbering and message shapes.
-Listener retains its input control stream after initialization. The declared
-reset control currently returns `UNIMPLEMENTED`; future pause/reconfiguration
-variants can extend that boundary. Audio uses the separate raw socket.
-Gateway likewise retains `ApprovalSignal` in its control schema while rejecting
-approvals with `UNIMPLEMENTED` after scope validation and before P0 dispatch.
-All components must use the regenerated schema together.
+The Listener request carries only `ListenerInit`; Gateway half-closes it, and
+Listener keeps the subscription. `ListenerControl`/`ListenerReset` stay declared
+as an extension point and answer `UNIMPLEMENTED`. Gateway likewise retains
+`ApprovalSignal` in its control schema and answers approvals with
+`UNIMPLEMENTED` after scope validation and before P0 dispatch. Audio uses the
+separate raw socket. All components must use the regenerated schema together.
 
 The raw audio connection sends its header once:
 
@@ -240,30 +245,34 @@ Sandbox `AllocationId`, opaque handle, tool request ID, and durable session
 remain separate. Release permits a fresh allocation under the same session.
 Docker's `supervisor_run_id` stays ephemeral and uses the
 `kaguya.sandbox.supervisor_run` ownership label. Full workspace/task/policy binding and failure reconciliation
-remain R5.
+remain R5. A sandbox backend that is explicitly enabled but fails to initialize
+stops the Supervisor; the Docker backend requires a running daemon.
 
 ## Read-only validation and redacted diagnostics
 
 Gateway and Supervisor support `validate-config` and `show-config`, with the
-same selection flags. For example:
+same selection flags. Both require a selected, initialized instance; before
+initialization, use `init-instance --dry-run`. For example:
 
 ```sh
-cargo run --manifest-path gateway/Cargo.toml -- show-config --for-init --runtime-config config/kaguya.local.toml
+cargo run --manifest-path gateway/Cargo.toml -- init-instance --dry-run --runtime-config config/kaguya.local.toml
+cargo run --manifest-path gateway/Cargo.toml -- show-config --runtime-config config/kaguya.local.toml
 cargo run --manifest-path supervisor/Cargo.toml -- validate-config --runtime-config config/kaguya.local.toml
 ```
 
-These commands do not create instance/lock directories, acquire leases, open
-SQLite databases, bind ports, or launch processes. `--for-init` permits an
-unset or missing manifest; any existing manifest is still validated. The init
-operation itself still requires an unselected deployment. Gateway also checks
-its typed settings and initialization sources when no instance exists;
-Supervisor checks Gateway TOML syntax and owns its topology validation.
+These commands, including the dry run, do not create instance/lock
+directories, acquire leases, open SQLite databases, bind ports, or launch
+processes. Gateway checks its typed settings; Supervisor checks Gateway TOML
+syntax and owns its topology validation.
 
 The implemented subset reports selected root/profile, path mode, portable
-root, component file, manifest/data paths, selection provenance and applied
-override sources. Gateway includes initialization-source paths. Output uses
-an allowlist and omits process environment values and launch commands;
-configuration parse/endpoint errors omit sensitive source snippets and URLs.
+root, component file, manifest/data paths, selection provenance (only for
+settings that have a value) and applied override sources. The dry run adds
+initialization-source paths. Output uses an allowlist and omits process
+environment values and launch commands. Configuration errors give the line
+and column, and name the key for unknown, missing or duplicate keys; errors
+that could quote a configured value report only their kind. Endpoint errors
+name the endpoint, never its address.
 This is not deployment-wide endpoint/environment validation or proof that
 runtime resources can be acquired. R1d completes those diagnostics.
 

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use kaguya_gateway::clients::audio_sink::ListenerAudioSink;
 use kaguya_gateway::lifecycle::{LifecycleSupervisor, Readiness};
-use kaguya_gateway::proto::{InstanceId, SessionId, SessionRef};
 use kaguya_gateway::services::endpoint::{self, EndpointState, RuntimeStatusState};
+use kaguya_gateway::session_scope::SessionScope;
 use kaguya_supervisor::app::SupervisorApp;
 use kaguya_supervisor::config::{ResolvedRuntimeConfig, RuntimeConfig};
 use kaguya_supervisor::server;
@@ -24,25 +24,21 @@ async fn supervisor_exposes_gateway_snapshot_and_capability_children() {
     lifecycle
         .register_connection("listener")
         .set_readiness(Readiness::Degraded);
-    let session = SessionRef {
-        instance_id: Some(InstanceId {
-            value: uuid::Uuid::new_v4().to_string(),
-        }),
-        session_id: Some(SessionId {
-            value: uuid::Uuid::new_v4().to_string(),
-        }),
-    };
+    let scope = SessionScope::parse(
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .unwrap();
     let (control_tx, _control_rx) = mpsc::channel(1);
     let (p1_tx, _p1_rx) = mpsc::channel(1);
     let (metadata_tx, _) = broadcast::channel(1);
     let state = Arc::new(EndpointState {
-        session: session.clone(),
         control_tx,
         p1_tx,
         metadata_tx,
         active_client: std::sync::Mutex::new(None),
         listener_audio: ListenerAudioSink::new(),
-        runtime_status: RuntimeStatusState { lifecycle, session },
+        runtime_status: RuntimeStatusState { lifecycle, scope },
     });
     let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_url = format!("http://{}", gateway_listener.local_addr().unwrap());
@@ -70,10 +66,18 @@ async fn supervisor_exposes_gateway_snapshot_and_capability_children() {
     "#
     ))
     .unwrap();
-    let app = SupervisorApp::new(ResolvedRuntimeConfig {
-        config,
-        base_dir: ".".into(),
-    })
+    let supervisor_scope = kaguya_supervisor::session_scope::SessionScope::parse(
+        &scope.instance_id().to_string(),
+        &scope.session_id().to_string(),
+    )
+    .unwrap();
+    let app = SupervisorApp::new(
+        ResolvedRuntimeConfig {
+            config,
+            base_dir: ".".into(),
+        },
+        supervisor_scope,
+    )
     .unwrap();
     let supervisor_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let supervisor_url = format!("http://{}", supervisor_listener.local_addr().unwrap());

@@ -1,9 +1,11 @@
+use crate::session_scope::SessionScope;
+
 #[derive(Clone)]
 pub struct TelemetryClient {
     base_url: String,
     source: String,
     http: reqwest::Client,
-    session: crate::proto::SessionRef,
+    scope: SessionScope,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -13,7 +15,6 @@ struct TelemetryPayload {
     kind: String,
     instance_id: String,
     session_id: String,
-    allocation_id: Option<String>,
     generation_id: Option<String>,
     request_id: Option<String>,
     fields: serde_json::Value,
@@ -23,45 +24,28 @@ impl TelemetryClient {
     pub fn new(
         base_url: impl Into<String>,
         source: impl Into<String>,
-        session: crate::proto::SessionRef,
+        scope: SessionScope,
     ) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             source: source.into(),
             http: reqwest::Client::new(),
-            session,
+            scope,
         }
     }
 
     pub fn emit(
         &self,
         kind: impl Into<String>,
-        originating_session_id: Option<String>,
         generation_id: Option<String>,
         request_id: Option<String>,
         fields: serde_json::Value,
     ) {
-        let (instance_id, session_id) =
-            match crate::instance::validate_session_ref(Some(&self.session)) {
-                Ok(ids) => ids,
-                Err(error) => {
-                    tracing::warn!(%error, "dropping telemetry with invalid configured scope");
-                    return;
-                }
-            };
-        if originating_session_id
-            .as_deref()
-            .is_some_and(|id| id != session_id)
-        {
-            tracing::warn!("dropping telemetry with mismatched originating session correlation");
-            return;
-        }
         let payload = TelemetryPayload {
             source: self.source.clone(),
             kind: kind.into(),
-            instance_id: instance_id.to_owned(),
-            session_id: session_id.to_owned(),
-            allocation_id: None,
+            instance_id: self.scope.instance_id().to_string(),
+            session_id: self.scope.session_id().to_string(),
             generation_id,
             request_id,
             fields,

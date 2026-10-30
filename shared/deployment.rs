@@ -18,7 +18,7 @@ pub struct DeploymentOptions {
 pub enum Operation {
     Run,
     InitInstance,
-    RekeyInstance,
+    ForkInstance,
     ValidateConfig,
     ShowConfig,
     Help,
@@ -28,7 +28,8 @@ pub enum Operation {
 pub struct Cli {
     pub operation: Operation,
     pub options: DeploymentOptions,
-    pub for_init: bool,
+    /// `init-instance --dry-run`: check and print, create nothing.
+    pub dry_run: bool,
 }
 
 impl Cli {
@@ -36,7 +37,7 @@ impl Cli {
         let mut args = args.into_iter();
         let mut operation = None;
         let mut options = DeploymentOptions::default();
-        let mut for_init = false;
+        let mut dry_run = false;
         while let Some(argument) = args.next() {
             let text = argument.to_str().context("command/flag is not Unicode")?;
             match text {
@@ -44,7 +45,7 @@ impl Cli {
                     return Ok(Self {
                         operation: Operation::Help,
                         options,
-                        for_init,
+                        dry_run,
                     })
                 }
                 "--runtime-config" => {
@@ -68,7 +69,7 @@ impl Cli {
                     require_nonempty(&value, "profile")?;
                     options.profile = Some(value);
                 }
-                "--for-init" => for_init = true,
+                "--dry-run" => dry_run = true,
                 _ if text.starts_with("--runtime-config=") => {
                     if options.runtime_config.is_some() {
                         bail!("--runtime-config was supplied twice");
@@ -85,14 +86,14 @@ impl Cli {
                     require_nonempty(value, "profile")?;
                     options.profile = Some(value.to_string());
                 }
-                "run" | "init-instance" | "rekey-instance" | "validate-config" | "show-config" => {
+                "run" | "init-instance" | "fork-instance" | "validate-config" | "show-config" => {
                     if operation.is_some() {
                         bail!("supply only one operation");
                     }
                     operation = Some(match text {
                         "run" => Operation::Run,
                         "init-instance" => Operation::InitInstance,
-                        "rekey-instance" => Operation::RekeyInstance,
+                        "fork-instance" => Operation::ForkInstance,
                         "validate-config" => Operation::ValidateConfig,
                         _ => Operation::ShowConfig,
                     });
@@ -101,13 +102,13 @@ impl Cli {
             }
         }
         let operation = operation.unwrap_or(Operation::Run);
-        if for_init && !matches!(operation, Operation::ValidateConfig | Operation::ShowConfig) {
-            bail!("--for-init is supported by validate-config and show-config only");
+        if dry_run && operation != Operation::InitInstance {
+            bail!("--dry-run is supported by init-instance only");
         }
         Ok(Self {
             operation,
             options,
-            for_init,
+            dry_run,
         })
     }
 }
@@ -216,6 +217,63 @@ pub fn resolve_path(base: &Path, declared: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
+/// Resolve `instances/<InstanceId>/instance.toml` under the portable root.
+fn resolve_manifest(portable_root: &Path, declared: &Path) -> Result<PathBuf> {
+    if declared.is_absolute()
+        || declared.has_root()
+        || declared
+            .components()
+            .any(|c| matches!(c, Component::Prefix(_) | Component::ParentDir))
+    {
+        bail!("instance.manifest must be relative to paths.portable_root without parent traversal");
+    }
+    let resolved = resolve_path(portable_root, declared)?;
+    let relative = resolved
+        .strip_prefix(portable_root.join("instances"))
+        .context("manifest must be inside the portable instances directory")?;
+    if relative.components().count() != 2
+        || resolved.file_name() != Some(std::ffi::OsStr::new("instance.toml"))
+    {
+        bail!("manifest must select instances/<InstanceId>/instance.toml");
+    }
+    let directory_id = resolved
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .context("instance directory name is not Unicode")?;
+    match uuid::Uuid::parse_str(directory_id) {
+        Ok(id) if !id.is_nil() && id.to_string() == directory_id => Ok(resolved),
+        _ => bail!("instance directory name must be a non-nil canonical UUID"),
+    }
+}
+
+/// Describe a TOML error by location and kind. Errors that name only a key are
+/// shown; others can quote a configured value, so only their kind is shown.
+pub fn toml_error(
+    what: impl std::fmt::Display,
+    content: &str,
+    error: &toml::de::Error,
+) -> anyhow::Error {
+    let first_line = error.message().lines().next().unwrap_or_default();
+    let reason = if ["unknown field", "missing field", "duplicate key"]
+        .iter()
+        .any(|prefix| first_line.starts_with(prefix))
+    {
+        first_line
+    } else {
+        "invalid value or syntax"
+    };
+    match error.span() {
+        Some(span) => {
+            let before = content.get(..span.start).unwrap_or(content);
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+            anyhow::anyhow!("invalid {what}: {reason} at line {line}, column {column}")
+        }
+        None => anyhow::anyhow!("invalid {what}: {reason}"),
+    }
+}
+
 impl DeploymentSelection {
     pub fn discover(options: DeploymentOptions) -> Result<Self> {
         Self::resolve_at(
@@ -270,13 +328,14 @@ impl DeploymentSelection {
             .context("selected runtime config is missing or unreadable")?;
         let content =
             std::fs::read_to_string(&root).context("cannot read selected runtime config")?;
-        let file: DeploymentFile = toml::from_str(&content).map_err(|error: toml::de::Error| {
-            anyhow::anyhow!(
-                "invalid runtime configuration {} at byte {:?}",
-                root.display(),
-                error.span().map(|span| span.start)
+        let file: DeploymentFile = toml::from_str(&content).map_err(|error| {
+            toml_error(
+                format_args!("runtime configuration {}", root.display()),
+                &content,
+                &error,
             )
         })?;
+        let file_profile_source = file.profile.as_ref().map(|_| "runtime_file:profile");
         let (profile, profile_source) = if let Some(profile) = options.profile {
             let mut overridden = Vec::new();
             if env_profile.is_some() {
@@ -288,7 +347,7 @@ impl DeploymentSelection {
             if !overridden.is_empty() {
                 overridden_sources.insert("profile".into(), overridden);
             }
-            (Some(profile), "command_line")
+            (Some(profile), Some("command_line"))
         } else if let Some(profile) = env_profile {
             let profile = profile
                 .into_string()
@@ -296,9 +355,9 @@ impl DeploymentSelection {
             if file.profile.is_some() {
                 overridden_sources.insert("profile".into(), vec!["runtime_file:profile".into()]);
             }
-            (Some(profile), "environment:KAGUYA_RUNTIME_PROFILE")
+            (Some(profile), Some("environment:KAGUYA_RUNTIME_PROFILE"))
         } else {
-            (file.profile, "runtime_file:profile")
+            (file.profile, file_profile_source)
         };
         if let Some(profile) = &profile {
             require_nonempty(profile, "selected profile")?;
@@ -323,26 +382,22 @@ impl DeploymentSelection {
         if portable_root.try_exists()? && !portable_root.is_dir() {
             bail!("portable_root exists but is not a directory");
         }
-        let manifest = file.instance.manifest.map(|path| -> Result<PathBuf> {
-            if path.is_absolute() || path.has_root() || path.components().any(|c| matches!(c, Component::Prefix(_) | Component::ParentDir)) { bail!("instance.manifest must be relative to paths.portable_root without parent traversal"); }
-            let resolved = resolve_path(&portable_root, &path)?;
-            let instances = portable_root.join("instances");
-            let relative = resolved.strip_prefix(&instances).context("manifest must be inside the portable instances directory")?;
-            if relative.components().count() != 2 || resolved.file_name() != Some(std::ffi::OsStr::new("instance.toml")) { bail!("manifest must select instances/<InstanceId>/instance.toml"); }
-            let directory_id = resolved.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str()).context("instance directory name is not Unicode")?;
-            let directory_uuid = uuid::Uuid::parse_str(directory_id).context("instance directory name must be a UUID")?;
-            if directory_uuid.is_nil() || directory_uuid.to_string() != directory_id { bail!("instance directory name must be a non-nil canonical UUID"); }
-            Ok(resolved)
-        }).transpose()?;
+        let manifest = file
+            .instance
+            .manifest
+            .map(|path| resolve_manifest(&portable_root, &path))
+            .transpose()?;
+        // Provenance lists only settings that have a value.
         let mut sources = BTreeMap::new();
         sources.insert("runtime_config".into(), root_source.into());
-        sources.insert("profile".into(), profile_source.into());
-        for key in [
-            "gateway_settings",
-            "paths.mode",
-            "paths.portable_root",
-            "instance.manifest",
-        ] {
+        if let Some(profile_source) = profile_source {
+            sources.insert("profile".into(), profile_source.into());
+        }
+        let manifest_key = manifest.as_ref().map(|_| "instance.manifest");
+        for key in ["gateway_settings", "paths.mode", "paths.portable_root"]
+            .into_iter()
+            .chain(manifest_key)
+        {
             sources.insert(key.into(), format!("runtime_file:{key}"));
         }
         // Keep projection fields consumed explicitly; their contents are never
@@ -406,24 +461,30 @@ mod tests {
     fn cli_selection_and_diagnostic_mode_are_explicit() {
         let cli = Cli::parse(
             [
-                "show-config",
+                "init-instance",
                 "--runtime-config",
                 "root with spaces.toml",
                 "--profile=dev",
-                "--for-init",
+                "--dry-run",
             ]
             .map(OsString::from),
         )
         .unwrap();
-        assert_eq!(cli.operation, Operation::ShowConfig);
+        assert_eq!(cli.operation, Operation::InitInstance);
         assert_eq!(
             cli.options.runtime_config,
             Some("root with spaces.toml".into())
         );
         assert_eq!(cli.options.profile.as_deref(), Some("dev"));
-        assert!(cli.for_init);
+        assert!(cli.dry_run);
         assert!(Cli::parse(["--profile="].map(OsString::from)).is_err());
-        assert!(Cli::parse(["--for-init"].map(OsString::from)).is_err());
+        assert!(Cli::parse(["--dry-run"].map(OsString::from)).is_err());
+        assert_eq!(
+            Cli::parse(["fork-instance"].map(OsString::from))
+                .unwrap()
+                .operation,
+            Operation::ForkInstance
+        );
     }
 
     #[test]
@@ -468,5 +529,32 @@ mod tests {
         )
         .is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn toml_errors_name_keys_and_location_but_not_values() {
+        let content = "gateway_settings = 'g.toml'\nsupervisor_addrr = 'x'\n";
+        let Err(error) = toml::from_str::<DeploymentFile>(content) else {
+            panic!("unknown field must be rejected");
+        };
+        let message = toml_error("runtime configuration", content, &error).to_string();
+        assert!(
+            message.contains("unknown field `supervisor_addrr`"),
+            "{message}"
+        );
+        assert!(message.contains("line 2, column 1"), "{message}");
+        assert!(!message.contains("Some("), "{message}");
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct Flag {
+            enabled: bool,
+        }
+        let content = "enabled = 'never-print-this'\n";
+        let error = toml::from_str::<Flag>(content).unwrap_err();
+        assert!(error.message().contains("never-print-this"));
+        let message = toml_error("flag", content, &error).to_string();
+        assert!(message.contains("invalid value or syntax"), "{message}");
+        assert!(!message.contains("never-print-this"), "{message}");
     }
 }

@@ -23,6 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
+dirs = "6"
 chrono = "0.4"
 bytes = "1"
 notify = "7"

@@ -100,7 +100,11 @@ class TalkerServiceServicer(kaguya_pb2_grpc.TalkerServiceServicer):
                             grpc.StatusCode.INVALID_ARGUMENT,
                             "Converse permits exactly one GenerationStart",
                         )
-                    await self._binding.require(msg.barge_in.session, context)
+                    if cancel_event.is_set():
+                        # One BargeInAck per Converse: a repeated barge-in
+                        # (STOP plus VAD, or several VAD starts) must not
+                        # report the same spoken text twice.
+                        continue
                     logger.debug("<- BargeIn received")
                     cancel_event.set()
                     spoken, unspoken = self._speaker.stop()

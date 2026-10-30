@@ -25,20 +25,12 @@ pub async fn run(
     lifecycle: &mut LifecycleSupervisor,
     telemetry: &TelemetryClient,
     silence_enabled: bool,
-) -> anyhow::Result<()> {
+) {
     let talker = pipeline.talker;
     let history = pipeline.history;
     let tools = pipeline.tools;
     let reasoner = pipeline.reasoner;
     let rag = pipeline.rag;
-    let (expected_instance_id, expected_session_id) =
-        crate::instance::validate_session_ref(Some(&session.scope))?;
-    let expected_instance_id = expected_instance_id.to_owned();
-    let expected_session_id = expected_session_id.to_owned();
-    anyhow::ensure!(
-        history.matches_session(&session.scope),
-        "pipeline history instance/session context does not match"
-    );
 
     loop {
         tokio::select! {
@@ -161,7 +153,6 @@ pub async fn run(
                 if let Some(duration_ms) = rag_elapsed_ms {
                     telemetry.emit(
                         "rag.retrieve.completed",
-                        Some(expected_session_id.clone()),
                         Some(session.last_user_generation_id.clone()),
                         None,
                         serde_json::json!({
@@ -197,11 +188,7 @@ pub async fn run(
             // ── P3: Tool/Reasoner Results ──
             Some(event) = input_rx.p3.recv() => {
                 let actions = match event {
-                    InputEvent::ToolResult { instance_id, session_id, request_id, tool_name, content } => {
-                        if instance_id != expected_instance_id || session_id != expected_session_id {
-                            warn!(%instance_id, %session_id, %request_id, "dropping tool callback with mismatched originating instance/session correlation");
-                            continue;
-                        }
+                    InputEvent::ToolResult { request_id, tool_name, content } => {
                         info!(id = %request_id, tool = %tool_name, "P3: tool result");
                         let recent = history.recent().await;
                         let tool_defs = tools.definitions();
@@ -212,11 +199,7 @@ pub async fn run(
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerStep { instance_id, session_id, task_id, description } => {
-                        if instance_id != expected_instance_id || session_id != expected_session_id {
-                            warn!(%instance_id, %session_id, "dropping Reasoner step with mismatched originating instance/session correlation");
-                            continue;
-                        }
+                    InputEvent::ReasonerStep { task_id, description } => {
                         let should_narrate = narration.should_narrate(&description);
                         // Skip the async history fetch when the handler will
                         // short-circuit anyway (narration filtered or already
@@ -232,11 +215,7 @@ pub async fn run(
                             should_narrate, ready, recent,
                         )
                     }
-                    InputEvent::ReasonerCompleted { instance_id, session_id, task_id, summary } => {
-                        if instance_id != expected_instance_id || session_id != expected_session_id {
-                            warn!(%instance_id, %session_id, %task_id, "dropping Reasoner completion with mismatched originating instance/session correlation");
-                            continue;
-                        }
+                    InputEvent::ReasonerCompleted { task_id, summary } => {
                         info!(task_id = %task_id, "P3: reasoner done");
                         let recent = history.recent().await;
                         let tool_defs = tools.definitions();
@@ -247,11 +226,7 @@ pub async fn run(
                             ready, recent, tool_defs, &tasks,
                         )
                     }
-                    InputEvent::ReasonerError { instance_id, session_id, task_id, message, code } => {
-                        if instance_id != expected_instance_id || session_id != expected_session_id {
-                            warn!(%instance_id, %session_id, %task_id, "dropping Reasoner error with mismatched originating instance/session correlation");
-                            continue;
-                        }
+                    InputEvent::ReasonerError { task_id, message, code } => {
                         warn!(task_id = %task_id, err = %message, "P3: reasoner error");
                         let recent = history.recent().await;
                         let tool_defs = tools.definitions();
@@ -293,5 +268,4 @@ pub async fn run(
             }
         }
     }
-    Ok(())
 }

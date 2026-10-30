@@ -12,7 +12,6 @@ use tracing::{error, info};
 use crate::core::types::InputEvent;
 use crate::lifecycle::TaskSpawner;
 use crate::proto;
-use crate::proto::SessionRef;
 use crate::sandbox::SandboxClient;
 
 struct ToolMeta {
@@ -26,7 +25,6 @@ pub struct ToolRegistry {
     workspace_root: PathBuf,
     tasks: TaskSpawner,
     sandbox: Option<Arc<SandboxClient>>,
-    session: SessionRef,
 }
 
 impl ToolRegistry {
@@ -34,7 +32,6 @@ impl ToolRegistry {
         workspace_root: PathBuf,
         tasks: TaskSpawner,
         sandbox: Option<Arc<SandboxClient>>,
-        session: SessionRef,
     ) -> Self {
         let mut tools = vec![
             ToolMeta {
@@ -73,7 +70,6 @@ impl ToolRegistry {
             workspace_root,
             tasks,
             sandbox,
-            session,
         }
     }
 
@@ -103,37 +99,11 @@ impl ToolRegistry {
 
     pub fn dispatch(
         &self,
-        session_id: String,
         request_id: String,
         tool_name: String,
         args_json: String,
         p3_tx: mpsc::Sender<InputEvent>,
     ) {
-        let (instance_id, configured_session_id) =
-            match crate::instance::validate_session_ref(Some(&self.session)) {
-                Ok((instance_id, session_id)) => (instance_id.to_owned(), session_id),
-                Err(error) => {
-                    error!(%error, "rejecting tool dispatch with invalid configured scope");
-                    return;
-                }
-            };
-        if session_id != configured_session_id {
-            let session_id = configured_session_id.to_owned();
-            self.tasks.spawn("tool_context_rejection", async move {
-                let _ = p3_tx
-                    .send(InputEvent::ToolResult {
-                        instance_id,
-                        session_id,
-                        request_id,
-                        tool_name,
-                        content: sandbox_error_json(
-                            "tool dispatch originating session context mismatch",
-                        ),
-                    })
-                    .await;
-            });
-            return;
-        }
         // ── Sandbox route ──
         // `sandbox_exec` runs through a Supervisor-owned provider handle.
         // Files persist across calls in the active allocation; the normal P3
@@ -141,7 +111,6 @@ impl ToolRegistry {
         if tool_name == "sandbox_exec" {
             let sandbox = self.sandbox.clone();
             info!(
-                session_id = %session_id,
                 request_id = %request_id,
                 tool = "sandbox_exec",
                 "dispatching sandbox tool"
@@ -154,8 +123,6 @@ impl ToolRegistry {
                     };
                     let _ = p3_tx
                         .send(InputEvent::ToolResult {
-                            instance_id,
-                            session_id,
                             request_id,
                             tool_name,
                             content,
@@ -167,7 +134,6 @@ impl ToolRegistry {
 
         // ── Filesystem tools ──
         info!(
-            session_id = %session_id,
             request_id = %request_id,
             tool = %tool_name,
             "dispatching local tool"
@@ -199,8 +165,6 @@ impl ToolRegistry {
 
                 let _ = p3_tx
                     .send(InputEvent::ToolResult {
-                        instance_id,
-                        session_id,
                         request_id,
                         tool_name,
                         content,
@@ -313,16 +277,23 @@ mod tests {
 
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
+    use crate::session_scope::SessionScope;
 
-    fn test_session() -> SessionRef {
-        SessionRef {
-            instance_id: Some(crate::proto::InstanceId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-            session_id: Some(crate::proto::SessionId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-        }
+    /// The Supervisor crate compiles its own copy of the shared scope type.
+    fn supervisor_scope(scope: SessionScope) -> kaguya_supervisor::session_scope::SessionScope {
+        kaguya_supervisor::session_scope::SessionScope::parse(
+            &scope.instance_id().to_string(),
+            &scope.session_id().to_string(),
+        )
+        .unwrap()
+    }
+
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -341,65 +312,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mismatched_session_rejects_tool_before_filesystem_write() {
-        let root =
-            std::env::temp_dir().join(format!("kaguya-tool-context-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
-        let session = test_session();
-        let lifecycle = LifecycleSupervisor::new();
-        let tools = ToolRegistry::new(root.clone(), lifecycle.spawner(), None, session.clone());
-        let (result_tx, mut result_rx) = mpsc::channel(1);
-        tools.dispatch(
-            uuid::Uuid::new_v4().to_string(),
-            "wrong-context-request".into(),
-            "write_file".into(),
-            r#"{"path":"should-not-exist.txt","content":"no"}"#.into(),
-            result_tx,
-        );
-        let result = result_rx.recv().await.unwrap();
-        let InputEvent::ToolResult {
-            instance_id,
-            session_id,
-            content,
-            ..
-        } = result
-        else {
-            panic!("expected ToolResult");
-        };
-        assert_eq!(
-            instance_id,
-            session
-                .instance_id
-                .as_ref()
-                .expect("validated SessionRef")
-                .value
-                .as_str()
-        );
-        assert_eq!(
-            session_id,
-            session
-                .session_id
-                .as_ref()
-                .expect("validated SessionRef")
-                .value
-                .as_str()
-        );
-        assert!(content.contains("context mismatch"));
-        assert!(!root.join("should-not-exist.txt").exists());
-        std::fs::remove_dir(root).unwrap();
-    }
-
-    #[tokio::test]
     async fn sandbox_tool_dispatch_completes_full_supervisor_chain() {
-        let supervisor = SupervisorApp::new(ResolvedRuntimeConfig {
-            config: RuntimeConfig {
-                profile: Some("test".into()),
-                supervisor_addr: "127.0.0.1:0".into(),
-                sandbox: SandboxConfig::default(),
-                processes: BTreeMap::new(),
+        let scope = test_scope();
+        let supervisor = SupervisorApp::new(
+            ResolvedRuntimeConfig {
+                config: RuntimeConfig {
+                    profile: Some("test".into()),
+                    supervisor_addr: "127.0.0.1:0".into(),
+                    sandbox: SandboxConfig::default(),
+                    processes: BTreeMap::new(),
+                },
+                base_dir: ".".into(),
             },
-            base_dir: ".".into(),
-        })
+            supervisor_scope(scope),
+        )
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -407,9 +333,8 @@ mod tests {
             server::serve_on(supervisor, listener).await.unwrap();
         });
 
-        let session = test_session();
         let sandbox = Arc::new(
-            SandboxClient::connect(format!("http://{addr}"), &session)
+            SandboxClient::connect(format!("http://{addr}"), scope)
                 .await
                 .unwrap(),
         );
@@ -418,17 +343,10 @@ mod tests {
             std::env::temp_dir(),
             lifecycle.spawner(),
             Some(Arc::clone(&sandbox)),
-            session.clone(),
         );
         let (result_tx, mut result_rx) = mpsc::channel(1);
 
         tools.dispatch(
-            session
-                .session_id
-                .as_ref()
-                .expect("validated SessionRef")
-                .value
-                .clone(),
             "full-chain-request".into(),
             "sandbox_exec".into(),
             r#"{"language":"python","code":"print(21 * 2)"}"#.into(),
@@ -462,22 +380,10 @@ mod tests {
     #[tokio::test]
     async fn sandbox_dispatch_without_client_returns_canonical_error_shape() {
         let lifecycle = LifecycleSupervisor::new();
-        let session = test_session();
-        let tools = ToolRegistry::new(
-            std::env::temp_dir(),
-            lifecycle.spawner(),
-            None,
-            session.clone(),
-        );
+        let tools = ToolRegistry::new(std::env::temp_dir(), lifecycle.spawner(), None);
         let (result_tx, mut result_rx) = mpsc::channel(1);
 
         tools.dispatch(
-            session
-                .session_id
-                .as_ref()
-                .expect("validated SessionRef")
-                .value
-                .clone(),
             "request".into(),
             "sandbox_exec".into(),
             r#"{"language":"python","code":"print(1)"}"#.into(),

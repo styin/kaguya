@@ -41,8 +41,7 @@ pub async fn run(
     let mut lifecycle = LifecycleSupervisor::new();
 
     let instance_lease = instance::load_required(&selection)?;
-    let scope = instance_lease.identity.session_ref()?;
-    let (instance_id, session_id) = instance::validate_session_ref(Some(&scope))?;
+    let scope = instance_lease.identity.scope()?;
     config.files.soul_path = instance_lease.paths.soul.clone();
     config.files.identity_path = instance_lease.paths.persona_identity.clone();
     let clients = config.resolved_clients();
@@ -65,7 +64,7 @@ pub async fn run(
     });
 
     // ── Components ──
-    let history = History::new(config.history.max_recent_turns, &scope);
+    let history = History::new(config.history.max_recent_turns);
     let persona = Persona::load(&config.files.soul_path, &config.files.identity_path).await?;
     let rag_engine = RagEngine::new(&config.rag, &instance_lease.paths.rag_db)?;
     let rag_embedder = rag_engine.embedder.clone();
@@ -80,58 +79,21 @@ pub async fn run(
     // Gateway holds only the client; it acquires an opaque handle lazily on the
     // first tool call. Backend policy and resource lifecycle stay in Supervisor.
     let supervisor_url = config.supervisor.resolved_url();
-    let telemetry = TelemetryClient::new(&supervisor_url, "gateway", scope.clone());
-    let binding_response = reqwest::Client::new()
-        .post(format!(
-            "{}/api/owner/bind",
-            supervisor_url.trim_end_matches('/')
-        ))
-        .json(&serde_json::json!({
-            "instanceId": instance_id,
-            "sessionId": session_id,
-        }))
-        .send()
-        .await;
-    let supervisor_bound = match binding_response {
-        Ok(response) if response.status().is_success() => true,
-        Ok(response) => anyhow::bail!(
-            "Supervisor rejected instance/session binding: {}",
-            response.text().await.unwrap_or_default()
-        ),
-        Err(error) => {
-            warn!(%error, %supervisor_url, "Supervisor instance/session binding unavailable; sandbox disabled");
-            false
-        }
-    };
-    let sandbox = match if supervisor_bound {
-        SandboxClient::connect(&supervisor_url, &scope).await
-    } else {
-        Ok(SandboxClient::disabled(scope.clone()))
-    } {
-        Ok(client) => {
-            info!(
-                backend = client.backend().unwrap_or("unknown"),
-                "connected to Supervisor Sandbox Provider"
-            );
-            Arc::new(client)
-        }
-        Err(error) => {
-            warn!(%error, %supervisor_url, "Supervisor sandbox unavailable; tool disabled");
-            Arc::new(SandboxClient::disabled(scope.clone()))
-        }
-    };
+    let telemetry = TelemetryClient::new(&supervisor_url, "gateway", scope);
+    // A Supervisor serving another instance/session stops startup; an
+    // unreachable one only disables the sandbox tool.
+    let sandbox = Arc::new(SandboxClient::connect(&supervisor_url, scope).await?);
 
     let tools = ToolRegistry::new(
         config.files.workspace_root.clone(),
         task_spawner.clone(),
         Some(Arc::clone(&sandbox)),
-        scope.clone(),
     );
     let reasoner = ReasonerManager::new(
         clients.reasoner_addr.clone(),
         task_spawner.clone(),
         reasoner_connection,
-        scope.clone(),
+        scope,
     );
     let silence = SilenceTimers::new(
         config.silence.soft_prompt_secs,
@@ -144,7 +106,7 @@ pub async fn run(
         clients.talker_addr.clone(),
         task_spawner.clone(),
         talker_connection,
-        scope.clone(),
+        scope,
     )
     .with_telemetry(telemetry.clone());
     let output = OutputManager::new(metadata_out_tx.clone());
@@ -158,7 +120,7 @@ pub async fn run(
 
     // ── gRPC server (RouterControlService only) ──
     let grpc_addr = config.server.grpc_addr.parse()?;
-    let control_svc = ControlServiceImpl::new(control_tx.clone(), scope.clone());
+    let control_svc = ControlServiceImpl::new(control_tx.clone(), scope);
     lifecycle.spawn("grpc_control_server", async move {
         info!(addr = %grpc_addr, "gRPC control server listening");
         if let Err(e) = Server::builder()
@@ -202,7 +164,7 @@ pub async fn run(
                 .run_recovery_loop(persona_recovery, expected_voice_stack, shutdown)
                 .await
             {
-                error!(%error, "voice process rejected instance/session binding");
+                error!(%error, "Talker serves a different instance/session");
                 *failure.write().await = Some(error.to_string());
                 let _ = shutdown_tx.send(ControlSignal::Shutdown).await;
             }
@@ -219,9 +181,10 @@ pub async fn run(
             let audio = listener_audio.clone();
             let p1 = input_tx.p1.clone();
             let p2 = input_tx.p2.clone();
-            let listener_context = scope.clone();
+            let failure = binding_failure.clone();
+            let shutdown_tx = control_tx.clone();
             async move {
-                crate::clients::listener::run_recovery_loop(
+                if let Err(error) = crate::clients::listener::run_recovery_loop(
                     grpc_endpoint,
                     audio_addr,
                     spawner,
@@ -231,10 +194,15 @@ pub async fn run(
                     p1,
                     p2,
                     expected_voice_stack,
-                    listener_context,
+                    scope,
                     shutdown,
                 )
-                .await;
+                .await
+                {
+                    error!(%error, "Listener serves a different instance/session");
+                    *failure.write().await = Some(format!("{error:#}"));
+                    let _ = shutdown_tx.send(ControlSignal::Shutdown).await;
+                }
             }
         });
     }
@@ -243,7 +211,6 @@ pub async fn run(
     #[cfg(feature = "dev-console")]
     {
         let endpoint_state = Arc::new(endpoint::EndpointState {
-            session: scope.clone(),
             control_tx: control_tx.clone(),
             p1_tx: input_tx.p1.clone(),
             metadata_tx: metadata_out_tx,
@@ -251,7 +218,7 @@ pub async fn run(
             listener_audio: listener_audio.clone(),
             runtime_status: endpoint::RuntimeStatusState {
                 lifecycle: lifecycle.clone(),
-                session: scope.clone(),
+                scope,
             },
         });
         let ws_addr = config.server.ws_addr.clone();
@@ -328,8 +295,10 @@ pub async fn run(
                     memory_md: rag_w.export_memory_md().await,
                 };
                 *shared_persona_w.write().await = new_persona.clone();
-                let _ = talker_w.update_persona(new_persona).await;
-                info!("persona pushed to Talker");
+                // update_persona logs its own failure.
+                if talker_w.update_persona(new_persona).await.is_ok() {
+                    info!("persona pushed to Talker");
+                }
             }
         });
     }
@@ -337,7 +306,7 @@ pub async fn run(
     info!("Kaguya Gateway ready");
 
     // ── Event Loop State ──
-    let session = SessionState::new(scope, last_memory_md);
+    let session = SessionState::new(last_memory_md);
     let pipeline = PipelineComponents {
         talker: &talker,
         history: &history,
@@ -363,7 +332,7 @@ pub async fn run(
         &telemetry,
         config.silence.enabled,
     )
-    .await?;
+    .await;
 
     // Release only the opaque sandbox handle. Provider/global teardown is
     // owned by Supervisor and runs after managed processes stop.

@@ -237,9 +237,13 @@ test("portable root may be absent but cannot be an existing regular file", (t) =
   assert.throws(() => resolveRuntimeSelection({ runtimeConfig: config }, {}), /not a directory/);
 });
 
-test("declared bind/endpoint disagreement is retained as a launch error", (t) => {
-  const { config } = fixture(t, runtimeFixture().replace('talker_grpc = "http://127.0.0.1:50053"', 'talker_grpc = "http://127.0.0.1:50054"'));
-  assert.throws(() => consoleLaunchPlan(resolveRuntimeSelection({ runtimeConfig: config }, {}), SESSION, {}), /matching explicit ports/);
+test("declared bind/endpoint disagreement is a launch error that does not echo addresses", (t) => {
+  const secret = "never-print-this";
+  const { config } = fixture(t, runtimeFixture().replace('talker_grpc = "http://127.0.0.1:50053"', `talker_grpc = "http://user:${secret}@127.0.0.1:50054"`));
+  assert.throws(
+    () => consoleLaunchPlan(resolveRuntimeSelection({ runtimeConfig: config }, {}), SESSION, {}),
+    (error) => /matching explicit ports/.test(error.message) && !error.message.includes(secret),
+  );
 });
 
 test("dev wrapper forwards ordinary Vite flags after consuming deployment flags", () => {
@@ -281,7 +285,7 @@ test("Gateway preflight supplies the exact launch pair through an explicit reado
     assert.equal(options.env.KAGUYA_INSTANCE_ID, undefined);
     assert.equal(options.env.KAGUYA_SESSION_ID, undefined);
     return { status: 0, stdout: JSON.stringify({
-      validation_mode: "startup", selection: { runtime_config: path.toNamespacedPath(selected.configPath), profile: "app" },
+      selection: { runtime_config: path.toNamespacedPath(selected.configPath), profile: "app" },
       instance: { instance_id: INSTANCE_ID, default_session_id: SESSION_ID },
     }) };
   };
@@ -295,11 +299,10 @@ test("Gateway preflight supplies the exact launch pair through an explicit reado
 test("launch preflight fails closed before any application process launch", (t) => {
   const { config } = fixture(t);
   const selected = resolveRuntimeSelection({ runtimeConfig: config }, {});
-  const valid = { validation_mode: "startup", selection: { runtime_config: selected.configPath, profile: "app" }, instance: { instance_id: INSTANCE_ID, default_session_id: SESSION_ID } };
+  const valid = { selection: { runtime_config: selected.configPath, profile: "app" }, instance: { instance_id: INSTANCE_ID, default_session_id: SESSION_ID } };
   const reports = [
     { status: 1, stderr: "configuration failed" },
     { status: 0, stdout: "not-json" },
-    { status: 0, stdout: JSON.stringify({ ...valid, validation_mode: "initialization" }) },
     { status: 0, stdout: JSON.stringify({ ...valid, selection: { ...valid.selection, runtime_config: "other" } }) },
     { status: 0, stdout: JSON.stringify({ ...valid, instance: null }) },
     { status: 0, stdout: JSON.stringify({ ...valid, instance: { instance_id: INSTANCE_ID, default_session_id: INSTANCE_ID } }) },

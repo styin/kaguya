@@ -177,7 +177,7 @@ export function resolveLaunchSession(selection, inheritedEnv = process.env, exec
   let report;
   try { report = JSON.parse(result.stdout); }
   catch { throw new Error("Gateway deployment preflight returned invalid JSON"); }
-  if (report.validation_mode !== "startup" || !sameResolvedPath(report.selection?.runtime_config, selection.configPath) ||
+  if (!sameResolvedPath(report.selection?.runtime_config, selection.configPath) ||
       (report.selection?.profile ?? undefined) !== selection.profile) {
     throw new Error("Gateway deployment preflight did not validate the selected deployment");
   }
@@ -411,7 +411,8 @@ function validateBindEndpointPorts(config, label) {
     const bindPort = portOf(bind);
     const endpointPort = portOf(endpoint);
     if (!bindPort || !endpointPort || bindPort !== endpointPort) {
-      throw new Error(`${label}.${name} bind/endpoints require matching explicit ports: bind=${bind}, endpoint=${endpoint}`);
+      // Name the endpoint, never its address: addresses can carry credentials.
+      throw new Error(`${label}.${name} bind/endpoints require matching explicit ports`);
     }
   }
 }

@@ -193,7 +193,7 @@ requirement that all providers use SQLite.
 
 The active RAG database is `kaguya.db` inside the selected instance directory.
 Initialization copies persona templates and starts with an empty memory store;
-rekeying snapshots the selected instance into a new independent instance. [RagStore](../gateway/src/rag/store.rs) creates:
+forking snapshots the selected instance into a new independent instance. [RagStore](../gateway/src/rag/store.rs) creates:
 
 - `memories`: typed conversation/fact/preference/project content, originating user-generation reference and creation timestamp;
 - `memories_fts`: FTS5 index maintained by triggers, using `porter unicode61` (REF-009);
@@ -579,24 +579,28 @@ Current service IPC uses TCP. The protobuf scope is
 message contains a `string value`. Both objects must be present. Validation
 requires canonical, non-nil, distinct UUIDs and equality with the receiver's
 startup scope. Scope is an assertion, not a routing key for multiplexing or
-proof of caller authentication. Hosted authentication/tracing remain deferred.
+proof of caller authentication. Messages that open a request or stream carry
+it; later messages on a stream do not. A mismatch is answered with
+`FAILED_PRECONDITION`, which Gateway treats as fatal. Hosted
+authentication/tracing remain deferred.
 
 | RPC | Current association boundary |
 | --- | --- |
-| Listener `Stream` | First `ListenerInput.init.session`, validated before headers/events; subsequent inputs use `control` |
-| Talker `Converse` | Initial `GenerationStart.session`/`generation_id`, validated before generation; inline `BargeInSignal.session` must agree |
+| Listener `Stream` | `ListenerInput.init.session`, validated before headers/events; Gateway then half-closes the request |
+| Talker `Converse` | Initial `GenerationStart.session`/`generation_id`, validated before generation; inline `BargeInSignal` carries no scope and only the first is acknowledged |
 | Talker `PrefillCache` | `PrefillRequest.session` plus `PromptContext` |
 | Talker `UpdatePersona` | `UpdatePersonaRequest.session` plus cached `PersonaConfig` |
-| Reasoner `Delegate` | `TaskRequest.session`/`task_id`; context updates retain both; callback task IDs must agree |
+| Reasoner `Delegate` | `TaskRequest.session`/`task_id`; context updates retain `task_id`; callback task IDs must agree |
 | Reasoner `Interrupt` | `InterruptRequest.session` and the selected signal; task cancel retains `task_id` |
 | Reasoner `Telemetry` | Scoped `TelemetrySubscribe`; schema exists, subscriber/service remain deferred |
 | Gateway `SendControl` | `ControlRequest.session` plus `ControlSignal`; validate scope first, enqueue STOP/SHUTDOWN to P0, reject approval with `UNIMPLEMENTED` |
 
 Gateway queues the initial Listener and Converse messages before awaiting
 response headers. Listener accepts `ListenerInput.init` before Gateway opens the
-raw audio connection. Later Listener input retains a typed control extension
-point: reset currently terminates the RPC with `UNIMPLEMENTED`, while future
-pause/reconfiguration variants require defined semantics. Repeated init and
+raw audio connection. Gateway sends no Listener controls; the typed control
+extension point stays declared, and reset terminates the RPC with
+`UNIMPLEMENTED`, while future pause/reconfiguration variants require defined
+semantics. Repeated init and
 empty input/control messages are invalid; request half-close alone does not
 close the event subscription.
 
@@ -633,31 +637,32 @@ and instance/session multiplexing remain future work.
 | Persona files | tokio::fs plus notify watcher |
 | Built-in RAG | rusqlite with bundled SQLite/FTS5; optional HTTP embedder |
 | Configuration | Selected runtime root/profile chooses Gateway settings, explicit portable storage, instance-local manifest, and process topology; shared deployment selection precedes component assembly |
-| Runtime state | Fixed `SessionRef`, in-memory history and `SessionState`, active Reasoner requests and connections; RAG SQLite persists independently |
+| Runtime state | One `SessionScope`, in-memory history and `SessionState`, active Reasoner requests and connections; RAG SQLite persists independently |
 | Provider assembly | app.rs constructs components; main.rs initializes runtime/logging; pipeline::run handles the event loop |
 | Process/sandbox lifecycle | Supervisor; not Gateway |
 
 R1a's [deployment/instance contract](r1a-identity.md) defines selection
-precedence, path bases, print-only init/rekey handoff, validation, and redacted
-diagnostics. Gateway's `instance.rs` owns `InstanceIdentity`, `InstanceLease`,
-and instance-local persona/RAG data; it does not construct gRPC requests or
-audio headers. Gateway and Supervisor each use their generated
-`proto::SessionRef` internally, including its named ID messages. Component-local
-helpers construct and validate the reference at startup and request boundaries;
-the generated type itself does not guarantee valid IDs. Application assembly
-derives the scope once and requires it in production client constructors.
-`SessionState` and History receive the same representation. Supervisor stores
-it in binding state and allocation ownership records, while its existing
-methods enforce matching scope and its HTTP adapters retain scalar ID fields.
-The shared deployment resolver and Cargo package layout remain unchanged for R1d.
+precedence, path bases, print-only init/fork handoff, the init dry run,
+validation, and redacted diagnostics. Gateway's `instance.rs` owns
+`InstanceIdentity`, `InstanceLease`, and instance-local persona/RAG data; it does
+not construct gRPC requests or audio headers. Gateway and Supervisor each hold
+one validated `SessionScope` (`shared/session_scope.rs`) and convert it to the
+generated `SessionRef` only on the wire. Application assembly derives the scope
+once from the manifest and passes it to the clients that send scoped messages
+(Talker, Listener, Reasoner, sandbox, telemetry) and to the control service
+that checks incoming ones. Internal events, tools, history and `SessionState`
+carry no scope. Supervisor receives its scope at construction, reports it on
+`/api/sandbox/status` for Gateway's fatal startup comparison, and checks the
+scalar ID fields of each sandbox and telemetry HTTP request. The shared
+deployment resolver and Cargo package layout remain unchanged for R1d.
 
 Supervisor and Gateway resolve the selected manifest before runtime assembly.
 The launcher supplies validated IDs to voice; direct voice startup requires
 both environment selectors too. Voice validates them before loading inference
 dependencies or opening ports and shares an immutable `InstanceSessionBinding`
 across Talker, Listener gRPC, and audio ingress. No lazy first-caller binding or
-instance/session-level multiplexing is implemented. Callbacks carry originating
-context. No physical HostId is introduced.
+instance/session-level multiplexing is implemented. No physical HostId is
+introduced.
 Configuration containing shell launch instructions is trusted executable
 input. R1d completes broader endpoint/environment/reader consistency and
 structured launch descriptors; validation currently covers the implemented

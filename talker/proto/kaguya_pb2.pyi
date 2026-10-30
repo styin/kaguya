@@ -365,20 +365,15 @@ Global___TalkerInput: _TypeAlias = TalkerInput  # noqa: Y015
 
 @_typing.final
 class BargeInSignal(_message.Message):
+    """Scope is set by the stream's GenerationStart. Talker acknowledges only the
+    first barge-in of a Converse; later ones are ignored.
+    """
+
     DESCRIPTOR: _descriptor.Descriptor
 
-    SESSION_FIELD_NUMBER: _builtins.int
-    @_builtins.property
-    def session(self) -> Global___SessionRef: ...
     def __init__(
         self,
-        *,
-        session: Global___SessionRef | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
-    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___BargeInSignal: _TypeAlias = BargeInSignal  # noqa: Y015
 
@@ -965,26 +960,22 @@ Global___TaskRequest: _TypeAlias = TaskRequest  # noqa: Y015
 
 @_typing.final
 class TaskContext(_message.Message):
+    """Scope is set by the stream's initial TaskRequest."""
+
     DESCRIPTOR: _descriptor.Descriptor
 
     TASK_ID_FIELD_NUMBER: _builtins.int
     CONTEXT_FIELD_NUMBER: _builtins.int
-    SESSION_FIELD_NUMBER: _builtins.int
     task_id: _builtins.str
     context: _builtins.str
     """additional context during execution"""
-    @_builtins.property
-    def session(self) -> Global___SessionRef: ...
     def __init__(
         self,
         *,
         task_id: _builtins.str = ...,
         context: _builtins.str = ...,
-        session: Global___SessionRef | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session"]  # noqa: Y015
-    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "session", b"session", "task_id", b"task_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["context", b"context", "task_id", b"task_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TaskContext: _TypeAlias = TaskContext  # noqa: Y015

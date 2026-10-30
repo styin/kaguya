@@ -158,19 +158,8 @@ impl<'a> ActionExecutor<'a> {
                 tool_name,
                 args_json,
             } => {
-                self.tools.dispatch(
-                    self.state
-                        .scope
-                        .session_id
-                        .as_ref()
-                        .expect("validated SessionRef")
-                        .value
-                        .clone(),
-                    request_id,
-                    tool_name,
-                    args_json,
-                    self.p3_tx.clone(),
-                );
+                self.tools
+                    .dispatch(request_id, tool_name, args_json, self.p3_tx.clone());
             }
 
             PipelineAction::StartReasoner {

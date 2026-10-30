@@ -122,13 +122,8 @@ impl RuntimeConfig {
         profile: Option<String>,
     ) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let topology =
-            toml::from_str::<RuntimeTopologyFile>(&content).map_err(|error: toml::de::Error| {
-                anyhow::anyhow!(
-                    "invalid runtime topology at byte {:?}",
-                    error.span().map(|span| span.start)
-                )
-            })?;
+        let topology = toml::from_str::<RuntimeTopologyFile>(&content)
+            .map_err(|error| crate::deployment::toml_error("runtime topology", &content, &error))?;
         Self::from_topology(topology, profile)
     }
 
@@ -268,11 +263,11 @@ impl GatewayConfig {
     pub fn load(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let path = crate::deployment::resolve_path(&std::env::current_dir()?, path.as_ref())?;
         let content = std::fs::read_to_string(&path)?;
-        let mut config = toml::from_str::<Self>(&content).map_err(|error: toml::de::Error| {
-            anyhow::anyhow!(
-                "invalid Gateway settings {} at byte {:?}",
-                path.display(),
-                error.span().map(|span| span.start)
+        let mut config = toml::from_str::<Self>(&content).map_err(|error| {
+            crate::deployment::toml_error(
+                format_args!("Gateway settings {}", path.display()),
+                &content,
+                &error,
             )
         })?;
         anyhow::ensure!(

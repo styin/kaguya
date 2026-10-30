@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::talker_service_client::TalkerServiceClient;
-use crate::proto::SessionRef;
+use crate::session_scope::SessionScope;
 use crate::telemetry::TelemetryClient;
 
 fn trigger_name(trigger: Option<&proto::generation_start::Trigger>) -> &'static str {
@@ -48,7 +48,7 @@ pub struct TalkerClient {
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
     telemetry: Option<TelemetryClient>,
-    session: SessionRef,
+    scope: SessionScope,
 }
 
 impl TalkerClient {
@@ -56,14 +56,14 @@ impl TalkerClient {
         endpoint: String,
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
-        session: SessionRef,
+        scope: SessionScope,
     ) -> Self {
         Self::with_reconnect_policy(
             endpoint,
             tasks,
             connection,
             ReconnectPolicy::default(),
-            session,
+            scope,
         )
     }
 
@@ -72,7 +72,7 @@ impl TalkerClient {
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
-        session: SessionRef,
+        scope: SessionScope,
     ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(None)),
@@ -82,7 +82,7 @@ impl TalkerClient {
             connection,
             reconnect,
             telemetry: None,
-            session,
+            scope,
         }
     }
 
@@ -131,18 +131,11 @@ impl TalkerClient {
     /// finds the live sender.
     pub async fn dispatch(
         &self,
-        ctx: proto::GenerationStart,
+        mut ctx: proto::GenerationStart,
         output_tx: mpsc::Sender<proto::TalkerOutput>,
     ) -> CancellationToken {
+        ctx.session = Some(self.scope.to_proto());
         let token = CancellationToken::new();
-        match crate::instance::validate_session_ref(ctx.session.as_ref()) {
-            Ok(_) if ctx.session.as_ref() == Some(&self.session) => {}
-            result => {
-                error!(error = ?result.err(), "rejecting Talker dispatch with a different or invalid session");
-                token.cancel();
-                return token;
-            }
-        }
         let child = token.child_token();
         let inner = Arc::clone(&self.inner);
         let stream_tx_arc = Arc::clone(&self.stream_tx);
@@ -150,13 +143,6 @@ impl TalkerClient {
         let connection = self.connection.clone();
         let reconnect = self.reconnect;
         let telemetry = self.telemetry.clone();
-        let session_id = self
-            .session
-            .session_id
-            .as_ref()
-            .expect("validated SessionRef")
-            .value
-            .clone();
         let generation_id = ctx.generation_id.clone();
         let dispatch_started = std::time::Instant::now();
 
@@ -166,7 +152,6 @@ impl TalkerClient {
         if let Some(telemetry) = &telemetry {
             telemetry.emit(
                 "talker.dispatch.started",
-                Some(session_id.clone()),
                 Some(generation_id.clone()),
                 None,
                 serde_json::json!({
@@ -240,7 +225,6 @@ impl TalkerClient {
                                         first_output_sent = true;
                                         telemetry.emit(
                                             "talker.first_output",
-                                            Some(session_id.clone()),
                                             Some(generation_id.clone()),
                                             None,
                                             serde_json::json!({
@@ -257,7 +241,6 @@ impl TalkerClient {
                                         first_sentence_sent = true;
                                         telemetry.emit(
                                             "talker.first_sentence",
-                                            Some(session_id.clone()),
                                             Some(generation_id.clone()),
                                             None,
                                             serde_json::json!({
@@ -344,9 +327,7 @@ impl TalkerClient {
         if let Some(tx) = guard.as_ref() {
             let msg = proto::TalkerInput {
                 payload: Some(proto::talker_input::Payload::BargeIn(
-                    proto::BargeInSignal {
-                        session: Some(self.session.clone()),
-                    },
+                    proto::BargeInSignal {},
                 )),
             };
             if tx.send(msg).await.is_err() {
@@ -366,7 +347,7 @@ impl TalkerClient {
         };
         debug!("→ PrefillCache");
         let payload = proto::PrefillRequest {
-            session: Some(self.session.clone()),
+            session: Some(self.scope.to_proto()),
             prompt_context: Some(context),
         };
         let request = tonic::Request::new(payload);
@@ -408,12 +389,7 @@ impl TalkerClient {
                     let persona_snapshot = persona.read().await.clone();
                     match self.update_persona(persona_snapshot).await {
                         Ok(()) => break,
-                        Err(error)
-                            if matches!(
-                                error.code(),
-                                tonic::Code::FailedPrecondition | tonic::Code::InvalidArgument
-                            ) =>
-                        {
+                        Err(error) if error.code() == tonic::Code::FailedPrecondition => {
                             return Err(error)
                         }
                         Err(_) => {}
@@ -461,7 +437,7 @@ impl TalkerClient {
             "→ UpdatePersona"
         );
         let request = tonic::Request::new(proto::UpdatePersonaRequest {
-            session: Some(self.session.clone()),
+            session: Some(self.scope.to_proto()),
             persona: Some(config),
         });
         if let Err(e) = client.update_persona(request).await {
@@ -482,15 +458,12 @@ mod tests {
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
 
-    fn test_session() -> SessionRef {
-        SessionRef {
-            instance_id: Some(proto::InstanceId {
-                value: "00000000-0000-4000-8000-000000000001".into(),
-            }),
-            session_id: Some(proto::SessionId {
-                value: "00000000-0000-4000-8000-000000000002".into(),
-            }),
-        }
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        )
+        .unwrap()
     }
 
     fn fast_policy() -> ReconnectPolicy {
@@ -511,7 +484,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
-            test_session(),
+            test_scope(),
         );
 
         talker.try_connect().await;
@@ -531,7 +504,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
-            test_session(),
+            test_scope(),
         );
 
         talker.try_connect().await;
@@ -554,7 +527,8 @@ mod tests {
 
     struct StubTalker;
 
-    struct RejectingTalker;
+    /// Answers every RPC with one status code.
+    struct RejectingTalker(tonic::Code);
 
     #[tonic::async_trait]
     impl TalkerServiceTrait for RejectingTalker {
@@ -564,27 +538,21 @@ mod tests {
             &self,
             _req: tonic::Request<tonic::Streaming<proto::TalkerInput>>,
         ) -> Result<tonic::Response<Self::ConverseStream>, tonic::Status> {
-            Err(tonic::Status::failed_precondition(
-                "instance/session binding mismatch",
-            ))
+            Err(tonic::Status::new(self.0, "rejected"))
         }
 
         async fn prefill_cache(
             &self,
             _req: tonic::Request<proto::PrefillRequest>,
         ) -> Result<tonic::Response<proto::PrefillAck>, tonic::Status> {
-            Err(tonic::Status::failed_precondition(
-                "instance/session binding mismatch",
-            ))
+            Err(tonic::Status::new(self.0, "rejected"))
         }
 
         async fn update_persona(
             &self,
             _req: tonic::Request<proto::UpdatePersonaRequest>,
         ) -> Result<tonic::Response<proto::PersonaAck>, tonic::Status> {
-            Err(tonic::Status::failed_precondition(
-                "instance/session binding mismatch",
-            ))
+            Err(tonic::Status::new(self.0, "rejected"))
         }
     }
 
@@ -629,28 +597,26 @@ mod tests {
         shutdown
     }
 
-    #[tokio::test]
-    async fn recovery_stops_on_voice_binding_rejection() {
+    async fn run_recovery_against(code: tonic::Code) -> Option<Result<(), tonic::Status>> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(TalkerServiceServer::new(RejectingTalker))
+                .add_service(TalkerServiceServer::new(RejectingTalker(code)))
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await
                 .unwrap();
         });
         let lifecycle = LifecycleSupervisor::new();
-        let connection = lifecycle.register_connection("talker");
         let client = TalkerClient::with_reconnect_policy(
             format!("http://{address}"),
             lifecycle.spawner(),
-            connection,
+            lifecycle.register_connection("talker"),
             fast_policy(),
-            test_session(),
+            test_scope(),
         );
         let result = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(3),
             client.run_recovery_loop(
                 Arc::new(RwLock::new(proto::PersonaConfig::default())),
                 true,
@@ -658,9 +624,25 @@ mod tests {
             ),
         )
         .await
-        .unwrap();
-        assert_eq!(result.unwrap_err().code(), tonic::Code::FailedPrecondition);
+        .ok();
         server.abort();
+        result
+    }
+
+    #[tokio::test]
+    async fn recovery_stops_only_on_scope_mismatch() {
+        let mismatch = run_recovery_against(tonic::Code::FailedPrecondition).await;
+        assert_eq!(
+            mismatch
+                .expect("mismatch stops recovery")
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        // A malformed request is a Gateway bug, not a binding failure: keep retrying.
+        assert!(run_recovery_against(tonic::Code::InvalidArgument)
+            .await
+            .is_none());
     }
 
     /// Bind to `addr`, retrying for up to 2s if the port is still in
@@ -706,7 +688,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
-            test_session(),
+            test_scope(),
         );
 
         let persona = Arc::new(RwLock::new(proto::PersonaConfig::default()));
@@ -737,9 +719,8 @@ mod tests {
         shutdown.cancel();
     }
 
-    fn start_for(session: &SessionRef) -> proto::GenerationStart {
+    fn start_for() -> proto::GenerationStart {
         crate::core::context::assemble_from_data(
-            session,
             "generation-1",
             "hello",
             vec![],
@@ -750,59 +731,9 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn invalid_or_mismatched_dispatch_does_not_replace_active_stream() {
-        let lifecycle = LifecycleSupervisor::new();
-        let connection = lifecycle.register_connection("talker");
-        let client = TalkerClient::with_reconnect_policy(
-            "not a valid uri".into(),
-            lifecycle.spawner(),
-            connection.clone(),
-            fast_policy(),
-            test_session(),
-        );
-        let (active_tx, mut active_rx) = mpsc::channel(2);
-        *client.stream_tx.lock().await = Some(active_tx.clone());
-        let mut other = test_session();
-        other.session_id = Some(proto::SessionId {
-            value: "00000000-0000-4000-8000-000000000003".into(),
-        });
-        let mut malformed = test_session();
-        malformed.session_id = Some(proto::SessionId {
-            value: "not-a-uuid".into(),
-        });
-        for requested in [Some(other), None, Some(malformed)] {
-            let mut start = start_for(&test_session());
-            start.session = requested;
-            let (output_tx, _output_rx) = mpsc::channel(2);
-            let token = client.dispatch(start, output_tx).await;
-            assert!(token.is_cancelled());
-            assert!(client
-                .stream_tx
-                .lock()
-                .await
-                .as_ref()
-                .unwrap()
-                .same_channel(&active_tx));
-            assert!(matches!(
-                active_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
-        }
-        assert_eq!(connection.readiness(), Readiness::Starting);
-        // The still-active sender remains usable, and inline control carries
-        // the client's configured scope rather than the rejected caller scope.
-        client.barge_in().await;
-        let message = active_rx.recv().await.unwrap();
-        let Some(proto::talker_input::Payload::BargeIn(signal)) = message.payload else {
-            panic!("expected inline barge-in");
-        };
-        assert_eq!(signal.session, Some(test_session()));
-    }
-
     struct HandshakeTalker {
         mismatch: Option<(u32, &'static str)>,
-        received: mpsc::UnboundedSender<(SessionRef, String)>,
+        received: mpsc::UnboundedSender<(SessionScope, String)>,
     }
 
     #[tonic::async_trait]
@@ -824,10 +755,9 @@ mod tests {
             let Some(proto::talker_input::Payload::Start(start)) = first.payload else {
                 return Err(tonic::Status::invalid_argument("start must be first"));
             };
-            crate::instance::validate_session_ref(start.session.as_ref())
+            let scope = SessionScope::from_proto(start.session.as_ref())
                 .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
-            let scope = start.session.clone().expect("validated SessionRef");
-            assert_eq!(scope, test_session());
+            assert_eq!(scope, test_scope());
             self.received
                 .send((scope, start.generation_id.clone()))
                 .unwrap();
@@ -881,7 +811,7 @@ mod tests {
             &self,
             req: tonic::Request<proto::PrefillRequest>,
         ) -> Result<tonic::Response<proto::PrefillAck>, tonic::Status> {
-            assert_eq!(req.get_ref().session, Some(test_session()));
+            assert_eq!(req.get_ref().session, Some(test_scope().to_proto()));
             assert!(req.get_ref().prompt_context.is_some());
             Ok(tonic::Response::new(proto::PrefillAck {}))
         }
@@ -890,7 +820,7 @@ mod tests {
             &self,
             req: tonic::Request<proto::UpdatePersonaRequest>,
         ) -> Result<tonic::Response<proto::PersonaAck>, tonic::Status> {
-            assert_eq!(req.get_ref().session, Some(test_session()));
+            assert_eq!(req.get_ref().session, Some(test_scope().to_proto()));
             assert!(req.get_ref().persona.is_some());
             Ok(tonic::Response::new(proto::PersonaAck {}))
         }
@@ -900,7 +830,7 @@ mod tests {
         mismatch: Option<(u32, &'static str)>,
     ) -> (
         String,
-        mpsc::UnboundedReceiver<(SessionRef, String)>,
+        mpsc::UnboundedReceiver<(SessionScope, String)>,
         CancellationToken,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -931,7 +861,7 @@ mod tests {
             lifecycle.spawner(),
             connection.clone(),
             fast_policy(),
-            test_session(),
+            test_scope(),
         );
         assert!(client.try_connect().await);
         assert_eq!(connection.readiness(), Readiness::Starting);
@@ -942,12 +872,12 @@ mod tests {
         assert_eq!(connection.readiness(), Readiness::Ready);
         client.prefill_cache(proto::PromptContext::default()).await;
         let (tx, mut rx) = mpsc::channel(4);
-        client.dispatch(start_for(&test_session()), tx).await;
+        client.dispatch(start_for(), tx).await;
         let observed = tokio::time::timeout(Duration::from_secs(3), received.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(observed, (test_session(), "generation-1".into()));
+        assert_eq!(observed, (test_scope(), "generation-1".into()));
         let mut outputs = Vec::new();
         while let Some(event) = tokio::time::timeout(Duration::from_secs(3), rx.recv())
             .await
@@ -976,10 +906,10 @@ mod tests {
                 lifecycle.spawner(),
                 connection.clone(),
                 fast_policy(),
-                test_session(),
+                test_scope(),
             );
             let (tx, mut rx) = mpsc::channel(4);
-            client.dispatch(start_for(&test_session()), tx).await;
+            client.dispatch(start_for(), tx).await;
             let mut count = 0;
             while tokio::time::timeout(Duration::from_secs(3), rx.recv())
                 .await

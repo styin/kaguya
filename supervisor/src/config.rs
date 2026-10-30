@@ -157,11 +157,11 @@ impl RuntimeConfig {
 
     /// Pin child startup scope after read-only manifest validation. These values
     /// override both inherited environment and per-process overrides.
-    pub fn set_instance_session(
-        &mut self,
-        binding: &crate::proto::SessionRef,
-    ) -> anyhow::Result<()> {
-        let (instance_id, session_id) = crate::app::validate_session_ref(Some(binding))?;
+    pub fn set_instance_session(&mut self, scope: crate::session_scope::SessionScope) {
+        let (instance_id, session_id) = (
+            scope.instance_id().to_string(),
+            scope.session_id().to_string(),
+        );
         for process in self.processes.values_mut() {
             process.env.retain(|key, _| {
                 !key.eq_ignore_ascii_case("KAGUYA_INSTANCE_ID")
@@ -169,12 +169,11 @@ impl RuntimeConfig {
             });
             process
                 .env
-                .insert("KAGUYA_INSTANCE_ID".into(), instance_id.to_owned());
+                .insert("KAGUYA_INSTANCE_ID".into(), instance_id.clone());
             process
                 .env
-                .insert("KAGUYA_SESSION_ID".into(), session_id.to_owned());
+                .insert("KAGUYA_SESSION_ID".into(), session_id.clone());
         }
-        Ok(())
     }
 
     pub fn gateway_grpc_endpoint(&self) -> Option<&str> {
@@ -188,10 +187,7 @@ impl RuntimeConfig {
 impl RuntimeConfigFile {
     fn parse(content: &str, profile_override: Option<String>) -> anyhow::Result<RuntimeConfig> {
         let file = toml::from_str::<RuntimeConfigFile>(content).map_err(|error| {
-            anyhow::anyhow!(
-                "invalid Supervisor runtime topology at byte {:?}",
-                error.span().map(|span| span.start)
-            )
+            crate::deployment::toml_error("Supervisor runtime topology", content, &error)
         })?;
         let selected_profile = profile_override.or(file.profile.clone());
         let mut processes = if let Some(profile) = selected_profile.as_deref() {
@@ -841,16 +837,13 @@ mod tests {
             None,
         )
         .unwrap();
-        let binding = crate::proto::SessionRef {
-            instance_id: Some(crate::proto::InstanceId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-            session_id: Some(crate::proto::SessionId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-        };
-        let (instance_id, session_id) = crate::app::validate_session_ref(Some(&binding)).unwrap();
-        config.set_instance_session(&binding).unwrap();
+        let (instance_id, session_id) = (
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        config.set_instance_session(
+            crate::session_scope::SessionScope::parse(&instance_id, &session_id).unwrap(),
+        );
         for process in config.processes.values() {
             let env = process.resolved_env();
             assert_eq!(env["KAGUYA_INSTANCE_ID"], instance_id);
@@ -861,18 +854,6 @@ mod tests {
         assert_eq!(
             config.processes["gateway"].resolved_env()["CUSTOM"],
             "retained"
-        );
-        let before = config.clone();
-        let invalid = crate::proto::SessionRef {
-            instance_id: Some(crate::proto::InstanceId {
-                value: "invalid".into(),
-            }),
-            ..binding
-        };
-        assert!(config.set_instance_session(&invalid).is_err());
-        assert_eq!(
-            config, before,
-            "invalid bootstrap cannot partially overwrite child scope"
         );
     }
 }

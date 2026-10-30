@@ -373,9 +373,7 @@ async def test_talker_rejects_missing_misordered_or_duplicate_start(
 
     async def inputs():
         if mode == "barge-in-first":
-            yield kaguya_pb2.TalkerInput(
-                barge_in=kaguya_pb2.BargeInSignal(session=session_ref)
-            )
+            yield kaguya_pb2.TalkerInput(barge_in=kaguya_pb2.BargeInSignal())
         elif mode == "duplicate-start":
             yield kaguya_pb2.TalkerInput(start=_generation(session_ref))
             yield kaguya_pb2.TalkerInput(start=_generation(session_ref))

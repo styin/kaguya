@@ -12,7 +12,7 @@ use crate::core::types::*;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
 use crate::proto;
 use crate::proto::reasoner_service_client::ReasonerServiceClient;
-use crate::proto::SessionRef;
+use crate::session_scope::SessionScope;
 
 struct Agent {
     task_id: String,
@@ -27,7 +27,7 @@ pub struct ReasonerManager {
     tasks: TaskSpawner,
     connection: ManagedConnectionHandle,
     reconnect: ReconnectPolicy,
-    session: SessionRef,
+    scope: SessionScope,
 }
 
 impl ReasonerManager {
@@ -35,14 +35,14 @@ impl ReasonerManager {
         endpoint: String,
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
-        session: SessionRef,
+        scope: SessionScope,
     ) -> Self {
         Self::with_reconnect_policy(
             endpoint,
             tasks,
             connection,
             ReconnectPolicy::default(),
-            session,
+            scope,
         )
     }
 
@@ -51,7 +51,7 @@ impl ReasonerManager {
         tasks: TaskSpawner,
         connection: ManagedConnectionHandle,
         reconnect: ReconnectPolicy,
-        session: SessionRef,
+        scope: SessionScope,
     ) -> Self {
         Self {
             agents: Arc::new(RwLock::new(HashMap::new())),
@@ -60,7 +60,7 @@ impl ReasonerManager {
             tasks,
             connection,
             reconnect,
-            session,
+            scope,
         }
     }
 
@@ -70,14 +70,6 @@ impl ReasonerManager {
         description: String,
         p3_tx: mpsc::Sender<InputEvent>,
     ) {
-        let (instance_id, session_id) =
-            match crate::instance::validate_session_ref(Some(&self.session)) {
-                Ok((instance_id, session_id)) => (instance_id.to_owned(), session_id.to_owned()),
-                Err(error) => {
-                    warn!(%error, "rejecting Reasoner task with invalid configured scope");
-                    return;
-                }
-            };
         let cancel = CancellationToken::new();
         let child = cancel.child_token();
 
@@ -96,7 +88,7 @@ impl ReasonerManager {
         let tid = task_id.clone();
         let connection = self.connection.clone();
         let reconnect = self.reconnect;
-        let session = self.session.clone();
+        let scope = self.scope;
 
         self.tasks
             .spawn(format!("reasoner_task:{tid}"), async move {
@@ -144,7 +136,7 @@ impl ReasonerManager {
                     .send(proto::DelegateInput {
                         payload: Some(proto::delegate_input::Payload::StartTask(
                             proto::TaskRequest {
-                                session: Some(session.clone()),
+                                session: Some(scope.to_proto()),
                                 task_id: tid.clone(),
                                 description: description.clone(),
                                 metadata: HashMap::new(),
@@ -172,7 +164,7 @@ impl ReasonerManager {
                                     info!(task_id = %tid, "Reasoner cancelled");
                                     // Send Interrupt
                                     let interrupt = proto::InterruptRequest {
-                                        session: Some(session.clone()),
+                                        session: Some(scope.to_proto()),
                                         signal: Some(proto::interrupt_request::Signal::Cancel(
                                             proto::TaskCancel { task_id: tid.clone() }
                                         )),
@@ -186,7 +178,6 @@ impl ReasonerManager {
                                             if event.task_id != tid {
                                                 connection.set_readiness(Readiness::Degraded);
                                                 let _ = p3_tx.send(InputEvent::ReasonerError {
-                                                    instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                     task_id: tid.clone(),
                                                     message: "Reasoner response task differs from its stream".into(),
                                                     code: -1,
@@ -199,21 +190,18 @@ impl ReasonerManager {
                                                 }
                                                 Some(proto::delegate_output::Event::Step(s)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
-                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         description: s.description,
                                                     }).await;
                                                 }
                                                 Some(proto::delegate_output::Event::Output(o)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerStep {
-                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         description: format!("[output] {}", o.content),
                                                     }).await;
                                                 }
                                                 Some(proto::delegate_output::Event::Completed(c)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerCompleted {
-                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         summary: c.summary,
                                                     }).await;
@@ -221,7 +209,6 @@ impl ReasonerManager {
                                                 }
                                                 Some(proto::delegate_output::Event::Error(e)) => {
                                                     let _ = p3_tx.send(InputEvent::ReasonerError {
-                                                        instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                         task_id: tid.clone(),
                                                         message: e.message,
                                                         code: e.code,
@@ -234,7 +221,6 @@ impl ReasonerManager {
                                         Ok(None) => {
                                             connection.set_readiness(Readiness::Degraded);
                                             let _ = p3_tx.send(InputEvent::ReasonerError {
-                                                instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                 task_id: tid.clone(),
                                                 message: "Reasoner stream ended without a terminal result".into(),
                                                 code: -1,
@@ -245,7 +231,6 @@ impl ReasonerManager {
                                             connection.set_readiness(Readiness::Degraded);
                                             error!("Reasoner stream error: {e}");
                                             let _ = p3_tx.send(InputEvent::ReasonerError {
-                                                instance_id: instance_id.clone(), session_id: session_id.clone(),
                                                 task_id: tid.clone(), message: e.to_string(), code: -1,
                                             }).await;
                                             break;
@@ -260,7 +245,6 @@ impl ReasonerManager {
                         error!("Delegate failed: {e}");
                         let _ = p3_tx
                             .send(InputEvent::ReasonerError {
-                                instance_id: instance_id.clone(), session_id: session_id.clone(),
                                 task_id: tid.clone(),
                                 message: e.to_string(),
                                 code: -1,
@@ -272,8 +256,6 @@ impl ReasonerManager {
                 connection.set_readiness(Readiness::Degraded);
                 warn!(task_id = %tid, "Reasoner unavailable after connection attempts");
                 let _ = p3_tx.send(InputEvent::ReasonerError {
-                    instance_id,
-                    session_id,
                     task_id: tid.clone(),
                     message: "Reasoner unavailable after connection attempts".into(),
                     code: -1,
@@ -359,6 +341,14 @@ mod tests {
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
 
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn unavailable_reasoner_reports_failure_without_simulated_progress_or_success() {
         let lifecycle = LifecycleSupervisor::new();
@@ -373,14 +363,7 @@ mod tests {
                 Duration::from_millis(1),
                 Duration::from_millis(1),
             ),
-            SessionRef {
-                instance_id: Some(crate::proto::InstanceId {
-                    value: uuid::Uuid::new_v4().to_string(),
-                }),
-                session_id: Some(crate::proto::SessionId {
-                    value: uuid::Uuid::new_v4().to_string(),
-                }),
-            },
+            test_scope(),
         );
         let (p3_tx, mut p3_rx) = mpsc::channel(4);
 
@@ -404,7 +387,7 @@ mod tests {
     }
 
     struct RecordingReasoner {
-        calls: mpsc::UnboundedSender<(String, SessionRef, String)>,
+        calls: mpsc::UnboundedSender<(String, SessionScope, String)>,
         response_task_id: Option<String>,
         close_after_step: bool,
         pending_headers: Option<Arc<tokio::sync::Notify>>,
@@ -417,14 +400,7 @@ mod tests {
             "not a valid uri".into(),
             lifecycle.spawner(),
             lifecycle.register_connection("reasoner"),
-            SessionRef {
-                instance_id: Some(proto::InstanceId {
-                    value: uuid::Uuid::new_v4().to_string(),
-                }),
-                session_id: Some(proto::SessionId {
-                    value: uuid::Uuid::new_v4().to_string(),
-                }),
-            },
+            test_scope(),
         );
         let (tx, mut rx) = mpsc::channel(2);
         reasoner
@@ -453,9 +429,8 @@ mod tests {
                     "task must start the stream",
                 ));
             };
-            crate::instance::validate_session_ref(task.session.as_ref())
+            let session = SessionScope::from_proto(task.session.as_ref())
                 .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
-            let session = task.session.unwrap();
             self.calls
                 .send(("delegate".into(), session, task.task_id.clone()))
                 .unwrap();
@@ -489,9 +464,8 @@ mod tests {
             request: tonic::Request<proto::InterruptRequest>,
         ) -> Result<tonic::Response<proto::InterruptAck>, tonic::Status> {
             let request = request.into_inner();
-            crate::instance::validate_session_ref(request.session.as_ref())
+            let session = SessionScope::from_proto(request.session.as_ref())
                 .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
-            let session = request.session.unwrap();
             let Some(proto::interrupt_request::Signal::Cancel(cancel)) = request.signal else {
                 return Err(tonic::Status::invalid_argument(
                     "expected task cancellation",
@@ -534,19 +508,12 @@ mod tests {
                 .unwrap();
         });
         let lifecycle = LifecycleSupervisor::new();
-        let session = SessionRef {
-            instance_id: Some(crate::proto::InstanceId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-            session_id: Some(crate::proto::SessionId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-        };
+        let session = test_scope();
         let reasoner = ReasonerManager::new(
             format!("http://{addr}"),
             lifecycle.spawner(),
             lifecycle.register_connection("reasoner"),
-            session.clone(),
+            session,
         );
         let (p3_tx, mut p3_rx) = mpsc::channel(4);
         reasoner
@@ -556,43 +523,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            started,
-            ("delegate".into(), session.clone(), "task-1".into())
-        );
+        assert_eq!(started, ("delegate".into(), session, "task-1".into()));
         let event = tokio::time::timeout(Duration::from_secs(3), p3_rx.recv())
             .await
             .unwrap()
             .unwrap();
-        match event {
-            InputEvent::ReasonerStep {
-                instance_id,
-                session_id,
-                task_id,
-                ..
-            } => {
-                assert_eq!(
-                    instance_id,
-                    session
-                        .instance_id
-                        .as_ref()
-                        .expect("validated SessionRef")
-                        .value
-                        .as_str()
-                );
-                assert_eq!(
-                    session_id,
-                    session
-                        .session_id
-                        .as_ref()
-                        .expect("validated SessionRef")
-                        .value
-                        .as_str()
-                );
-                assert_eq!(task_id, "task-1");
-            }
-            _ => panic!("expected scoped Reasoner progress callback"),
-        }
+        assert!(
+            matches!(event, InputEvent::ReasonerStep { task_id, .. } if task_id == "task-1"),
+            "expected Reasoner progress for the delegated task"
+        );
         reasoner.cancel_all().await;
         let cancelled = tokio::time::timeout(Duration::from_secs(3), calls_rx.recv())
             .await
@@ -633,14 +572,7 @@ mod tests {
                     .unwrap();
             });
             let lifecycle = LifecycleSupervisor::new();
-            let session = SessionRef {
-                instance_id: Some(proto::InstanceId {
-                    value: uuid::Uuid::new_v4().to_string(),
-                }),
-                session_id: Some(proto::SessionId {
-                    value: uuid::Uuid::new_v4().to_string(),
-                }),
-            };
+            let session = test_scope();
             let reasoner = ReasonerManager::new(
                 format!("http://{addr}"),
                 lifecycle.spawner(),

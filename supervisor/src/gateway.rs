@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use crate::proto;
 use crate::proto::router_control_service_client::RouterControlServiceClient;
+use crate::session_scope::SessionScope;
 
 pub async fn request_gateway_shutdown(
     endpoint: &str,
-    session: &proto::SessionRef,
+    scope: SessionScope,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    crate::app::validate_session_ref(Some(session))?;
     let mut client = tokio::time::timeout(timeout, async {
         RouterControlServiceClient::connect(endpoint.to_string()).await
     })
@@ -24,7 +24,7 @@ pub async fn request_gateway_shutdown(
     tokio::time::timeout(
         timeout,
         client.send_control(proto::ControlRequest {
-            session: Some(session.clone()),
+            session: Some(scope.to_proto()),
             signal: Some(signal),
         }),
     )

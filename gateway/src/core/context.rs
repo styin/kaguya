@@ -7,7 +7,6 @@
 use crate::core::history::History;
 use crate::core::types::ActiveTask;
 use crate::proto;
-use crate::proto::SessionRef;
 use crate::tools::ToolRegistry;
 
 /// Read the prompt snapshot after post-response history/persona updates.
@@ -51,13 +50,13 @@ fn prompt_from_data(
 }
 
 fn generation(
-    session: &SessionRef,
     generation_id: &str,
     prompt_context: proto::PromptContext,
     trigger: proto::generation_start::Trigger,
 ) -> proto::GenerationStart {
     proto::GenerationStart {
-        session: Some(session.clone()),
+        // TalkerClient stamps its scope when it dispatches the generation.
+        session: None,
         generation_id: generation_id.into(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         prompt_context: Some(prompt_context),
@@ -67,7 +66,6 @@ fn generation(
 
 /// Build a fresh user-input generation, retaining its retrieved memories.
 pub fn assemble_from_data(
-    session: &SessionRef,
     generation_id: &str,
     user_input: &str,
     history: Vec<proto::ChatMessage>,
@@ -77,7 +75,6 @@ pub fn assemble_from_data(
     active_tasks: &[ActiveTask],
 ) -> proto::GenerationStart {
     generation(
-        session,
         generation_id,
         prompt_from_data(history, memory_md, retrieval_results, tools, active_tasks),
         proto::generation_start::Trigger::UserInput(proto::UserInput {
@@ -88,7 +85,6 @@ pub fn assemble_from_data(
 
 /// A result references its original tool request, under a fresh generation.
 pub fn with_tool_result_from_data(
-    session: &SessionRef,
     generation_id: &str,
     request_id: &str,
     content: &str,
@@ -98,7 +94,6 @@ pub fn with_tool_result_from_data(
     active_tasks: &[ActiveTask],
 ) -> proto::GenerationStart {
     generation(
-        session,
         generation_id,
         prompt_from_data(history, memory_md, vec![], tools, active_tasks),
         proto::generation_start::Trigger::ToolResult(proto::ToolResult {
@@ -110,7 +105,6 @@ pub fn with_tool_result_from_data(
 
 /// A completion references its Reasoner task, under a fresh generation.
 pub fn with_reasoner_result_from_data(
-    session: &SessionRef,
     generation_id: &str,
     task_id: &str,
     result: &str,
@@ -120,7 +114,6 @@ pub fn with_reasoner_result_from_data(
     active_tasks: &[ActiveTask],
 ) -> proto::GenerationStart {
     generation(
-        session,
         generation_id,
         prompt_from_data(history, memory_md, vec![], tools, active_tasks),
         proto::generation_start::Trigger::ReasonerResult(proto::ReasonerResult {
@@ -132,7 +125,6 @@ pub fn with_reasoner_result_from_data(
 
 /// Failed delegation carries a typed cause rather than a completion summary.
 pub fn with_reasoner_failure_from_data(
-    session: &SessionRef,
     generation_id: &str,
     failure: proto::ReasonerFailure,
     history: Vec<proto::ChatMessage>,
@@ -141,7 +133,6 @@ pub fn with_reasoner_failure_from_data(
     active_tasks: &[ActiveTask],
 ) -> proto::GenerationStart {
     generation(
-        session,
         generation_id,
         prompt_from_data(history, memory_md, vec![], tools, active_tasks),
         proto::generation_start::Trigger::ReasonerFailure(failure),
@@ -150,7 +141,6 @@ pub fn with_reasoner_failure_from_data(
 
 /// Silence is typed input rather than a synthetic user utterance.
 pub fn for_silence_from_data(
-    session: &SessionRef,
     generation_id: &str,
     duration: std::time::Duration,
     history: Vec<proto::ChatMessage>,
@@ -158,7 +148,6 @@ pub fn for_silence_from_data(
     tools: Vec<proto::ToolDefinition>,
 ) -> proto::GenerationStart {
     generation(
-        session,
         generation_id,
         prompt_from_data(history, memory_md, vec![], tools, &[]),
         proto::generation_start::Trigger::Silence(proto::SilenceTrigger {
@@ -170,7 +159,6 @@ pub fn for_silence_from_data(
 /// Retain the originating task when narrating an intermediate step.
 /// Narration does not expose tools or active-task prompts.
 pub fn for_narration_from_data(
-    session: &SessionRef,
     generation_id: &str,
     task_id: &str,
     step: &str,
@@ -178,7 +166,6 @@ pub fn for_narration_from_data(
     memory_md: &str,
 ) -> proto::GenerationStart {
     generation(
-        session,
         generation_id,
         prompt_from_data(history, memory_md, vec![], vec![], &[]),
         proto::generation_start::Trigger::ReasonerProgress(proto::ReasonerProgress {
@@ -194,14 +181,6 @@ mod tests {
 
     #[test]
     fn user_generation_keeps_prompt_snapshot_and_typed_tasks() {
-        let session = SessionRef {
-            instance_id: Some(proto::InstanceId {
-                value: "00000000-0000-4000-8000-000000000001".into(),
-            }),
-            session_id: Some(proto::SessionId {
-                value: "00000000-0000-4000-8000-000000000002".into(),
-            }),
-        };
         let history = vec![proto::ChatMessage {
             role: proto::Role::User as i32,
             content: "earlier input".into(),
@@ -219,7 +198,6 @@ mod tests {
             description: "research".into(),
         }];
         let start = assemble_from_data(
-            &session,
             "generation-1",
             "new question",
             history.clone(),
@@ -228,7 +206,7 @@ mod tests {
             vec![],
             &tasks,
         );
-        assert_eq!(start.session, Some(session.clone()));
+        assert_eq!(start.session, None);
         assert_eq!(start.generation_id, "generation-1");
         assert!(matches!(start.trigger,
             Some(proto::generation_start::Trigger::UserInput(proto::UserInput { text }))
@@ -243,16 +221,7 @@ mod tests {
 
     #[test]
     fn continuation_reference_lives_with_its_result() {
-        let session = SessionRef {
-            instance_id: Some(proto::InstanceId {
-                value: "00000000-0000-4000-8000-000000000001".into(),
-            }),
-            session_id: Some(proto::SessionId {
-                value: "00000000-0000-4000-8000-000000000002".into(),
-            }),
-        };
         let tool = with_tool_result_from_data(
-            &session,
             "generation-2",
             "request-1",
             "tool data",
@@ -265,7 +234,6 @@ mod tests {
             Some(proto::generation_start::Trigger::ToolResult(proto::ToolResult { request_id, content }))
             if request_id == "request-1" && content == "tool data"));
         let reasoner = with_reasoner_result_from_data(
-            &session,
             "generation-3",
             "task-1",
             "summary",
@@ -281,21 +249,11 @@ mod tests {
 
     #[test]
     fn progress_keeps_task_reference_and_silence_keeps_duration() {
-        let session = SessionRef {
-            instance_id: Some(proto::InstanceId {
-                value: "00000000-0000-4000-8000-000000000001".into(),
-            }),
-            session_id: Some(proto::SessionId {
-                value: "00000000-0000-4000-8000-000000000002".into(),
-            }),
-        };
-        let progress =
-            for_narration_from_data(&session, "generation-4", "task-1", "searching", vec![], "");
+        let progress = for_narration_from_data("generation-4", "task-1", "searching", vec![], "");
         assert!(matches!(progress.trigger,
             Some(proto::generation_start::Trigger::ReasonerProgress(proto::ReasonerProgress { task_id, description }))
             if task_id == "task-1" && description == "searching"));
         let silence = for_silence_from_data(
-            &session,
             "generation-5",
             std::time::Duration::from_millis(12_345),
             vec![],

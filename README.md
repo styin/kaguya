@@ -203,15 +203,17 @@ once from the repository root; persona templates are copied without modifying
 their originals, and the instance starts with an empty memory store:
 
 ```sh
+cargo run --manifest-path gateway/Cargo.toml -- init-instance --dry-run --runtime-config config/kaguya.local.toml
 cargo run --manifest-path gateway/Cargo.toml -- init-instance --runtime-config config/kaguya.local.toml
 ```
 
+`--dry-run` prints the paths init would use and creates nothing.
 `init-instance` never copies a database from an earlier instance or a configured
-external path. `rekey-instance` is the explicit operation for cloning a selected
-instance with its existing persona and RAG data.
+external path. `fork-instance` is the explicit operation for copying a selected
+instance with its existing persona and RAG data under new IDs.
 
 The JSON output contains `manifest_reference`. Set that value as `[instance]
-`manifest` in your local runtime file. Initialization and `rekey-instance`
+`manifest` in your local runtime file. `init-instance` and `fork-instance`
 print their selection handoff and never rewrite deployment configuration.
 
 Inspect the selected paths without launching processes or writing data:

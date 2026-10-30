@@ -190,7 +190,7 @@ curl.exe -N http://127.0.0.1:3001/api/logs/stream
 ```
 
 When a `sandbox_exec` tool request is triggered by Gateway, the log stream
-should show the same `session_id` and `request_id` at Gateway dispatch and
+should show the same `request_id` at Gateway dispatch and
 the matching `handle`/`backend` at sandbox execution. Raw telemetry adds the
 configured `instanceId`/`sessionId`, the execution's `requestId` and `allocationId`,
 and (for generation/RAG events) `generationId` where applicable. There is no

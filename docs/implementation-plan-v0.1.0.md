@@ -2,11 +2,11 @@
 
 **Version:** 0.1.0
 
-**Updated:** 2026-10-28
+**Updated:** 2026-10-30
 
 **Scope:** Existing voice-stack baseline, Gateway refactor, and the next application systems
 
-**Progress evidence:** R1a instance/deployment closure and the fixed-scope protocol cleanup are implemented on `sessions` with focused Windows validation; supported-host/deployment acceptance remains open. The selected R1b generation/session/utterance renames are implemented; the complete naming inventory and acceptance remain open. R1c and the accepted R1d follow-up remain unimplemented.
+**Progress evidence:** R1a instance/deployment closure and the fixed-scope protocol cleanup are implemented on `sessions` with focused Windows validation. The R1a review follow-up (single in-process scope, process-boundary checks only, per-user instance locks, `init-instance --dry-run`, `fork-instance`) has Linux validation (§2.3); supported-host/deployment acceptance remains open. The selected R1b generation/session/utterance renames are implemented; the complete naming inventory and acceptance remain open. R1c and the accepted R1d follow-up remain unimplemented.
 
 ## 0. How to Use This Plan
 
@@ -89,6 +89,7 @@ passed all acceptance tests. Remaining work is assigned to the active stages.
 ### 2.2 Known Gaps Carried Forward
 
 - R1a provides durable instance/session identity and Console identity bootstrap; durable transcript reload and replay remain R1c/R7.
+- Gateway accepts Talker output by generation for its stream but does not yet drop output from a superseded generation, and Talker does not limit concurrent `Converse` calls → generation-correctness step before R1c.
 - `ApprovalSignal` remains declared but returns `UNIMPLEMENTED` without P0 enqueue or granting authority; shared user-policy resolution/enforcement remains R2.
 - Listener retains a bidirectional control extension point; declared reset requests return `UNIMPLEMENTED`, and future pause/reconfiguration semantics remain undefined.
 - Active Reasoner entries are volatile client state, not durable task management → R3.
@@ -117,7 +118,21 @@ P0, Listener initialization/control ordering and request half-close behavior,
 and the Supervisor's status request against the actual Gateway router.
 
 Docker's conditional test did not exercise an unavailable daemon; Bubblewrap
-was unavailable on this Windows host. These checks do not establish live
+was unavailable on this Windows host.
+
+R1a review follow-up (2026-10-30, Linux container):
+
+| Component | Result |
+| --- | --- |
+| Gateway | 121 library + 6 CLI tests; `dev-console`: 123 + 6 CLI + 1 real Gateway/Supervisor status-contract test; `cargo fmt --check` |
+| Supervisor | All `cargo test` targets pass (37 library, 3 + 3 + 11 integration); `cargo fmt --check` |
+| Talker | 245 tests (CI dependency set, CPython 3.13); mypy on 14 runtime files; Ruff 0.16.6 lint/format on 28 files |
+| Console | 21 tests and the browser/server production build |
+| Contracts/tooling | `make proto-py` with the locked grpcio-tools 1.78.0 and mypy-protobuf 5.0.0; `buf lint` and `buf format --diff --exit-code` (buf 1.47.2) |
+| Manual | Two Gateways on a restored copy of one instance with different `TMPDIR` values: the second is rejected. Config typo reports the key and line/column. `init-instance --dry-run` creates nothing and refuses a selected deployment. |
+
+Windows/macOS hosts, the Job Object and Bubblewrap backends, and live voice were
+not exercised in this run. These checks do not establish live
 voice/GPU/browser acceptance, cross-host Windows/macOS/Linux operation, or
 completion of the deferred R1-R8 systems. The audit removed compatibility
 scaffolding and false-success paths; remaining architecture work stays in the
@@ -170,22 +185,22 @@ work.
 ### R1 — Session: Identity and Persistence
 
 **Guiding checklist:** Each checkbox groups changes that must land together.
-The accepted order is R1a → R1b → R1c → R1d → R2. Complete the dedicated R1b
-refactor before R1c commits history-schema semantics. R1d handles broader
+The accepted order is R1a → R1b → generation correctness → R1c → R1d → R2.
+Complete the dedicated R1b refactor before R1c commits history-schema semantics. R1d handles broader
 deployment consolidation without expanding R1b's semantic refactor.
 
 #### R1a — Instance Lifecycle, Deployment Selection, and Binding
 
 - [x] **Identity + configuration + startup:** Introduce validated `InstanceId` and default `SessionId`, initialize/save them once, and resolve the same configuration under managed and standalone startup. Surface configuration failures and stop startup when identity cannot be resolved reliably; no silent default identity. Define restore versus independent-copy behavior. Use canonical `session_id` / `SessionRef` throughout the runtime contract.
-- [x] **Associations + enforcement + exposure:** Bind pipeline/history handles, persona, and capability connections to the resolved instance/session; validate originating context/correlation on dispatch/callback boundaries. Expose identity through runtime/endpoint bootstrap. Establish instance-owned data locations and reject incompatible service bindings or duplicate local instance use. Retain one active session; history schemas and service multiplexing are later work.
+- [x] **Associations + enforcement + exposure:** Each process holds its resolved instance/session as one scope; clients stamp it on the messages they send, and each process checks an incoming scope once at its boundary (gRPC, HTTP, raw audio). No scope fields or checks on internal events, callbacks or calls. Expose identity through runtime/endpoint bootstrap. Establish instance-owned data locations and reject incompatible service bindings (one `FAILED_PRECONDITION` signal, fatal to Gateway) or duplicate local instance use (per-user lock directory, independent of `TMPDIR`). Retain one active session; history schemas and service multiplexing are later work.
 - [x] **Allocation lifetime + transport + telemetry:** Separate sandbox allocation keys/handles from conversation identity and tool request IDs across Gateway/Supervisor contracts, cleanup, and event correlation. Use `supervisor_run_id` for ephemeral Docker runtime ownership; preserve its ephemeral lifetime and cleanup behavior under the `kaguya.sandbox.supervisor_run` label. Full workspace/task execution binding remains R5.
 - [x] **Authoritative selection + portable paths:** Runtime TOML selects Gateway settings and explicit portable storage; its instance reference is portable-root-relative. One shared Rust selection/path resolver applies CLI → environment → documented discovery/profile precedence. Managed and direct Console/CLI paths propagate the absolute root/profile; no independent Gateway identity selector remains.
-- [x] **Instance-local manifest + explicit handoff:** The selected `instances/<InstanceId>/instance.toml` is the sole identity authority and its parent the exact data root. Enforce directory/manifest identity agreement, validate manifest IDs and retain both local leases. Init/rekey create verified new directories and print the new selection without rewriting deployment files.
-- [x] **Terminology + separation:** Keep `instance.rs` / `InstanceIdentity` / `InstanceLease` as the compact lifecycle module. Gateway and Supervisor use their generated `proto::SessionRef` internally, with small component-local construction/validation helpers. Supervisor binding state and allocation owners use that same generated reference; its existing methods retain enforcement policy and HTTP adapters retain scalar ID fields. Python keeps its immutable `InstanceSessionBinding`. Gateway callbacks and telemetry carry originating context. Preserve persona identity names, manifest schema/fields, `shared/deployment.rs`, and the Cargo package layout; broader deployment consolidation remains R1d.
-- [x] **Fixed-scope protocol + bootstrap:** One instance/session pair is required at runtime construction. Supervisor and Console's Gateway diagnostics preflight validate the selected manifest and supply authoritative child environment. Voice validates it before accepting traffic; no lazy first-caller binding remains. Named protobuf ID objects inside `SessionRef` carry the configured scope. Unary requests and initial stream messages assert the fixed pair; scope is validated before request effects. Keep `UpdatePersona` as a change-driven scoped RPC. No instance/session routing or multiplexing is introduced.
+- [x] **Instance-local manifest + explicit handoff:** The selected `instances/<InstanceId>/instance.toml` is the sole identity authority and its parent the exact data root. Enforce directory/manifest identity agreement, validate manifest IDs and retain both local leases. `init-instance` / `fork-instance` create verified new directories and print the new selection without rewriting deployment files; `init-instance --dry-run` checks and prints without creating anything.
+- [x] **Terminology + separation:** Keep `instance.rs` / `InstanceIdentity` / `InstanceLease` as the compact lifecycle module. Gateway and Supervisor hold one validated `SessionScope` (`shared/session_scope.rs`) and convert to the generated `SessionRef` only on the wire. Supervisor receives its scope at construction (no bind endpoint, no per-allocation owner); its HTTP adapters keep scalar ID fields and check them per request, including telemetry ingest. Python keeps its immutable `InstanceSessionBinding`. Telemetry carries the configured pair. One instance/session per process is the decided model; the wire scope is the extension point for multiple sessions (owner decision, 2026-10-29/30). Preserve persona identity names, manifest schema/fields, `shared/deployment.rs`, and the Cargo package layout; broader deployment consolidation remains R1d.
+- [x] **Fixed-scope protocol + bootstrap:** One instance/session pair is required at runtime construction. Supervisor and Console's Gateway diagnostics preflight validate the selected manifest and supply authoritative child environment. Voice validates it before accepting traffic; no lazy first-caller binding remains. Named protobuf ID objects inside `SessionRef` carry the configured scope. Unary requests and initial stream messages assert the fixed pair; later messages on a stream (`BargeInSignal`, `TaskContext`) carry no scope. Scope is validated before request effects. Talker acknowledges only the first barge-in of a `Converse`. Keep `UpdatePersona` as a change-driven scoped RPC. No instance/session routing or multiplexing is introduced.
 - [x] **Typed generation context + provenance:** Use `GenerationStart`, shared `PromptContext`, typed active tasks, and a trigger oneof with consistent tool `request_id` / Reasoner `task_id`. Every `TalkerOutput` carries its generation in the outer protobuf envelope; validate it against the dispatch before queuing the generated message directly and projecting it into Console events. Lifecycle payloads do not duplicate the ID. Preserve current cancellation, scheduling and stale-output acceptance policy; stronger generation lifecycle handling is separate work.
-- [x] **Nonmutating diagnostics + trust:** `validate-config` / `show-config` resolve the implemented selection/settings/identity subset without launch, directories, leases, ports, or database writes. Initialization mode permits absent identity while rejecting invalid existing metadata. Allowlisted output and failure diagnostics redact secrets. Document shell launch configuration as trusted executable input.
-- [ ] **Acceptance:** Verify stable identity across restarts/configuration edits, independent instance initialization, invalid/missing configuration failures, mismatched-owner rejection, and allocation release without session replacement. Exercise affected Gateway/Supervisor contracts and Windows/macOS path behavior; distinguish tests actually run from unsupported-host checks.
+- [x] **Nonmutating diagnostics + trust:** `validate-config` / `show-config` resolve the implemented selection/settings/identity subset without launch, directories, leases, ports, or database writes, and require an initialized instance; `init-instance --dry-run` covers the uninitialized case. Allowlisted output; errors give line/column and key names but never configured values or endpoint addresses; provenance lists only settings with a value. Document shell launch configuration as trusted executable input.
+- [ ] **Acceptance:** Verify stable identity across restarts/configuration edits, independent instance initialization, invalid/missing configuration failures (line/column errors), mismatched-owner rejection through Talker, Listener and a Supervisor serving another pair, duplicate restored instances under different `TMPDIR` values, `init-instance --dry-run` creating nothing and refusing exactly what init refuses, `fork-instance` preserving its source, and allocation release without session replacement. Record what happens when the selection is edited while Supervisor runs and Gateway restarts (re-resolution is R1d). Exercise affected Gateway/Supervisor contracts and Windows/macOS path behavior; distinguish tests actually run from unsupported-host checks.
 
 R1a's selected schema, CLI handoff, storage/binding semantics, diagnostic limits,
 and follow-ups are recorded in [instance lifecycle and deployment selection](r1a-identity.md).
@@ -196,12 +211,23 @@ and follow-ups are recorded in [instance lifecycle and deployment selection](r1a
 - [ ] **Coordinated refactor:** Apply the naming map through Gateway, Talker/Listener, protobuf/stubs, Console, telemetry, RAG source references, tests, and docs. Preserve existing IDs, dispatch boundaries, scheduling, interruption, and history behavior; update all wire and stored-field consumers together without compatibility shims. Keep behavioral bug fixes separate from this refactor.
 - [ ] **Acceptance:** Review the semantic mapping and call-site changes, run affected behavior tests and frontend checks, regenerate stubs with `make proto`, and run `buf lint proto/` and relevant cross-component checks. Prove representative user, tool-continuation, Reasoner, silence, and barge-in paths retain their behavior.
 
+#### Generation Correctness (before R1c)
+
+A standalone behavior change after R1b's rename and before R1c defines how
+generations are stored. R1b keeps behavior unchanged, and R1c needs a reliable
+current generation. Approved by the owner on 2026-10-30.
+
+- [ ] **Stale output:** Track the active generation in `SessionState`; drop any `TalkerOutput` whose `generation_id` is not the active one, so a late `ResponseComplete` or `Sentence` from a superseded generation cannot cancel or pollute the current one.
+- [ ] **One active Converse:** Define and enforce in Talker that a new `Converse` preempts the active one, so an older stream cannot keep speaking after the shared speaker resets.
+- [ ] **Generation ID contract:** Document `generation_id` as an opaque, non-empty string; do not add format validation.
+- [ ] **Acceptance:** Test a stale `ResponseComplete` after a new dispatch, overlapping `Converse` calls, and the user, tool-continuation, Reasoner, silence and barge-in paths.
+
 #### R1c — History Persistence, Context and Recovery (following session)
 
 - [ ] **Schema + write boundary + ownership:** Add versioned authoritative history to `kaguya.db` using resolved instance/session ownership and R1b's correlation semantics. Define ordering, storage failures, incomplete generations, and confirmed-spoken partials; persist input independently of Talker readiness. Keep derived RAG memory distinct.
 - [ ] **Context + retention:** Separate bounded prompt selection from retained source history; share authoritative history/memory across Talker and Reasoner with role-specific prompts/projections. Define compaction and deletion propagation, preserving source links. A fresh task working context must not replace instance/session/task identity; resumable context branches and LLM summarization remain explicit design choices.
 - [ ] **Recovery + Console + acceptance:** Implement snapshot/cursor replay and deduplication together. Test restart, reconnect, duplicate delivery, unavailable Talker, storage failure, interrupted output, ownership separation, and prompt trimming without transcript loss. Replay must not blindly repeat external effects.
-- [ ] **Identity-write durability prerequisite:** Before accepting valuable persistent history, implement safe identity-file publication and deterministic recovery from interrupted init/rekey, with focused failure tests. Preserve local manifest/data consistency, fail closed, and never mint replacement IDs as error recovery. Whole-instance backup/export is tracked in R8.
+- [ ] **Identity-write durability prerequisite:** Before accepting valuable persistent history, implement safe identity-file publication and deterministic recovery from interrupted init/fork, with focused failure tests. Preserve local manifest/data consistency, fail closed, and never mint replacement IDs as error recovery. Whole-instance backup/export is tracked in R8.
 
 #### R1d — Service Configuration Resolution in the Launcher
 
@@ -216,8 +242,8 @@ to repeat deployment resolution does not satisfy this target. R1a describes
 the current selection/reload contract; R1d replaces it deliberately.
 
 - [ ] **Resolution ownership + readers:** Move deployment resolution into launcher-owned code; migrate consumers of `shared/deployment.rs` and retire redundant runtime readers/source sharing. Preserve established selector precedence, explicit-selection failure behavior, and profile replacement semantics; specify complete supported TOML behavior.
-- [ ] **Service boundary:** Define explicit startup inputs for each service. Keep component schemas, semantic validation, provider/client construction, and runtime resource ownership local. Define which defaults and credential operations remain service-local; the launcher need not interpret every provider-specific option. Gateway retains instance creation/rekeying, active data leases, and authoritative application state.
-- [ ] **Launch paths + bootstrap:** Make Supervisor, Console development controls, and standalone startup use the same resolution authority, or accept explicitly resolved inputs at direct service boundaries. Define initialization/rekey inputs and Console/Supervisor bootstrap/proxy discovery without requiring the whole stack for standalone operation.
+- [ ] **Service boundary:** Define explicit startup inputs for each service. Keep component schemas, semantic validation, provider/client construction, and runtime resource ownership local. Define which defaults and credential operations remain service-local; the launcher need not interpret every provider-specific option. Gateway retains instance creation/forking, active data leases, and authoritative application state.
+- [ ] **Launch paths + bootstrap:** Make Supervisor, Console development controls, and standalone startup use the same resolution authority, or accept explicitly resolved inputs at direct service boundaries. Define initialization/fork inputs and Console/Supervisor bootstrap/proxy discovery without requiring the whole stack for standalone operation.
 - [ ] **Endpoint consistency:** Align actual service binds, client destinations, advertised endpoints, and Console/Supervisor connection information from the resolved deployment; remove fixed routing assumptions.
 - [ ] **Precedence + settings:** Define environment, `.env`, implementation-default, generated bind-value, and credential-reference precedence and prevent child inputs from unintentionally overriding resolved deployment decisions. Reconcile duplicated LLM inference/health settings and distinguish initialization-source settings from ongoing instance data settings.
 - [ ] **Launch contract:** Introduce structured executable/argument/cwd/environment launch descriptors with explicit shell use and deliberate Windows/macOS behavior. Define startup-input delivery, configuration consistency across child startup/restarts, and replace existing command strings; launch configuration remains trusted executable input.

@@ -8,14 +8,14 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::proto;
-use crate::proto::SessionRef;
+use crate::session_scope::SessionScope;
 
 pub struct SandboxClient {
     base_url: String,
     http: reqwest::Client,
     enabled: bool,
     backend: Option<String>,
-    session: SessionRef,
+    scope: SessionScope,
     allocation: Mutex<Option<AllocationLease>>,
 }
 
@@ -29,6 +29,8 @@ struct AllocationLease {
 struct StatusResponse {
     enabled: bool,
     backend: String,
+    instance_id: String,
+    session_id: String,
 }
 
 #[derive(serde::Serialize)]
@@ -73,43 +75,52 @@ struct ExecuteResponse {
 }
 
 impl SandboxClient {
-    pub async fn connect(
-        base_url: impl Into<String>,
-        session: &SessionRef,
-    ) -> anyhow::Result<Self> {
-        let (instance_id, session_id) = crate::instance::validate_session_ref(Some(session))?;
+    /// Connect to the Supervisor's provider. An unreachable Supervisor
+    /// disables the tool; a Supervisor serving another scope is an error.
+    pub async fn connect(base_url: impl Into<String>, scope: SessionScope) -> anyhow::Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let http = reqwest::Client::new();
-        http.post(format!("{base_url}/api/owner/bind"))
-            .json(&serde_json::json!({"instanceId": instance_id, "sessionId": session_id}))
-            .send()
-            .await?
-            .error_for_status()?;
-        let status = http
-            .get(format!("{base_url}/api/sandbox/status"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<StatusResponse>()
-            .await?;
-
+        let status = match Self::fetch_status(&http, &base_url).await {
+            Ok(status) => status,
+            Err(error) => {
+                warn!(%error, %base_url, "Supervisor sandbox unavailable; tool disabled");
+                return Ok(Self::disabled(scope));
+            }
+        };
+        let supervisor_scope = SessionScope::parse(&status.instance_id, &status.session_id)?;
+        if supervisor_scope != scope {
+            anyhow::bail!("Supervisor serves a different instance/session");
+        }
+        info!(backend = %status.backend, "connected to Supervisor Sandbox Provider");
         Ok(Self {
             base_url,
             http,
             enabled: status.enabled,
             backend: Some(status.backend),
-            session: session.clone(),
+            scope,
             allocation: Mutex::new(None),
         })
     }
 
-    pub fn disabled(session: SessionRef) -> Self {
+    async fn fetch_status(
+        http: &reqwest::Client,
+        base_url: &str,
+    ) -> reqwest::Result<StatusResponse> {
+        http.get(format!("{base_url}/api/sandbox/status"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<StatusResponse>()
+            .await
+    }
+
+    pub fn disabled(scope: SessionScope) -> Self {
         Self {
             base_url: String::new(),
             http: reqwest::Client::new(),
             enabled: false,
             backend: None,
-            session,
+            scope,
             allocation: Mutex::new(None),
         }
     }
@@ -126,7 +137,7 @@ impl SandboxClient {
                           the active allocation. Optional 'stdin' is fed to the program. \
                           Languages: python, node, bash."
                 .into(),
-            args_schema: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","node","bash"]},"code":{"type":"string"},"stdin":{"type":"string"}},"required":["language","code"]}"#
+            args_schema: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","node","bash"]},"code":{"type":"string"},"stdin":{"type":"string"}},"required":["language","code"],"additionalProperties":false}"#
                 .into(),
         })
     }
@@ -140,10 +151,7 @@ impl SandboxClient {
             Ok(handle) => handle,
             Err(error) => return error_json(error),
         };
-        let (instance_id, session_id) = crate::instance::validate_session_ref(Some(&self.session))
-            .expect("connected sandbox requires a validated SessionRef");
         debug!(
-            %session_id,
             request_id = %request_id,
             handle = %handle,
             backend = self.backend.as_deref().unwrap_or("unknown"),
@@ -153,8 +161,8 @@ impl SandboxClient {
             .http
             .post(format!("{}/api/sandbox/{handle}/execute", self.base_url))
             .json(&ExecuteRequest {
-                instance_id,
-                session_id,
+                instance_id: &self.scope.instance_id().to_string(),
+                session_id: &self.scope.session_id().to_string(),
                 request_id,
                 args_json,
             })
@@ -179,14 +187,11 @@ impl SandboxClient {
             return;
         };
         let result: Result<ReleaseResponse, String> = async {
-            let (instance_id, session_id) =
-                crate::instance::validate_session_ref(Some(&self.session))
-                    .map_err(|error| error.to_string())?;
             self.http
                 .delete(format!("{}/api/sandbox/{}", self.base_url, lease.handle))
                 .json(&ReleaseRequest {
-                    instance_id,
-                    session_id,
+                    instance_id: &self.scope.instance_id().to_string(),
+                    session_id: &self.scope.session_id().to_string(),
                 })
                 .send()
                 .await
@@ -213,8 +218,6 @@ impl SandboxClient {
     }
 
     async fn ensure_handle(&self) -> Result<String, String> {
-        let (instance_id, session_id) = crate::instance::validate_session_ref(Some(&self.session))
-            .map_err(|error| error.to_string())?;
         let mut current = self.allocation.lock().await;
         if let Some(lease) = current.as_ref() {
             debug!(allocation_id = %lease.allocation_id, handle = %lease.handle, "reusing Supervisor sandbox handle");
@@ -226,8 +229,8 @@ impl SandboxClient {
             .http
             .post(format!("{}/api/sandbox/acquire", self.base_url))
             .json(&AcquireRequest {
-                instance_id,
-                session_id,
+                instance_id: &self.scope.instance_id().to_string(),
+                session_id: &self.scope.session_id().to_string(),
                 allocation_id: &allocation_id,
             })
             .send()
@@ -282,36 +285,72 @@ mod tests {
 
     use super::*;
 
-    fn test_instance_context() -> SessionRef {
-        SessionRef {
-            instance_id: Some(crate::proto::InstanceId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-            session_id: Some(crate::proto::SessionId {
-                value: uuid::Uuid::new_v4().to_string(),
-            }),
-        }
+    /// The Supervisor crate compiles its own copy of the shared scope type.
+    fn supervisor_scope(scope: SessionScope) -> kaguya_supervisor::session_scope::SessionScope {
+        kaguya_supervisor::session_scope::SessionScope::parse(
+            &scope.instance_id().to_string(),
+            &scope.session_id().to_string(),
+        )
+        .unwrap()
+    }
+
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap()
+    }
+
+    fn test_supervisor(scope: SessionScope) -> SupervisorApp {
+        SupervisorApp::new(
+            ResolvedRuntimeConfig {
+                config: RuntimeConfig {
+                    profile: Some("test".into()),
+                    supervisor_addr: "127.0.0.1:0".into(),
+                    sandbox: SandboxConfig::default(),
+                    processes: BTreeMap::new(),
+                },
+                base_dir: ".".into(),
+            },
+            supervisor_scope(scope),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_another_scope_and_degrades_when_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            server::serve_on(test_supervisor(test_scope()), listener)
+                .await
+                .unwrap();
+        });
+        let error = SandboxClient::connect(format!("http://{addr}"), test_scope())
+            .await
+            .err()
+            .expect("a Supervisor serving another scope is fatal");
+        assert!(error.to_string().contains("different instance/session"));
+        server_task.abort();
+
+        let unreachable = SandboxClient::connect("http://127.0.0.1:1", test_scope())
+            .await
+            .unwrap();
+        assert!(unreachable.tool_definition().is_none());
     }
 
     #[tokio::test]
     async fn concurrent_acquisitions_preserve_shared_handle_and_files() {
-        let app = SupervisorApp::new(ResolvedRuntimeConfig {
-            config: RuntimeConfig {
-                profile: Some("test".into()),
-                supervisor_addr: "127.0.0.1:0".into(),
-                sandbox: SandboxConfig::default(),
-                processes: BTreeMap::new(),
-            },
-            base_dir: ".".into(),
-        })
-        .unwrap();
+        let scope = test_scope();
+        let app = test_supervisor(scope);
         let router = server::router(app.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let client = SandboxClient::connect(format!("http://{addr}"), &test_instance_context())
+        let client = SandboxClient::connect(format!("http://{addr}"), scope)
             .await
             .unwrap();
         let first_request = uuid::Uuid::new_v4().to_string();
@@ -348,23 +387,15 @@ mod tests {
 
     #[tokio::test]
     async fn client_uses_supervisor_handle_contract_end_to_end() {
-        let app = SupervisorApp::new(ResolvedRuntimeConfig {
-            config: RuntimeConfig {
-                profile: Some("test".into()),
-                supervisor_addr: "127.0.0.1:0".into(),
-                sandbox: SandboxConfig::default(),
-                processes: BTreeMap::new(),
-            },
-            base_dir: ".".into(),
-        })
-        .unwrap();
+        let scope = test_scope();
+        let app = test_supervisor(scope);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
             server::serve_on(app, listener).await.unwrap();
         });
 
-        let client = SandboxClient::connect(format!("http://{addr}"), &test_instance_context())
+        let client = SandboxClient::connect(format!("http://{addr}"), scope)
             .await
             .unwrap();
         assert_eq!(client.backend(), Some("native"));
@@ -386,23 +417,15 @@ mod tests {
 
     #[tokio::test]
     async fn release_reacquires_allocation_without_replacing_session() {
-        let app = SupervisorApp::new(ResolvedRuntimeConfig {
-            config: RuntimeConfig {
-                profile: Some("test".into()),
-                supervisor_addr: "127.0.0.1:0".into(),
-                sandbox: SandboxConfig::default(),
-                processes: BTreeMap::new(),
-            },
-            base_dir: ".".into(),
-        })
-        .unwrap();
+        let scope = test_scope();
+        let app = test_supervisor(scope);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
             server::serve_on(app, listener).await.unwrap();
         });
 
-        let client = SandboxClient::connect(format!("http://{addr}"), &test_instance_context())
+        let client = SandboxClient::connect(format!("http://{addr}"), scope)
             .await
             .unwrap();
 

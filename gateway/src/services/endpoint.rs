@@ -23,12 +23,11 @@ use tracing::{info, warn};
 use crate::clients::audio_sink::ListenerAudioSink;
 use crate::core::types::*;
 use crate::lifecycle::{LifecycleSnapshot, LifecycleSupervisor};
-use crate::proto::SessionRef;
+use crate::session_scope::SessionScope;
 
 const CLOSE_SUPERSEDED: u16 = 4001;
 
 pub struct EndpointState {
-    pub session: SessionRef,
     pub control_tx: mpsc::Sender<ControlSignal>,
     pub p1_tx: mpsc::Sender<InputEvent>,
     pub metadata_tx: tokio::sync::broadcast::Sender<MetadataEvent>,
@@ -40,7 +39,7 @@ pub struct EndpointState {
 #[derive(Clone)]
 pub struct RuntimeStatusState {
     pub lifecycle: LifecycleSupervisor,
-    pub session: SessionRef,
+    pub scope: SessionScope,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,23 +62,19 @@ async fn runtime_status(State(state): State<Arc<EndpointState>>) -> Json<Runtime
 }
 
 fn runtime_status_response(state: &RuntimeStatusState) -> RuntimeStatusResponse {
-    let (instance_id, session_id) = crate::instance::validate_session_ref(Some(&state.session))
-        .expect("runtime status requires a validated SessionRef");
     RuntimeStatusResponse {
         lifecycle: state.lifecycle.snapshot(),
-        instance_id: instance_id.to_owned(),
-        session_id: session_id.to_owned(),
+        instance_id: state.scope.instance_id().to_string(),
+        session_id: state.scope.session_id().to_string(),
     }
 }
 
-fn session_init(session: &SessionRef) -> serde_json::Value {
-    let (instance_id, session_id) = crate::instance::validate_session_ref(Some(session))
-        .expect("session bootstrap requires a validated SessionRef");
+fn session_init(scope: SessionScope) -> serde_json::Value {
     serde_json::json!({
         "event_type": "session_init",
         "data": {
-            "instance_id": instance_id,
-            "session_id": session_id,
+            "instance_id": scope.instance_id().to_string(),
+            "session_id": scope.session_id().to_string(),
         }
     })
 }
@@ -106,7 +101,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<EndpointState>) {
 
     // Subscribe before the bootstrap write so events produced during it are retained.
     let mut metadata_rx = state.metadata_tx.subscribe();
-    let bootstrap = session_init(&state.session);
+    let bootstrap = session_init(state.runtime_status.scope);
     if socket
         .send(Message::Text(bootstrap.to_string()))
         .await
@@ -213,7 +208,7 @@ mod tests {
 
         let response = runtime_status_response(&RuntimeStatusState {
             lifecycle,
-            session: test_session(),
+            scope: test_scope(),
         });
 
         assert_eq!(response.lifecycle.connections.len(), 1);
@@ -225,38 +220,24 @@ mod tests {
         );
     }
 
-    fn test_session() -> SessionRef {
-        SessionRef {
-            instance_id: Some(crate::proto::InstanceId {
-                value: "11111111-1111-4111-8111-111111111111".into(),
-            }),
-            session_id: Some(crate::proto::SessionId {
-                value: "22222222-2222-4222-8222-222222222222".into(),
-            }),
-        }
+    fn test_scope() -> SessionScope {
+        SessionScope::parse(
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        )
+        .unwrap()
     }
 
     #[test]
     fn session_bootstrap_has_one_canonical_session_reference() {
-        let session = test_session();
-        let bootstrap = session_init(&session);
+        let bootstrap = session_init(test_scope());
         assert_eq!(
             bootstrap["data"]["instance_id"],
-            session
-                .instance_id
-                .as_ref()
-                .expect("validated SessionRef")
-                .value
-                .as_str()
+            "11111111-1111-4111-8111-111111111111"
         );
         assert_eq!(
             bootstrap["data"]["session_id"],
-            session
-                .session_id
-                .as_ref()
-                .expect("validated SessionRef")
-                .value
-                .as_str()
+            "22222222-2222-4222-8222-222222222222"
         );
         assert_eq!(bootstrap["data"].as_object().unwrap().len(), 2);
     }

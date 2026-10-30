@@ -8,14 +8,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::types::DispatchKind;
 use crate::proto;
-use crate::proto::SessionRef;
 
 /// Mutable session state shared between the orchestrator, handlers,
 /// and executor across event loop iterations.
 #[derive(Debug)]
 pub struct SessionState {
-    /// Immutable instance/session pair validated during application startup.
-    pub scope: SessionRef,
     /// Cancellation token for the active Talker generation, if any.
     pub active_gen: Option<CancellationToken>,
     /// Cancellation token for the active silence timer cascade, if any.
@@ -33,9 +30,8 @@ pub struct SessionState {
 
 impl SessionState {
     /// Initialize state for a new conversation session.
-    pub fn new(scope: SessionRef, initial_memory_md: String) -> Self {
+    pub fn new(initial_memory_md: String) -> Self {
         Self {
-            scope,
             active_gen: None,
             active_silence: None,
             current_response: String::new(),
@@ -150,22 +146,9 @@ pub enum PipelineAction {
 mod tests {
     use super::*;
 
-    fn test_scope() -> SessionRef {
-        SessionRef {
-            instance_id: Some(proto::InstanceId {
-                value: "00000000-0000-4000-8000-000000000001".into(),
-            }),
-            session_id: Some(proto::SessionId {
-                value: "00000000-0000-4000-8000-000000000002".into(),
-            }),
-        }
-    }
-
     #[test]
     fn session_state_new_initializes_empty() {
-        let scope = test_scope();
-        let state = SessionState::new(scope.clone(), "# Memory".into());
-        assert_eq!(state.scope, scope);
+        let state = SessionState::new("# Memory".into());
         assert_eq!(state.last_memory_md, "# Memory");
         assert!(!state.is_generating());
         assert!(state.current_response.is_empty());
@@ -175,7 +158,7 @@ mod tests {
 
     #[test]
     fn is_generating_reflects_active_gen() {
-        let mut state = SessionState::new(test_scope(), String::new());
+        let mut state = SessionState::new(String::new());
         assert!(!state.is_generating());
 
         state.active_gen = Some(CancellationToken::new());
@@ -184,7 +167,7 @@ mod tests {
 
     #[test]
     fn cancel_active_gen_clears_and_cancels() {
-        let mut state = SessionState::new(test_scope(), String::new());
+        let mut state = SessionState::new(String::new());
         let token = CancellationToken::new();
         let child = token.clone();
         state.active_gen = Some(token);
@@ -197,14 +180,14 @@ mod tests {
 
     #[test]
     fn cancel_active_gen_noop_when_none() {
-        let mut state = SessionState::new(test_scope(), String::new());
+        let mut state = SessionState::new(String::new());
         state.cancel_active_gen(); // should not panic
         assert!(state.active_gen.is_none());
     }
 
     #[test]
     fn cancel_active_silence_clears_and_cancels() {
-        let mut state = SessionState::new(test_scope(), String::new());
+        let mut state = SessionState::new(String::new());
         let token = CancellationToken::new();
         let child = token.clone();
         state.active_silence = Some(token);

@@ -3,28 +3,21 @@
 //! In-memory storage of recent conversation turns, including user inputs, assistant responses, and tool results.
 
 use crate::proto;
-use crate::proto::SessionRef;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct History {
-    scope: SessionRef,
     turns: Arc<RwLock<Vec<proto::ChatMessage>>>,
     max_recent: usize,
 }
 
 impl History {
-    pub fn new(max_recent: usize, scope: &SessionRef) -> Self {
+    pub fn new(max_recent: usize) -> Self {
         Self {
-            scope: scope.clone(),
             turns: Arc::new(RwLock::new(Vec::new())),
             max_recent,
         }
-    }
-
-    pub fn matches_session(&self, scope: &SessionRef) -> bool {
-        &self.scope == scope
     }
 
     pub async fn append_user(&self, text: &str) {
@@ -74,34 +67,5 @@ impl History {
             let excess = t.len().saturating_sub(self.max_recent);
             t.drain(0..excess);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn history_handle_matches_one_instance_and_session() {
-        let scope = SessionRef {
-            instance_id: Some(proto::InstanceId {
-                value: "00000000-0000-4000-8000-000000000001".into(),
-            }),
-            session_id: Some(proto::SessionId {
-                value: "00000000-0000-4000-8000-000000000002".into(),
-            }),
-        };
-        let history = History::new(10, &scope);
-        assert!(history.matches_session(&scope));
-        let mut other_instance = scope.clone();
-        other_instance.instance_id = Some(proto::InstanceId {
-            value: "00000000-0000-4000-8000-000000000003".into(),
-        });
-        assert!(!history.matches_session(&other_instance));
-        let mut other_session = scope;
-        other_session.session_id = Some(proto::SessionId {
-            value: "00000000-0000-4000-8000-000000000004".into(),
-        });
-        assert!(!history.matches_session(&other_session));
     }
 }

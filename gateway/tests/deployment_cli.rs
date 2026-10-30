@@ -206,15 +206,15 @@ fn assert_instance_data(directory: &Path) {
 }
 
 #[test]
-fn diagnostics_are_read_only_and_explicit_selection_wins_over_environment() {
+fn dry_run_and_diagnostics_are_read_only_and_explicit_selection_wins_over_environment() {
     let fixture = Fixture::new();
     let before = snapshot(&fixture.root);
-    for operation in ["show-config", "validate-config"] {
+    {
         let mut command = fixture.command();
         command
             .arg("--runtime-config")
             .arg(&fixture.runtime)
-            .args(["--profile", "app", operation, "--for-init"])
+            .args(["--profile", "app", "init-instance", "--dry-run"])
             .env(
                 "KAGUYA_RUNTIME_CONFIG",
                 fixture.root.join("must not be selected.toml"),
@@ -222,7 +222,16 @@ fn diagnostics_are_read_only_and_explicit_selection_wins_over_environment() {
             .env("KAGUYA_RUNTIME_PROFILE", "must-not-be-selected");
         let output = successful_json(run(command));
         assert_eq!(output["scope"], "deployment-selection");
-        assert_eq!(output["validation_mode"], "initialization");
+        assert_eq!(output["operation"], "init-instance");
+        assert_eq!(output["dry_run"], true);
+        assert!(
+            output["instance_id"].is_null(),
+            "IDs exist only after creation"
+        );
+        assert_eq!(
+            json_path(&output["instances_directory"]),
+            fixture.portable.join("instances")
+        );
         assert_eq!(output["selection"]["profile"], "app");
         assert_eq!(
             json_path(&output["selection"]["runtime_config"]),
@@ -238,7 +247,7 @@ fn diagnostics_are_read_only_and_explicit_selection_wins_over_environment() {
         );
         assert_eq!(output["selection"]["path_mode"], "portable");
         assert!(output["selection"]["manifest"].is_null());
-        assert!(output["instance"].is_null());
+        assert!(output["sources"]["instance.manifest"].is_null());
         assert_eq!(output["sources"]["runtime_config"], "command_line");
         assert_eq!(output["sources"]["profile"], "command_line");
         assert_eq!(
@@ -252,9 +261,10 @@ fn diagnostics_are_read_only_and_explicit_selection_wins_over_environment() {
         assert_eq!(
             snapshot(&fixture.root),
             before,
-            "{operation} must not write files or locks"
+            "a dry run must not write files or locks"
         );
-
+    }
+    for operation in ["show-config", "validate-config"] {
         let missing = fixture.invoke(operation, &[]);
         assert!(
             !missing.status.success(),
@@ -270,7 +280,7 @@ fn diagnostics_are_read_only_and_explicit_selection_wins_over_environment() {
 }
 
 #[test]
-fn init_and_rekey_publish_handoffs_without_rewriting_the_deployment_or_sources() {
+fn init_and_fork_publish_handoffs_without_rewriting_the_deployment_or_sources() {
     let fixture = Fixture::new();
     let source_before = snapshot(&fixture.sources);
     let root_before = fs::read(&fixture.runtime).unwrap();
@@ -304,7 +314,6 @@ fn init_and_rekey_publish_handoffs_without_rewriting_the_deployment_or_sources()
     let data_before = snapshot(&directory);
     for (operation, profile) in [("show-config", "app"), ("validate-config", "direct")] {
         let output = successful_json(fixture.invoke(operation, &["--profile", profile]));
-        assert_eq!(output["validation_mode"], "startup");
         assert_eq!(output["selection"]["profile"], profile);
         assert_eq!(json_path(&output["selection"]["manifest"]), manifest);
         assert_eq!(
@@ -319,29 +328,32 @@ fn init_and_rekey_publish_handoffs_without_rewriting_the_deployment_or_sources()
             "diagnostics must not acquire data locks"
         );
     }
-    let refusal = fixture.invoke("init-instance", &[]);
-    assert!(
-        !refusal.status.success(),
-        "init must refuse an already selected instance"
-    );
+    for extra in [&[][..], &["--dry-run"][..]] {
+        let refusal = fixture.invoke("init-instance", extra);
+        assert!(
+            !refusal.status.success(),
+            "init must refuse an already selected instance"
+        );
+        assert!(String::from_utf8_lossy(&refusal.stderr).contains("already selects an instance"));
+    }
     assert_eq!(snapshot(&directory), data_before);
 
-    let rekeyed = successful_json(fixture.invoke("rekey-instance", &["--profile", "direct"]));
-    assert_eq!(rekeyed["operation"], "rekey-instance");
-    assert_eq!(rekeyed["status"], "created");
-    assert_eq!(rekeyed["selection_changed"], false);
-    assert_ne!(rekeyed["instance_id"], initialized["instance_id"]);
+    let forked = successful_json(fixture.invoke("fork-instance", &["--profile", "direct"]));
+    assert_eq!(forked["operation"], "fork-instance");
+    assert_eq!(forked["status"], "created");
+    assert_eq!(forked["selection_changed"], false);
+    assert_ne!(forked["instance_id"], initialized["instance_id"]);
     assert_ne!(
-        rekeyed["default_session_id"],
+        forked["default_session_id"],
         initialized["default_session_id"]
     );
-    let rekeyed_directory = json_path(&rekeyed["instance_directory"]);
-    assert_ne!(rekeyed_directory, directory);
+    let forked_directory = json_path(&forked["instance_directory"]);
+    assert_ne!(forked_directory, directory);
     assert_eq!(
-        json_path(&rekeyed["manifest"]),
-        rekeyed_directory.join("instance.toml")
+        json_path(&forked["manifest"]),
+        forked_directory.join("instance.toml")
     );
-    assert_instance_data(&rekeyed_directory);
+    assert_instance_data(&forked_directory);
     assert_instance_data(&directory);
     for filename in ["instance.toml", "SOUL.md", "IDENTITY.md", "kaguya.db"] {
         assert_eq!(
@@ -359,23 +371,19 @@ fn init_and_rekey_publish_handoffs_without_rewriting_the_deployment_or_sources()
 }
 
 #[test]
-fn invalid_existing_manifests_fail_even_for_initialization_diagnostics_without_writes() {
+fn missing_or_invalid_manifests_fail_without_writes() {
     let fixture = Fixture::new();
     let directory_id = Uuid::new_v4().to_string();
     let directory = fixture.portable.join("instances").join(&directory_id);
     fixture.select_manifest(Some(&format!("instances/{directory_id}/instance.toml")));
     let missing_before = snapshot(&fixture.root);
     for operation in ["show-config", "validate-config"] {
-        let output = successful_json(fixture.invoke(operation, &["--for-init"]));
-        assert!(output["instance"].is_null());
-        assert_eq!(
-            json_path(&output["selection"]["manifest"]),
-            directory.join("instance.toml")
-        );
         assert!(!fixture.invoke(operation, &[]).status.success());
         assert_eq!(snapshot(&fixture.root), missing_before);
     }
-    assert!(!fixture.invoke("init-instance", &[]).status.success());
+    for extra in [&[][..], &["--dry-run"][..]] {
+        assert!(!fixture.invoke("init-instance", extra).status.success());
+    }
     assert_eq!(snapshot(&fixture.root), missing_before);
     fs::create_dir_all(&directory).unwrap();
     for (schema, declared_id, session_id) in [
@@ -390,7 +398,7 @@ fn invalid_existing_manifests_fail_even_for_initialization_diagnostics_without_w
         .unwrap();
         let before = snapshot(&fixture.root);
         for operation in ["show-config", "validate-config"] {
-            let result = fixture.invoke(operation, &["--for-init"]);
+            let result = fixture.invoke(operation, &[]);
             assert!(
                 !result.status.success(),
                 "{operation} must reject an invalid existing manifest"
@@ -430,7 +438,7 @@ fn failed_endpoint_diagnostics_redact_credentials_and_query_values_without_write
         .unwrap();
         let before = snapshot(&fixture.root);
         for operation in ["show-config", "validate-config"] {
-            let output = fixture.invoke(operation, &["--for-init"]);
+            let output = fixture.invoke(operation, &[]);
             assert!(!output.status.success());
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -452,7 +460,7 @@ fn failed_endpoint_diagnostics_redact_credentials_and_query_values_without_write
 }
 
 #[test]
-fn initialization_diagnostics_reject_removed_or_invalid_settings() {
+fn settings_validation_rejects_removed_or_invalid_settings() {
     let fixture = Fixture::new();
     let settings = fs::read_to_string(&fixture.settings).unwrap();
     for extra in [
@@ -463,19 +471,23 @@ fn initialization_diagnostics_reject_removed_or_invalid_settings() {
     ] {
         fs::write(&fixture.settings, format!("{settings}{extra}")).unwrap();
         let before = snapshot(&fixture.root);
-        let output = fixture.invoke("validate-config", &["--for-init"]);
+        let output = fixture.invoke("init-instance", &["--dry-run"]);
         assert!(!output.status.success(), "must reject {extra}");
         assert_eq!(snapshot(&fixture.root), before);
     }
 }
 
 #[test]
-fn initialization_diagnostics_reject_an_existing_file_as_portable_root_without_writes() {
+fn selection_rejects_an_existing_file_as_portable_root_without_writes() {
     let fixture = Fixture::new();
     fs::write(&fixture.portable, "existing file must be retained\n").unwrap();
     let before = snapshot(&fixture.root);
-    for operation in ["show-config", "validate-config"] {
-        let output = fixture.invoke(operation, &["--for-init"]);
+    for (operation, extra) in [
+        ("show-config", &[][..]),
+        ("validate-config", &[][..]),
+        ("init-instance", &["--dry-run"][..]),
+    ] {
+        let output = fixture.invoke(operation, extra);
         assert!(
             !output.status.success(),
             "{operation} must reject a file as its data root"

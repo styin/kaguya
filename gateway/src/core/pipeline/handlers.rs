@@ -188,7 +188,6 @@ pub fn handle_user_intent(
     state.last_user_generation_id = generation_id.clone();
 
     let ctx = context::assemble_from_data(
-        &state.scope,
         &generation_id,
         text,
         history,
@@ -234,7 +233,6 @@ pub fn handle_tool_result(
 
     let generation_id = Uuid::new_v4().to_string();
     let ctx = context::with_tool_result_from_data(
-        &state.scope,
         &generation_id,
         request_id,
         content,
@@ -277,7 +275,6 @@ pub fn handle_reasoner_step(
 
     let generation_id = Uuid::new_v4().to_string();
     let ctx = context::for_narration_from_data(
-        &state.scope,
         &generation_id,
         task_id,
         description,
@@ -316,7 +313,6 @@ pub fn handle_reasoner_completed(
 
     let generation_id = Uuid::new_v4().to_string();
     let ctx = context::with_reasoner_result_from_data(
-        &state.scope,
         &generation_id,
         task_id,
         summary,
@@ -360,7 +356,6 @@ pub fn handle_reasoner_failed(
         state.current_dispatch_kind = Some(DispatchKind::ReasonerFailure);
         actions.push(PipelineAction::DispatchTalker {
             context: context::with_reasoner_failure_from_data(
-                &state.scope,
                 &Uuid::new_v4().to_string(),
                 failure,
                 history,
@@ -394,7 +389,6 @@ pub fn handle_silence(
 
     let generation_id = Uuid::new_v4().to_string();
     let ctx = context::for_silence_from_data(
-        &state.scope,
         &generation_id,
         duration,
         history,
@@ -419,17 +413,7 @@ mod tests {
     use super::*;
 
     fn fresh_state() -> SessionState {
-        SessionState::new(
-            proto::SessionRef {
-                instance_id: Some(proto::InstanceId {
-                    value: "00000000-0000-4000-8000-000000000001".into(),
-                }),
-                session_id: Some(proto::SessionId {
-                    value: "00000000-0000-4000-8000-000000000002".into(),
-                }),
-            },
-            "# Memory".into(),
-        )
+        SessionState::new("# Memory".into())
     }
 
     // ── TalkerOutput handlers ──────────────────────────────────────

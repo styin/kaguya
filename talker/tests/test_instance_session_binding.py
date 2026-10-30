@@ -284,7 +284,7 @@ async def test_generation_keeps_cached_persona_and_generation_identity(
 
 
 @pytest.mark.asyncio
-async def test_barge_in_ack_and_interrupted_completion_keep_generation_identity(
+async def test_one_barge_in_ack_and_interrupted_completion_keep_generation_identity(
     binding, session_ref
 ):
     speaker = MagicMock()
@@ -294,6 +294,8 @@ async def test_barge_in_ack_and_interrupted_completion_keep_generation_identity(
 
     async def completion(prompt, cancel):
         await cancel.wait()
+        # Leave time for the repeated barge-in to reach the stream first.
+        await asyncio.sleep(0.2)
         yield "unspoken"
 
     talker._llm.stream_completion = completion
@@ -314,9 +316,9 @@ async def test_barge_in_ack_and_interrupted_completion_keep_generation_identity(
                     )
                 )
                 await ready.wait()
-                yield kaguya_pb2.TalkerInput(
-                    barge_in=kaguya_pb2.BargeInSignal(session=session_ref)
-                )
+                # STOP and VAD can both interrupt one generation.
+                yield kaguya_pb2.TalkerInput(barge_in=kaguya_pb2.BargeInSignal())
+                yield kaguya_pb2.TalkerInput(barge_in=kaguya_pb2.BargeInSignal())
 
             call = kaguya_pb2_grpc.TalkerServiceStub(channel).Converse(
                 inputs(), timeout=2
@@ -341,59 +343,6 @@ async def test_barge_in_ack_and_interrupted_completion_keep_generation_identity(
             assert outputs[1].barge_in_ack.spoken_text == "spoken"
             assert outputs[-1].response_complete.was_interrupted
             speaker.stop.assert_called_once()
-    finally:
-        await talker.close()
-        await server.stop(grace=0.5)
-
-
-@pytest.mark.asyncio
-async def test_barge_in_assertion_cannot_stop_another_scope(
-    binding, session_ref, session_ref_factory
-):
-    speaker = MagicMock()
-    talker = TalkerServiceServicer(TalkerConfig(), speaker, binding)
-    ready = asyncio.Event()
-
-    async def blocked_completion(*args):
-        await asyncio.Event().wait()
-        if False:
-            yield ""
-
-    talker._llm.stream_completion = blocked_completion
-    server = grpc.aio.server()
-    kaguya_pb2_grpc.add_TalkerServiceServicer_to_server(talker, server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    await server.start()
-    try:
-        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
-
-            async def inputs():
-                yield kaguya_pb2.TalkerInput(
-                    start=kaguya_pb2.GenerationStart(
-                        session=session_ref,
-                        generation_id="generation-1",
-                        prompt_context=kaguya_pb2.PromptContext(),
-                        user_input=kaguya_pb2.UserInput(text="Hello"),
-                    )
-                )
-                await ready.wait()
-                yield kaguya_pb2.TalkerInput(
-                    barge_in=kaguya_pb2.BargeInSignal(
-                        session=session_ref_factory(session_id=str(uuid.uuid4()))
-                    )
-                )
-
-            call = kaguya_pb2_grpc.TalkerServiceStub(channel).Converse(
-                inputs(), timeout=2
-            )
-            await call.initial_metadata()
-            ready.set()
-            with pytest.raises(grpc.aio.AioRpcError) as error:
-                async for _ in call:
-                    pass
-            assert error.value.code() == grpc.StatusCode.FAILED_PRECONDITION
-            speaker.reset.assert_called_once()
-            speaker.stop.assert_not_called()
     finally:
         await talker.close()
         await server.stop(grace=0.5)

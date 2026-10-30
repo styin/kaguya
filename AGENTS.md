@@ -23,7 +23,7 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 
 ## Architecture Invariants (Do Not Violate)
 
-- Gateway is the only component that touches the filesystem.
+- Gateway is the only component that owns or writes instance data (identity manifest, persona files, RAG database). Launchers (Supervisor, Console) read deployment configuration and may validate the selected instance read-only; Supervisor owns sandbox scratch storage. R1d moves deployment resolution into the launcher.
 - Talker Agent is fully stateless — all context arrives via gRPC from Gateway each turn.
 - Audio bytes never enter protobuf serialization at 50fps. Raw bytes over Unix socket only.
 - Tokens never cross the gRPC boundary — only complete semantic units (sentences, tags).

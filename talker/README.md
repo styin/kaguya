@@ -262,11 +262,11 @@ echo '{"type":"text","content":"hello"}' | websocat -n1 ws://127.0.0.1:8080/ws
   `PrefillRequest` carries `session` and `prompt_context` without inventing a
   generation or trigger. `UpdatePersonaRequest` carries `session` and `persona`.
 - **Stream setup.** Listener accepts a bidi stream beginning with
-  `ListenerInput.init` (`ListenerInit { session }`), followed by typed
-  `ListenerInput.control` messages. The declared reset control currently ends
-  the RPC with `UNIMPLEMENTED`; future pause/reconfiguration variants can extend
-  this boundary. Talker begins with `TalkerInput.start` (`GenerationStart`),
-  followed by inline `BargeInSignal` requests. Gateway queues each initial
+  `ListenerInput.init` (`ListenerInit { session }`). Gateway sends only that and
+  half-closes. Typed `ListenerInput.control` messages stay declared as an
+  extension point; reset currently ends the RPC with `UNIMPLEMENTED`. Talker
+  begins with `TalkerInput.start` (`GenerationStart`), followed by inline
+  `BargeInSignal {}` requests; only the first barge-in is acknowledged. Gateway queues each initial
   message before waiting for headers, and both services validate scope before
   sending them. Listener queue takeover happens only after scope validation.
   Missing, misordered, or repeated initialization is rejected. Half-closing
@@ -318,8 +318,8 @@ sequenceDiagram
     Note over V: LLM SSE → sentence detector + tag extraction → Kokoro TTS
     V-->>G: TalkerOutput(generation_id, sentence/emotion/tool/delegation)
     opt User interrupts
-        G->>V: TalkerInput.barge_in (BargeInSignal: session)
-        Note over V: Validate scope, cancel inference, stop speaker
+        G->>V: TalkerInput.barge_in (BargeInSignal)
+        Note over V: First barge-in only: cancel inference, stop speaker
         V-->>G: TalkerOutput(generation_id, BargeInAck(spoken, unspoken))
     end
     V-->>G: TalkerOutput(generation_id, ResponseComplete)

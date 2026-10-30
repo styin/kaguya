@@ -29,9 +29,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::app::validate_session_ref;
 use crate::config::{SandboxBackendKind, SandboxConfig, SandboxModeKind};
-use crate::proto;
+use crate::session_scope::SessionScope;
 use crate::telemetry::{TelemetryCorrelation, TelemetryHub};
 
 const SANDBOX_CLEANUP_GRACE: Duration = Duration::from_secs(2);
@@ -336,18 +335,14 @@ impl SandboxManager {
 /// Supervisor-facing handle registry around the backend manager.
 ///
 /// Handles are deliberately opaque to the Gateway. This keeps backend/allocation
-/// identity and cleanup authority inside the runtime owner.
+/// identity and cleanup authority inside the runtime owner. The HTTP boundary
+/// checks each request's scope; the provider serves the Supervisor's one scope.
 #[derive(Clone)]
 pub struct SandboxProvider {
     manager: Arc<SandboxManager>,
-    handles: Arc<Mutex<HashMap<String, AllocationRecord>>>,
-    telemetry: Option<TelemetryHub>,
-}
-
-#[derive(Clone)]
-struct AllocationRecord {
-    owner: proto::SessionRef,
-    allocation_id: String,
+    /// Opaque handle → allocation ID.
+    handles: Arc<Mutex<HashMap<String, String>>>,
+    telemetry: Option<(TelemetryHub, SessionScope)>,
 }
 
 impl SandboxProvider {
@@ -359,8 +354,9 @@ impl SandboxProvider {
         }
     }
 
-    pub fn with_telemetry(mut self, telemetry: TelemetryHub) -> Self {
-        self.telemetry = Some(telemetry);
+    /// Emit execution events correlated with the scope this Supervisor serves.
+    pub fn with_telemetry(mut self, telemetry: TelemetryHub, scope: SessionScope) -> Self {
+        self.telemetry = Some((telemetry, scope));
         self
     }
 
@@ -376,31 +372,23 @@ impl SandboxProvider {
         self.manager.prewarm().await;
     }
 
-    pub async fn acquire(
-        &self,
-        owner: &proto::SessionRef,
-        allocation_id: &str,
-    ) -> anyhow::Result<String> {
+    pub async fn acquire(&self, allocation_id: &str) -> anyhow::Result<String> {
         if !self.is_enabled() {
             anyhow::bail!("sandbox provider is disabled");
         }
-        validate_session_ref(Some(owner))?;
         let allocation_uuid = Uuid::parse_str(allocation_id)
             .map_err(|_| anyhow::anyhow!("sandbox allocation_id must be a UUID"))?;
         if allocation_uuid.is_nil() || allocation_uuid.to_string() != allocation_id {
             anyhow::bail!("sandbox allocation_id must be a non-nil canonical UUID");
         }
 
-        if let Some((handle, existing)) = self
+        if let Some((handle, _)) = self
             .handles
             .lock()
             .await
             .iter()
-            .find(|(_, existing)| existing.allocation_id == allocation_id)
+            .find(|(_, existing)| *existing == allocation_id)
         {
-            if existing.owner != *owner {
-                anyhow::bail!("sandbox allocation belongs to a different owner");
-            }
             debug!(%allocation_id, %handle, "reusing sandbox handle");
             return Ok(handle.clone());
         }
@@ -408,23 +396,14 @@ impl SandboxProvider {
         self.manager.acquire(allocation_id).await?;
 
         let mut handles = self.handles.lock().await;
-        if let Some((handle, existing)) = handles
+        if let Some((handle, _)) = handles
             .iter()
-            .find(|(_, existing)| existing.allocation_id == allocation_id)
+            .find(|(_, existing)| *existing == allocation_id)
         {
-            if existing.owner != *owner {
-                anyhow::bail!("sandbox allocation belongs to a different owner");
-            }
             return Ok(handle.clone());
         }
         let handle = Uuid::new_v4().to_string();
-        handles.insert(
-            handle.clone(),
-            AllocationRecord {
-                owner: owner.clone(),
-                allocation_id: allocation_id.to_string(),
-            },
-        );
+        handles.insert(handle.clone(), allocation_id.to_string());
         info!(
             %allocation_id,
             %handle,
@@ -434,82 +413,57 @@ impl SandboxProvider {
         Ok(handle)
     }
 
-    pub async fn execute(
-        &self,
-        owner: &proto::SessionRef,
-        handle: &str,
-        request_id: &str,
-        args_json: &str,
-    ) -> String {
-        let (instance_id, session_id) = match validate_session_ref(Some(owner)) {
-            Ok(pair) => pair,
-            Err(error) => return ExecResult::backend_error(error.to_string()).to_tool_json(),
-        };
+    pub async fn execute(&self, handle: &str, request_id: &str, args_json: &str) -> String {
         if request_id.trim().is_empty() {
             return ExecResult::backend_error("sandbox request_id must not be empty")
                 .to_tool_json();
         }
-        let record = self.handles.lock().await.get(handle).cloned();
-        match record {
-            Some(record) if record.owner == *owner => {
-                let allocation_id = record.allocation_id;
-                debug!(
-                    %allocation_id,
-                    %handle,
-                    backend = self.backend_name(),
-                    "executing sandbox request"
-                );
-                let started = std::time::Instant::now();
-                let content = self.manager.exec_from_json(&allocation_id, args_json).await;
-                if let Some(telemetry) = &self.telemetry {
-                    let result = serde_json::from_str::<serde_json::Value>(&content)
-                        .unwrap_or_else(|_| serde_json::json!({}));
-                    telemetry
-                        .emit_with_correlation(
-                            "supervisor",
-                            "sandbox.exec.completed",
-                            TelemetryCorrelation {
-                                instance_id: Some(instance_id.to_owned()),
-                                session_id: Some(session_id.to_owned()),
-                                allocation_id: Some(allocation_id.clone()),
-                            },
-                            None,
-                            Some(request_id.to_string()),
-                            serde_json::json!({
-                                "instance_id": instance_id,
-                                "session_id": session_id,
-                                "allocation_id": allocation_id,
-                                "handle": handle,
-                                "backend": self.backend_name(),
-                                "duration_ms": started.elapsed().as_millis() as u64,
-                                "exit_code": result.get("exit_code").and_then(|v| v.as_i64()),
-                                "timed_out": result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false),
-                                "truncated": result.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
-                                "stdout_bytes": result.get("stdout").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
-                                "stderr_bytes": result.get("stderr").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
-                                "error": result.get("error").cloned().unwrap_or(serde_json::Value::Null),
-                            }),
-                        )
-                        .await;
-                }
-                content
-            }
-            Some(_) => ExecResult::backend_error("sandbox handle owner mismatch").to_tool_json(),
-            None => ExecResult::backend_error("unknown or released sandbox handle").to_tool_json(),
+        let Some(allocation_id) = self.handles.lock().await.get(handle).cloned() else {
+            return ExecResult::backend_error("unknown or released sandbox handle").to_tool_json();
+        };
+        debug!(
+            %allocation_id,
+            %handle,
+            backend = self.backend_name(),
+            "executing sandbox request"
+        );
+        let started = std::time::Instant::now();
+        let content = self.manager.exec_from_json(&allocation_id, args_json).await;
+        if let Some((telemetry, scope)) = &self.telemetry {
+            let result = serde_json::from_str::<serde_json::Value>(&content)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            telemetry
+                .emit_with_correlation(
+                    "supervisor",
+                    "sandbox.exec.completed",
+                    TelemetryCorrelation {
+                        instance_id: Some(scope.instance_id().to_string()),
+                        session_id: Some(scope.session_id().to_string()),
+                        allocation_id: Some(allocation_id),
+                    },
+                    None,
+                    Some(request_id.to_string()),
+                    serde_json::json!({
+                        "handle": handle,
+                        "backend": self.backend_name(),
+                        "duration_ms": started.elapsed().as_millis() as u64,
+                        "exit_code": result.get("exit_code").and_then(|v| v.as_i64()),
+                        "timed_out": result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false),
+                        "truncated": result.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
+                        "stdout_bytes": result.get("stdout").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
+                        "stderr_bytes": result.get("stderr").and_then(|v| v.as_str()).map(str::len).unwrap_or(0),
+                        "error": result.get("error").cloned().unwrap_or(serde_json::Value::Null),
+                    }),
+                )
+                .await;
         }
+        content
     }
 
-    pub async fn release(&self, owner: &proto::SessionRef, handle: &str) -> anyhow::Result<()> {
-        validate_session_ref(Some(owner))?;
-        let mut handles = self.handles.lock().await;
-        let Some(record) = handles.get(handle) else {
+    pub async fn release(&self, handle: &str) -> anyhow::Result<()> {
+        let Some(allocation_id) = self.handles.lock().await.remove(handle) else {
             anyhow::bail!("unknown or released sandbox handle");
         };
-        if record.owner != *owner {
-            anyhow::bail!("sandbox handle owner mismatch");
-        }
-        let allocation_id = handles.remove(handle).unwrap().allocation_id;
-        drop(handles);
         self.manager.cleanup(&allocation_id).await;
         info!(%allocation_id, %handle, "released sandbox handle");
         Ok(())
@@ -520,7 +474,7 @@ impl SandboxProvider {
             let mut handles = self.handles.lock().await;
             handles
                 .drain()
-                .map(|(_, record)| record.allocation_id)
+                .map(|(_, allocation_id)| allocation_id)
                 .collect::<Vec<_>>()
         };
         for allocation_id in allocations {

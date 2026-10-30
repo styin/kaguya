@@ -7,19 +7,16 @@ use tracing::info;
 use crate::core::types::ControlSignal;
 use crate::proto;
 use crate::proto::router_control_service_server::RouterControlService;
-use crate::proto::SessionRef;
+use crate::session_scope::SessionScope;
 
 pub struct ControlServiceImpl {
     control_tx: mpsc::Sender<ControlSignal>,
-    session: SessionRef,
+    scope: SessionScope,
 }
 
 impl ControlServiceImpl {
-    pub fn new(control_tx: mpsc::Sender<ControlSignal>, session: SessionRef) -> Self {
-        Self {
-            control_tx,
-            session,
-        }
+    pub fn new(control_tx: mpsc::Sender<ControlSignal>, scope: SessionScope) -> Self {
+        Self { control_tx, scope }
     }
 }
 
@@ -30,9 +27,9 @@ impl RouterControlService for ControlServiceImpl {
         request: Request<proto::ControlRequest>,
     ) -> Result<Response<proto::ControlAck>, Status> {
         let request = request.into_inner();
-        crate::instance::validate_session_ref(request.session.as_ref())
+        let scope = SessionScope::from_proto(request.session.as_ref())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        if request.session.as_ref() != Some(&self.session) {
+        if scope != self.scope {
             return Err(Status::failed_precondition(
                 "control request instance/session mismatch",
             ));
@@ -71,8 +68,8 @@ impl RouterControlService for ControlServiceImpl {
 mod tests {
     use super::*;
 
-    fn session() -> SessionRef {
-        SessionRef {
+    fn session() -> proto::SessionRef {
+        proto::SessionRef {
             instance_id: Some(crate::proto::InstanceId {
                 value: uuid::Uuid::new_v4().to_string(),
             }),
@@ -95,7 +92,8 @@ mod tests {
     async fn approval_is_explicitly_unimplemented_without_p0_dispatch() {
         let (tx, mut rx) = mpsc::channel(4);
         let expected = session();
-        let service = ControlServiceImpl::new(tx, expected.clone());
+        let service =
+            ControlServiceImpl::new(tx, SessionScope::from_proto(Some(&expected)).unwrap());
         let approval = |scope| proto::ControlRequest {
             session: Some(scope),
             signal: Some(proto::ControlSignal {
@@ -151,7 +149,8 @@ mod tests {
     async fn rejects_missing_invalid_or_mismatched_scope_before_p0_dispatch() {
         let (tx, mut rx) = mpsc::channel(4);
         let expected = session();
-        let service = ControlServiceImpl::new(tx, expected.clone());
+        let service =
+            ControlServiceImpl::new(tx, SessionScope::from_proto(Some(&expected)).unwrap());
         let mut wrong_instance = expected.clone();
         wrong_instance.instance_id = session().instance_id;
         let mut wrong_session = expected.clone();
