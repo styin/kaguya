@@ -29,8 +29,8 @@ use crate::process::{
     ManagedProcessSnapshot, ManagedProcessStatus,
 };
 use crate::sandbox::{SandboxManager, SandboxProvider};
-use crate::session_scope::SessionScope;
 use crate::telemetry::TelemetryHub;
+use kaguya_protocol::session_scope::SessionScope;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const GATEWAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);

@@ -9,6 +9,7 @@ name = "kaguya-supervisor"
 path = "src/main.rs"
 
 [dependencies]
+kaguya-protocol = { path = "../protocol" }
 anyhow = "1"
 async-trait = "0.1"
 async-stream = "0.3"
@@ -46,6 +47,3 @@ features = [
     "Win32_System_Threading",
 ]
 
-[build-dependencies]
-protoc-bin-vendored = "3.2.0"
-tonic-build = "0.12"

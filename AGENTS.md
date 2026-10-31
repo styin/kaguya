@@ -29,6 +29,7 @@ Project Kaguya is a voice-first AI Chief of Staff. The canonical spec and implem
 - Tokens never cross the gRPC boundary — only complete semantic units (sentences, tags).
 - Gateway does not inspect or decode audio content.
 - P0 control signals bypass the Input Stream entirely.
+- Gateway and Supervisor are separate processes and separate crates; they share only the `kaguya-protocol` wire contract (generated protobuf code and validated scope types) and never depend on each other outside tests.
 
 ## Cross-Platform Support
 
@@ -46,7 +47,7 @@ Kaguya is intended to run across multiple desktop platforms, especially Windows 
 | Talker Agent | Python (asyncio, grpcio)            |
 | Reasoner     | TypeScript (Node.js)                |
 | Toolkit      | TypeScript (Node.js)                |
-| Proto schema | Protobuf; buf lint/format, tonic-build for Rust, grpcio-tools for Python |
+| Proto schema | Protobuf; buf lint/format, tonic-build for Rust (`kaguya-protocol`), grpcio-tools for Python |
 
 ## Workflow
 

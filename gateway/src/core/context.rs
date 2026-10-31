@@ -6,8 +6,8 @@
 
 use crate::core::history::History;
 use crate::core::types::ActiveTask;
-use crate::proto;
 use crate::tools::ToolRegistry;
+use kaguya_protocol::proto;
 
 /// Read the prompt snapshot after post-response history/persona updates.
 /// Pre-fetching it before those executor actions would omit the response

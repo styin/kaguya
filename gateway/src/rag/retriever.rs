@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use tracing::debug;
 
-use crate::proto;
 use crate::rag::embedder::{cosine_similarity, Embedder};
 use crate::rag::ranker::{self, RankedItem};
 use crate::rag::store::RagStore;
 use crate::rag::truncate_chars;
+use kaguya_protocol::proto;
 
 pub struct HybridRetriever {
     store: Arc<RagStore>,

@@ -646,15 +646,16 @@ precedence, path bases, print-only init/fork handoff, the init dry run,
 validation, and redacted diagnostics. Gateway's `instance.rs` owns
 `InstanceIdentity`, `InstanceLease`, and instance-local persona/RAG data; it does
 not construct gRPC requests or audio headers. Gateway and Supervisor each hold
-one validated `SessionScope` (`shared/session_scope.rs`) and convert it to the
+one validated `SessionScope` (`kaguya-protocol`) and convert it to the
 generated `SessionRef` only on the wire. Application assembly derives the scope
 once from the manifest and passes it to the clients that send scoped messages
 (Talker, Listener, Reasoner, sandbox, telemetry) and to the control service
 that checks incoming ones. Internal events, tools, history and `SessionState`
 carry no scope. Supervisor receives its scope at construction, reports it on
 `/api/sandbox/status` for Gateway's fatal startup comparison, and checks the
-scalar ID fields of each sandbox and telemetry HTTP request. The shared
-deployment resolver and Cargo package layout remain unchanged for R1d.
+scalar ID fields of each sandbox and telemetry HTTP request. The Rust
+components form one Cargo workspace (`gateway`, `supervisor`, `protocol`) with a
+single lockfile; the source-shared deployment resolver remains until R1d.
 
 Supervisor and Gateway resolve the selected manifest before runtime assembly.
 The launcher supplies validated IDs to voice; direct voice startup requires

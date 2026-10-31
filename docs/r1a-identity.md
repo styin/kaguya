@@ -93,15 +93,16 @@ to another host and does not identify the physical machine. `IDENTITY.md`,
 `identity_md`, and the voice `IdentityConfig` describe mutable persona identity
 content, not InstanceId. The manifest remains a storage/lifecycle concern.
 
-Each Rust process holds its instance/session pair as one `SessionScope`
-(`shared/session_scope.rs`, included by Gateway and Supervisor like
-`deployment.rs`). It is validated once, where the pair enters the process: from
+Each Rust process holds its instance/session pair as one `SessionScope` from
+the `kaguya-protocol` crate (`protocol/`), which also owns the generated
+protobuf code. It is validated once, where the pair enters the process: from
 the manifest at startup, or from a gRPC `SessionRef` or HTTP request. Inside the
 process the type carries that guarantee, so components do not re-validate or
 compare copies of it. Validation requires canonical, non-nil, distinct UUIDs.
 Clients convert the scope to the generated `SessionRef` only when they write a
-wire message. The existing `shared/deployment.rs` resolver and Cargo package
-layout remain unchanged; broader configuration consolidation remains R1d.
+wire message. The existing `shared/deployment.rs` resolver is still included
+into both crates by source path; R1d moves deployment resolution into the
+launcher.
 
 ## Explicit creation and print-only selection handoff
 

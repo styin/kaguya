@@ -1,8 +1,7 @@
 //! The one instance/session pair a Rust process serves.
 //!
 //! A scope is validated once, where it enters the process (manifest, HTTP, or
-//! gRPC). Inside the process the type carries that guarantee. Each crate that
-//! includes this file defines `crate::proto` from the shared schema.
+//! gRPC). Inside the process the type carries that guarantee.
 
 use anyhow::{bail, Context, Result};
 use uuid::Uuid;

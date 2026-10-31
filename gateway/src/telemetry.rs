@@ -1,4 +1,4 @@
-use crate::session_scope::SessionScope;
+use kaguya_protocol::session_scope::SessionScope;
 
 #[derive(Clone)]
 pub struct TelemetryClient {

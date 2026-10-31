@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use crate::proto;
-use crate::proto::router_control_service_client::RouterControlServiceClient;
-use crate::session_scope::SessionScope;
+use kaguya_protocol::proto;
+use kaguya_protocol::proto::router_control_service_client::RouterControlServiceClient;
+use kaguya_protocol::session_scope::SessionScope;
 
 pub async fn request_gateway_shutdown(
     endpoint: &str,

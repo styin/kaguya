@@ -11,8 +11,8 @@ use tracing::{error, info};
 
 use crate::core::types::InputEvent;
 use crate::lifecycle::TaskSpawner;
-use crate::proto;
 use crate::sandbox::SandboxClient;
+use kaguya_protocol::proto;
 
 struct ToolMeta {
     name: String,
@@ -277,16 +277,7 @@ mod tests {
 
     use super::*;
     use crate::lifecycle::LifecycleSupervisor;
-    use crate::session_scope::SessionScope;
-
-    /// The Supervisor crate compiles its own copy of the shared scope type.
-    fn supervisor_scope(scope: SessionScope) -> kaguya_supervisor::session_scope::SessionScope {
-        kaguya_supervisor::session_scope::SessionScope::parse(
-            &scope.instance_id().to_string(),
-            &scope.session_id().to_string(),
-        )
-        .unwrap()
-    }
+    use kaguya_protocol::session_scope::SessionScope;
 
     fn test_scope() -> SessionScope {
         SessionScope::parse(
@@ -324,7 +315,7 @@ mod tests {
                 },
                 base_dir: ".".into(),
             },
-            supervisor_scope(scope),
+            scope,
         )
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

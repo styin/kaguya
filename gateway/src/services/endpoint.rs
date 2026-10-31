@@ -23,7 +23,7 @@ use tracing::{info, warn};
 use crate::clients::audio_sink::ListenerAudioSink;
 use crate::core::types::*;
 use crate::lifecycle::{LifecycleSnapshot, LifecycleSupervisor};
-use crate::session_scope::SessionScope;
+use kaguya_protocol::session_scope::SessionScope;
 
 const CLOSE_SUPERSEDED: u16 = 4001;
 

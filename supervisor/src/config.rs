@@ -157,7 +157,7 @@ impl RuntimeConfig {
 
     /// Pin child startup scope after read-only manifest validation. These values
     /// override both inherited environment and per-process overrides.
-    pub fn set_instance_session(&mut self, scope: crate::session_scope::SessionScope) {
+    pub fn set_instance_session(&mut self, scope: kaguya_protocol::session_scope::SessionScope) {
         let (instance_id, session_id) = (
             scope.instance_id().to_string(),
             scope.session_id().to_string(),
@@ -842,7 +842,7 @@ mod tests {
             uuid::Uuid::new_v4().to_string(),
         );
         config.set_instance_session(
-            crate::session_scope::SessionScope::parse(&instance_id, &session_id).unwrap(),
+            kaguya_protocol::session_scope::SessionScope::parse(&instance_id, &session_id).unwrap(),
         );
         for process in config.processes.values() {
             let env = process.resolved_env();

@@ -30,8 +30,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::{SandboxBackendKind, SandboxConfig, SandboxModeKind};
-use crate::session_scope::SessionScope;
 use crate::telemetry::{TelemetryCorrelation, TelemetryHub};
+use kaguya_protocol::session_scope::SessionScope;
 
 const SANDBOX_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 

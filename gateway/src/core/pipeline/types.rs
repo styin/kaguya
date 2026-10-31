@@ -7,7 +7,7 @@
 use tokio_util::sync::CancellationToken;
 
 use crate::core::types::DispatchKind;
-use crate::proto;
+use kaguya_protocol::proto;
 
 /// Mutable session state shared between the orchestrator, handlers,
 /// and executor across event loop iterations.

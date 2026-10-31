@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::config::GatewayConfig;
 use crate::deployment::{toml_error, validate_manifest_location, DeploymentSelection};
-use crate::session_scope::SessionScope;
+use kaguya_protocol::session_scope::SessionScope;
 
 const SCHEMA_VERSION: u32 = 1;
 

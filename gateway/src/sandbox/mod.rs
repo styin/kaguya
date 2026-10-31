@@ -7,8 +7,8 @@
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::proto;
-use crate::session_scope::SessionScope;
+use kaguya_protocol::proto;
+use kaguya_protocol::session_scope::SessionScope;
 
 pub struct SandboxClient {
     base_url: String,
@@ -285,15 +285,6 @@ mod tests {
 
     use super::*;
 
-    /// The Supervisor crate compiles its own copy of the shared scope type.
-    fn supervisor_scope(scope: SessionScope) -> kaguya_supervisor::session_scope::SessionScope {
-        kaguya_supervisor::session_scope::SessionScope::parse(
-            &scope.instance_id().to_string(),
-            &scope.session_id().to_string(),
-        )
-        .unwrap()
-    }
-
     fn test_scope() -> SessionScope {
         SessionScope::parse(
             &uuid::Uuid::new_v4().to_string(),
@@ -313,7 +304,7 @@ mod tests {
                 },
                 base_dir: ".".into(),
             },
-            supervisor_scope(scope),
+            scope,
         )
         .unwrap()
     }

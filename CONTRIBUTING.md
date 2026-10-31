@@ -86,14 +86,19 @@ Quality guarantees:
 - Keep module ownership clear and update callers directly when moving a module.
 - Add or update tests for changes to event routing, memory persistence,
   retrieval behavior, path safety, or protocol handling.
-- Regenerate or rebuild Rust proto bindings through `cargo build`; do not edit
+- Regenerate or rebuild Rust proto bindings through `cargo build` (the
+  `kaguya-protocol` crate generates them for the workspace); do not edit
   generated tonic output manually.
+- Keep `kaguya-protocol` limited to the wire contract: generated protobuf code
+  and its validated types. Gateway and Supervisor must not depend on each other
+  outside tests.
 
 Verification:
 
 ```sh
+cargo fmt --all --check
+cargo test -p kaguya-protocol
 cd gateway
-cargo fmt --check
 cargo test --all-targets
 ```
 

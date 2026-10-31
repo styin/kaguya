@@ -330,7 +330,7 @@ mod tests {
 
     use super::*;
     use crate::config::{ResolvedRuntimeConfig, RuntimeConfig, SandboxConfig};
-    use crate::session_scope::SessionScope;
+    use kaguya_protocol::session_scope::SessionScope;
 
     fn test_app() -> SupervisorApp {
         SupervisorApp::new(

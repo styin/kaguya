@@ -1,9 +1,9 @@
+use kaguya_protocol::session_scope::SessionScope;
 use kaguya_supervisor::{
     app::SupervisorApp,
     config::RuntimeConfig,
     deployment::{toml_error, validate_manifest_location, Cli, DeploymentSelection, Operation},
     server,
-    session_scope::SessionScope,
 };
 
 #[derive(serde::Deserialize)]

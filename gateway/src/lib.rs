@@ -29,8 +29,6 @@ pub mod instance;
 pub mod lifecycle;
 pub mod rag;
 pub mod sandbox;
-#[path = "../../shared/session_scope.rs"]
-pub mod session_scope;
 pub mod telemetry;
 pub mod tools;
 
@@ -61,8 +59,4 @@ pub mod services {
     pub mod control;
     #[cfg(feature = "dev-console")]
     pub mod endpoint;
-}
-
-pub mod proto {
-    tonic::include_proto!("kaguya.v1");
 }

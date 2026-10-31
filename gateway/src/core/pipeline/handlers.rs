@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::core::context;
 use crate::core::types::{ActiveTask, DispatchKind};
-use crate::proto;
+use kaguya_protocol::proto;
 
 use super::types::{PipelineAction, SessionState};
 

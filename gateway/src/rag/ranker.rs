@@ -1,7 +1,7 @@
 //! Reciprocal Rank Fusion (RRF) — merges rankings from multiple retrieval sources.
 //! The denominator offset is supplied by Gateway configuration.
 
-use crate::proto;
+use kaguya_protocol::proto;
 use std::collections::HashMap;
 
 pub struct RankedItem {

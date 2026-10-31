@@ -26,9 +26,9 @@ use tracing::{debug, info, warn};
 
 use crate::core::types::InputEvent;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
-use crate::proto;
-use crate::proto::listener_service_client::ListenerServiceClient;
-use crate::session_scope::SessionScope;
+use kaguya_protocol::proto;
+use kaguya_protocol::proto::listener_service_client::ListenerServiceClient;
+use kaguya_protocol::session_scope::SessionScope;
 
 /// Single-use gRPC + audio client for one Listener connection lifecycle.
 ///
@@ -492,7 +492,7 @@ mod tests {
     // ── Recovery loop integration tests ──
 
     use crate::clients::audio_sink::ListenerAudioSink;
-    use crate::proto::listener_service_server::{
+    use kaguya_protocol::proto::listener_service_server::{
         ListenerService as ListenerServiceTrait, ListenerServiceServer,
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};

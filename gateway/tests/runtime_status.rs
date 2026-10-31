@@ -8,7 +8,7 @@ use std::time::Duration;
 use kaguya_gateway::clients::audio_sink::ListenerAudioSink;
 use kaguya_gateway::lifecycle::{LifecycleSupervisor, Readiness};
 use kaguya_gateway::services::endpoint::{self, EndpointState, RuntimeStatusState};
-use kaguya_gateway::session_scope::SessionScope;
+use kaguya_protocol::session_scope::SessionScope;
 use kaguya_supervisor::app::SupervisorApp;
 use kaguya_supervisor::config::{ResolvedRuntimeConfig, RuntimeConfig};
 use kaguya_supervisor::server;
@@ -66,17 +66,12 @@ async fn supervisor_exposes_gateway_snapshot_and_capability_children() {
     "#
     ))
     .unwrap();
-    let supervisor_scope = kaguya_supervisor::session_scope::SessionScope::parse(
-        &scope.instance_id().to_string(),
-        &scope.session_id().to_string(),
-    )
-    .unwrap();
     let app = SupervisorApp::new(
         ResolvedRuntimeConfig {
             config,
             base_dir: ".".into(),
         },
-        supervisor_scope,
+        scope,
     )
     .unwrap();
     let supervisor_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

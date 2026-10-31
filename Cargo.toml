@@ -1,0 +1,3 @@
+[workspace]
+members = ["gateway", "supervisor", "protocol"]
+resolver = "2"

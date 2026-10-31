@@ -18,8 +18,8 @@ use crate::core::output::OutputManager;
 use crate::core::persona::Persona;
 use crate::core::silence::SilenceTimers;
 use crate::core::types::InputEvent;
-use crate::proto;
 use crate::tools::ToolRegistry;
+use kaguya_protocol::proto;
 
 use super::types::{PipelineAction, SessionState};
 

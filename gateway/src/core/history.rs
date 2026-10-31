@@ -2,7 +2,7 @@
 //!
 //! In-memory storage of recent conversation turns, including user inputs, assistant responses, and tool results.
 
-use crate::proto;
+use kaguya_protocol::proto;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

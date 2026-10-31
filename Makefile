@@ -16,16 +16,16 @@ proto-py:
 	cd talker && $(TALKER_PYTHON) scripts/gen_proto.py
 
 # ── Proto (Rust) ──
-# Each Rust crate regenerates its bindings through tonic-build.
+# kaguya-protocol generates the Rust bindings once through tonic-build.
 proto-rs:
-	cd gateway && cargo build
-	cd supervisor && cargo build
+	cargo build -p kaguya-protocol
 
 # ── Both ──
 proto: proto-py proto-rs
 
 # ── Tests ──
 test:
+	cargo test -p kaguya-protocol
 	cd gateway  && cargo test
 	cd gateway  && cargo test --features dev-console
 	cd supervisor && cargo test
@@ -36,10 +36,8 @@ test:
 # Build/type checks, formatting, Ruff and protobuf lint. Install the listed tools
 # before running; a missing tool fails the target.
 lint:
-	cd gateway && cargo build
-	cd gateway && cargo fmt --check
-	cd supervisor && cargo build
-	cd supervisor && cargo fmt --check
+	cargo build --workspace
+	cargo fmt --all --check
 	cd talker  && uv run ruff check .
 	cd talker  && uv run ruff format --check .
 	cd console && npm run build
@@ -51,8 +49,7 @@ lint:
 # (cargo fmt --check, ruff format --check, buf format --diff) — see lint
 # semantics. This target is for local "fix it" runs.
 format:
-	cd gateway && cargo fmt
-	cd supervisor && cargo fmt
+	cargo fmt --all
 	cd talker  && uv run ruff format .
 	buf format -w $(PROTO_DIR)
 
@@ -71,8 +68,7 @@ sandbox-clean:
 
 # ── Clean ──
 clean:
-	cd gateway && cargo clean
-	cd supervisor && cargo clean
+	cargo clean
 	$(PYTHON) scripts/maintenance.py clean
 
 .PHONY: proto proto-py proto-rs test lint format clean sandbox-image sandbox-clean

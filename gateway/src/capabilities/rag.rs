@@ -5,7 +5,7 @@
 //! [`RagEngine`](crate::rag::RagEngine) (SQLite + BM25 + optional vector).
 
 use crate::lifecycle::Readiness;
-use crate::proto;
+use kaguya_protocol::proto;
 
 /// Retrieval-augmented generation — memory retrieval, storage, and export.
 ///

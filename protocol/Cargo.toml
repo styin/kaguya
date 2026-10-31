@@ -1,0 +1,19 @@
+[package]
+name = "kaguya-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+# The Rust form of the shared wire contract: generated protobuf code and the
+# validated instance/session scope. Wire-contract types and their validation
+# only; no configuration, helpers, or domain logic.
+
+[dependencies]
+anyhow = "1"
+prost = "0.13"
+tonic = "0.12"
+uuid = "1"
+
+[build-dependencies]
+protoc-bin-vendored = "3.2.0"
+tonic-build = "0.12"

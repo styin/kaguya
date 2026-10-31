@@ -5,9 +5,9 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use crate::core::types::ControlSignal;
-use crate::proto;
-use crate::proto::router_control_service_server::RouterControlService;
-use crate::session_scope::SessionScope;
+use kaguya_protocol::proto;
+use kaguya_protocol::proto::router_control_service_server::RouterControlService;
+use kaguya_protocol::session_scope::SessionScope;
 
 pub struct ControlServiceImpl {
     control_tx: mpsc::Sender<ControlSignal>,
@@ -70,10 +70,10 @@ mod tests {
 
     fn session() -> proto::SessionRef {
         proto::SessionRef {
-            instance_id: Some(crate::proto::InstanceId {
+            instance_id: Some(kaguya_protocol::proto::InstanceId {
                 value: uuid::Uuid::new_v4().to_string(),
             }),
-            session_id: Some(crate::proto::SessionId {
+            session_id: Some(kaguya_protocol::proto::SessionId {
                 value: uuid::Uuid::new_v4().to_string(),
             }),
         }

@@ -10,9 +10,9 @@ use tracing::{error, info, warn};
 
 use crate::core::types::*;
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
-use crate::proto;
-use crate::proto::reasoner_service_client::ReasonerServiceClient;
-use crate::session_scope::SessionScope;
+use kaguya_protocol::proto;
+use kaguya_protocol::proto::reasoner_service_client::ReasonerServiceClient;
+use kaguya_protocol::session_scope::SessionScope;
 
 struct Agent {
     task_id: String,
@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[tonic::async_trait]
-    impl crate::proto::reasoner_service_server::ReasonerService for RecordingReasoner {
+    impl kaguya_protocol::proto::reasoner_service_server::ReasonerService for RecordingReasoner {
         type DelegateStream = ReceiverStream<Result<proto::DelegateOutput, tonic::Status>>;
         type TelemetryStream = ReceiverStream<Result<proto::TelemetryEvent, tonic::Status>>;
 
@@ -488,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn delegation_and_cancellation_use_explicit_scope_and_preserve_callback_origin() {
-        use crate::proto::reasoner_service_server::ReasonerServiceServer;
+        use kaguya_protocol::proto::reasoner_service_server::ReasonerServiceServer;
         use tokio_stream::wrappers::TcpListenerStream;
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
@@ -543,7 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_or_incomplete_reasoner_streams_report_failure() {
-        use crate::proto::reasoner_service_server::ReasonerServiceServer;
+        use kaguya_protocol::proto::reasoner_service_server::ReasonerServiceServer;
         use tokio_stream::wrappers::TcpListenerStream;
 
         for (response_task_id, cancel_open) in [

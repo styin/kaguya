@@ -17,10 +17,10 @@ use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
 use crate::lifecycle::{ManagedConnectionHandle, Readiness, ReconnectPolicy, TaskSpawner};
-use crate::proto;
-use crate::proto::talker_service_client::TalkerServiceClient;
-use crate::session_scope::SessionScope;
 use crate::telemetry::TelemetryClient;
+use kaguya_protocol::proto;
+use kaguya_protocol::proto::talker_service_client::TalkerServiceClient;
+use kaguya_protocol::session_scope::SessionScope;
 
 fn trigger_name(trigger: Option<&proto::generation_start::Trigger>) -> &'static str {
     match trigger {
@@ -520,7 +520,7 @@ mod tests {
 
     // ── Recovery loop integration tests ──
 
-    use crate::proto::talker_service_server::{
+    use kaguya_protocol::proto::talker_service_server::{
         TalkerService as TalkerServiceTrait, TalkerServiceServer,
     };
     use tokio_stream::wrappers::TcpListenerStream;

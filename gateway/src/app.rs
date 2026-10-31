@@ -24,7 +24,6 @@ use crate::core::silence::SilenceTimers;
 use crate::core::types::{ControlSignal, MetadataEvent};
 use crate::instance;
 use crate::lifecycle::{LifecycleSupervisor, Readiness};
-use crate::proto;
 use crate::rag::RagEngine;
 use crate::sandbox::SandboxClient;
 use crate::services::control::ControlServiceImpl;
@@ -32,6 +31,7 @@ use crate::services::control::ControlServiceImpl;
 use crate::services::endpoint;
 use crate::telemetry::TelemetryClient;
 use crate::tools::ToolRegistry;
+use kaguya_protocol::proto;
 
 pub async fn run(
     selection: crate::deployment::DeploymentSelection,

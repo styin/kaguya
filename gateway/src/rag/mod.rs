@@ -12,8 +12,8 @@ use tracing::info;
 use crate::capabilities::RagCapability;
 use crate::config::RagConfig;
 use crate::lifecycle::Readiness;
-use crate::proto;
 use embedder::Embedder;
+use kaguya_protocol::proto;
 use retriever::HybridRetriever;
 use store::{MemoryEntry, MemoryType, RagStore};
 

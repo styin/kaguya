@@ -10,8 +10,8 @@ use crate::core::input_stream::InputReceivers;
 use crate::core::narration::NarrationFilter;
 use crate::core::types::{ControlSignal, InputEvent};
 use crate::lifecycle::{LifecycleSupervisor, ShutdownReason};
-use crate::proto;
 use crate::telemetry::TelemetryClient;
+use kaguya_protocol::proto;
 
 use super::{handlers, PipelineComponents, SessionState};
 
